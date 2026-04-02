@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.env
+.env.*
+
+*.sqlite3
+
+.venv/
+venv/
+env/
+
+.idea/
+.vscode/
+
+# Django static/media (keep if you use them; otherwise ignore)
+staticfiles/
+media/
