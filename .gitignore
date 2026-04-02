@@ -18,3 +18,8 @@ env/
 # Django static/media (keep if you use them; otherwise ignore)
 staticfiles/
 media/
+Redis-x64-3.0.504/
+Redis-x64-3.0.504
+
+celerybeat-schedule*
+celerybeat-schedule
