@@ -112,3 +112,19 @@ EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True') == 'True'
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'yasminp32@gmail.com')
 FRONTEND_RESET_URL = os.getenv('FRONTEND_RESET_URL', 'aonegt://reset-password')
 
+# --- Zoho: registration gate ---
+# When True, /api/auth/register/ only succeeds if the email exists in Zoho (see REGISTER_ZOHO_EMAIL_SOURCE).
+# Set REGISTER_REQUIRE_ZOHO_CONTACT=false in .env for local dev without Zoho.
+REGISTER_REQUIRE_ZOHO_CONTACT = os.getenv(
+    'REGISTER_REQUIRE_ZOHO_CONTACT', 'True',
+).strip().lower() in ('true', '1', 'yes')
+# inventory = Zoho Inventory contacts (recommended). commerce_salesorders = Zoho Commerce sales orders search by email (needs past orders).
+REGISTER_ZOHO_EMAIL_SOURCE = os.getenv(
+    'REGISTER_ZOHO_EMAIL_SOURCE', 'inventory',
+).strip().lower()
+# Same token as Commerce product sync; add scopes in Zoho API Console as needed.
+ZOHO_API_BASE_HOST = os.getenv('ZOHO_API_BASE_HOST', 'https://www.zohoapis.com').rstrip('/')
+ZOHO_INVENTORY_ORGANIZATION_ID = os.getenv('ZOHO_INVENTORY_ORGANIZATION_ID', '').strip()
+# Commerce store org id (header X-com-zoho-store-organizationid) — used when REGISTER_ZOHO_EMAIL_SOURCE=commerce_salesorders
+ZOHO_COMMERCE_ORGANIZATION_ID = os.getenv('ZOHO_COMMERCE_ORGANIZATION_ID', '').strip()
+
