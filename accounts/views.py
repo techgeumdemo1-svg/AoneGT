@@ -13,6 +13,11 @@ from .serializers import (
     ResetPasswordSerializer,
     UserProfileSerializer,
 )
+from .services.zoho_registration_gate import (
+    ZohoContactCheckError,
+    registration_email_check_configured,
+    registration_email_exists_in_zoho,
+)
 
 
 class RegisterAPIView(APIView):
@@ -40,6 +45,67 @@ class CheckEmailAPIView(APIView):
                 'email': email,
                 'exists': exists,
                 'message': 'Email found. Continue to password screen.' if exists else 'Email not registered.'
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class CheckZohoContactAPIView(APIView):
+    """
+    Optional UX step: check if email exists as a Zoho Inventory customer contact.
+    When REGISTER_REQUIRE_ZOHO_CONTACT is False, returns exists_in_zoho: null.
+    """
+
+    def post(self, request):
+        serializer = EmailCheckSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data['email']
+
+        if not getattr(settings, 'REGISTER_REQUIRE_ZOHO_CONTACT', False):
+            return Response(
+                {
+                    'email': email,
+                    'zoho_check_required': False,
+                    'exists_in_zoho': None,
+                    'message': 'Zoho contact check is disabled (REGISTER_REQUIRE_ZOHO_CONTACT).',
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        if not registration_email_check_configured():
+            return Response(
+                {
+                    'detail': 'Zoho is not configured for registration checks. Set '
+                    'ZOHO_ACCESS_TOKEN and the organization id for your '
+                    'REGISTER_ZOHO_EMAIL_SOURCE.',
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        try:
+            exists = registration_email_exists_in_zoho(email)
+        except ZohoContactCheckError as e:
+            return Response(
+                {'detail': str(e)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        src = getattr(settings, 'REGISTER_ZOHO_EMAIL_SOURCE', 'inventory')
+        return Response(
+            {
+                'email': email,
+                'zoho_check_required': True,
+                'source': src,
+                'exists_in_zoho': exists,
+                'message': (
+                    'Email matches Zoho records. You can register.'
+                    if exists
+                    else (
+                        'No matching Commerce sales orders for this email.'
+                        if src == 'commerce_salesorders'
+                        else 'Email not found in Zoho Inventory contacts.'
+                    )
+                ),
             },
             status=status.HTTP_200_OK,
         )
