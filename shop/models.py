@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.db import models
+from django.db.models import Sum
 
 from catalog.models import Product, Store
 
@@ -94,9 +95,67 @@ class OrderItem(models.Model):
     unit_price = models.DecimalField(max_digits=12, decimal_places=2)
     quantity = models.PositiveIntegerField()
     line_total = models.DecimalField(max_digits=12, decimal_places=2)
+    zoho_line_item_id = models.CharField(
+        max_length=120,
+        blank=True,
+        help_text='Zoho sales order line id when synced (for sales returns API).',
+    )
 
     class Meta:
         ordering = ['id']
 
     def __str__(self):
         return self.product_name
+
+    def quantity_in_active_returns(self) -> int:
+        agg = self.return_lines.filter(
+            order_return__status__in=(
+                'pending_zoho',
+                'synced',
+                'completed',
+            ),
+        ).aggregate(s=Sum('quantity'))
+        return int(agg['s'] or 0)
+
+
+class OrderReturn(models.Model):
+    class Status(models.TextChoices):
+        PENDING_ZOHO = 'pending_zoho', 'Pending Zoho sync'
+        SYNCED = 'synced', 'Synced to Zoho'
+        COMPLETED = 'completed', 'Completed'
+        REJECTED = 'rejected', 'Rejected'
+        FAILED = 'failed', 'Zoho sync failed'
+
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='returns')
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='order_returns',
+    )
+    status = models.CharField(
+        max_length=32,
+        choices=Status.choices,
+        default=Status.PENDING_ZOHO,
+    )
+    zoho_salesreturn_id = models.CharField(max_length=120, blank=True)
+    note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'Return {self.pk} (order {self.order_id})'
+
+
+class OrderReturnLine(models.Model):
+    order_return = models.ForeignKey(OrderReturn, on_delete=models.CASCADE, related_name='lines')
+    order_item = models.ForeignKey(OrderItem, on_delete=models.CASCADE, related_name='return_lines')
+    quantity = models.PositiveIntegerField()
+
+    class Meta:
+        ordering = ['id']
+
+    def __str__(self):
+        return f'{self.quantity}× item {self.order_item_id}'

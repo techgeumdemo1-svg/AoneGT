@@ -44,7 +44,7 @@ class CheckEmailAPIView(APIView):
             {
                 'email': email,
                 'exists': exists,
-                'message': 'Email found. Continue to password screen.' if exists else 'Email not registered.'
+                'message': 'Use this result to continue sign-in or registration.',
             },
             status=status.HTTP_200_OK,
         )
@@ -124,30 +124,27 @@ class ForgotPasswordAPIView(APIView):
         serializer.is_valid(raise_exception=True)
         email = serializer.validated_data['email']
 
-        try:
-            user = User.objects.get(email__iexact=email)
-        except User.DoesNotExist:
-            return Response(
-                {'detail': 'No account found with this email.'},
-                status=status.HTTP_404_NOT_FOUND,
+        user = User.objects.filter(email__iexact=email).first()
+        if user:
+            otp = PasswordResetOTP.objects.create(user=user)
+            subject = 'AoneGt Password Reset OTP'
+            message = (
+                f'Hello {user.first_name},\n\n'
+                f'Your OTP for password reset is: {otp.otp_code}\n'
+                f'This OTP will expire in 10 minutes.\n\n'
+                f'Reset URL: {settings.FRONTEND_RESET_URL}\n\n'
+                f'If you did not request this, please ignore this email.'
             )
-
-        otp = PasswordResetOTP.objects.create(user=user)
-
-        subject = 'AoneGt Password Reset OTP'
-        message = (
-            f'Hello {user.first_name},\n\n'
-            f'Your OTP for password reset is: {otp.otp_code}\n'
-            f'This OTP will expire in 10 minutes.\n\n'
-            f'Reset URL: {settings.FRONTEND_RESET_URL}\n\n'
-            f'If you did not request this, please ignore this email.'
-        )
-        send_mail(subject, message, settings.DEFAULT_FROM_EMAIL, [user.email], fail_silently=False)
+            send_mail(
+                subject, message, settings.DEFAULT_FROM_EMAIL, [user.email], fail_silently=False,
+            )
 
         return Response(
             {
-                'message': 'Password reset OTP sent to email.',
-                'email': user.email,
+                'message': (
+                    'If an account exists for this email, a password reset code has been sent.'
+                ),
+                'email': email,
             },
             status=status.HTTP_200_OK,
         )
@@ -161,16 +158,17 @@ class ResetPasswordAPIView(APIView):
         otp_code = serializer.validated_data['otp']
         new_password = serializer.validated_data['new_password']
 
-        try:
-            user = User.objects.get(email__iexact=email)
-        except User.DoesNotExist:
-            return Response({'detail': 'Invalid email.'}, status=status.HTTP_404_NOT_FOUND)
-
-        otp = PasswordResetOTP.objects.filter(user=user, otp_code=otp_code, is_used=False).first()
-        if not otp:
-            return Response({'detail': 'Invalid OTP.'}, status=status.HTTP_400_BAD_REQUEST)
-        if otp.is_expired:
-            return Response({'detail': 'OTP expired.'}, status=status.HTTP_400_BAD_REQUEST)
+        user = User.objects.filter(email__iexact=email).first()
+        otp = None
+        if user:
+            otp = PasswordResetOTP.objects.filter(
+                user=user, otp_code=otp_code, is_used=False,
+            ).first()
+        if not user or not otp or otp.is_expired:
+            return Response(
+                {'detail': 'Invalid or expired reset request.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         user.set_password(new_password)
         user.save(update_fields=['password'])

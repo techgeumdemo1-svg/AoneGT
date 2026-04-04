@@ -11,7 +11,7 @@ from .services.zoho_registration_gate import (
 
 
 class RegisterSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True, min_length=6)
+    password = serializers.CharField(write_only=True, min_length=8)
 
     class Meta:
         model = User
@@ -105,8 +105,8 @@ class ForgotPasswordRequestSerializer(serializers.Serializer):
 class ResetPasswordSerializer(serializers.Serializer):
     email = serializers.EmailField()
     otp = serializers.CharField(max_length=6)
-    new_password = serializers.CharField(write_only=True, min_length=6)
-    confirm_password = serializers.CharField(write_only=True, min_length=6)
+    new_password = serializers.CharField(write_only=True, min_length=8)
+    confirm_password = serializers.CharField(write_only=True, min_length=8)
 
     def validate(self, attrs):
         if attrs['new_password'] != attrs['confirm_password']:

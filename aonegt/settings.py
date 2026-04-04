@@ -1,15 +1,18 @@
 from pathlib import Path
 import os
 from datetime import timedelta
+from decimal import Decimal
+
 from dotenv import load_dotenv
-import os
 
 load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'change-me-in-production')
+SECRET_KEY = os.getenv('DJANGO_SECRET_KEY') or 'change-me-set-DJANGO_SECRET_KEY-in-env'
 DEBUG = os.getenv('DEBUG', 'True') == 'True'
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',')
+ALLOWED_HOSTS = [
+    h.strip() for h in os.getenv('ALLOWED_HOSTS', '127.0.0.1,localhost').split(',') if h.strip()
+]
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -63,7 +66,7 @@ DATABASES = {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': os.getenv('DB_NAME', 'aonegt_db'),
         'USER': os.getenv('DB_USER', 'postgres'),
-        'PASSWORD': os.getenv('DB_PASSWORD', '4921'),
+        'PASSWORD': os.getenv('DB_PASSWORD', ''),
         'HOST': os.getenv('DB_HOST', 'localhost'),
         'PORT': os.getenv('DB_PORT', '5432'),
     }
@@ -71,7 +74,10 @@ DATABASES = {
 
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
-    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},
+    {
+        'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
+        'OPTIONS': {'min_length': 8},
+    },
     {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
     {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
 ]
@@ -96,35 +102,46 @@ REST_FRAMEWORK = {
 }
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
-CORS_ALLOW_ALL_ORIGINS = True
+if DEBUG:
+    CORS_ALLOW_ALL_ORIGINS = True
+else:
+    CORS_ALLOW_ALL_ORIGINS = False
+    _cors_origins = os.getenv('CORS_ALLOWED_ORIGINS', '').strip()
+    CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_origins.split(',') if o.strip()]
 
-EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
-EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_BACKEND = os.getenv(
+    'EMAIL_BACKEND',
+    'django.core.mail.backends.console.EmailBackend',
+)
+EMAIL_HOST = os.getenv('EMAIL_HOST', '')
 EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
-EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', 'yasminp32@gmail.com')
-EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', 'vaxwjwwfvoapbzxh')
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
 EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True') == 'True'
-DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'yasminp32@gmail.com')
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'webmaster@localhost')
 FRONTEND_RESET_URL = os.getenv('FRONTEND_RESET_URL', 'aonegt://reset-password')
 
+# --- Checkout: do not trust client shipping by default (set true only for dev / custom quotes). ---
+CHECKOUT_TRUST_CLIENT_SHIPPING = os.getenv(
+    'CHECKOUT_TRUST_CLIENT_SHIPPING', 'False',
+).strip().lower() in ('true', '1', 'yes')
+try:
+    DEFAULT_SHIPPING_AMOUNT = Decimal(os.getenv('DEFAULT_SHIPPING_AMOUNT', '0'))
+except Exception:
+    DEFAULT_SHIPPING_AMOUNT = Decimal('0')
+
 # --- Zoho: registration gate ---
-# When True, /api/auth/register/ only succeeds if the email exists in Zoho (see REGISTER_ZOHO_EMAIL_SOURCE).
-# Default False so local dev works without Zoho; set REGISTER_REQUIRE_ZOHO_CONTACT=true in .env for production.
 REGISTER_REQUIRE_ZOHO_CONTACT = os.getenv(
     'REGISTER_REQUIRE_ZOHO_CONTACT', 'False',
 ).strip().lower() in ('true', '1', 'yes')
-# inventory = Zoho Inventory contacts (recommended). commerce_salesorders = Zoho Commerce sales orders search by email (needs past orders).
 REGISTER_ZOHO_EMAIL_SOURCE = os.getenv(
     'REGISTER_ZOHO_EMAIL_SOURCE', 'inventory',
 ).strip().lower()
-# Same token as Commerce product sync; add scopes in Zoho API Console as needed.
 ZOHO_API_BASE_HOST = os.getenv('ZOHO_API_BASE_HOST', 'https://www.zohoapis.com').rstrip('/')
 ZOHO_INVENTORY_ORGANIZATION_ID = os.getenv('ZOHO_INVENTORY_ORGANIZATION_ID', '').strip()
-# Commerce store org id (header X-com-zoho-store-organizationid) — used when REGISTER_ZOHO_EMAIL_SOURCE=commerce_salesorders
 ZOHO_COMMERCE_ORGANIZATION_ID = os.getenv('ZOHO_COMMERCE_ORGANIZATION_ID', '').strip()
-

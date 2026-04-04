@@ -1,12 +1,14 @@
 from decimal import Decimal
 
+from django.conf import settings
 from django.db import transaction
+from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Cart, CartItem, Order, OrderItem
+from .models import Cart, CartItem, Order, OrderItem, OrderReturn
 from .serializers import (
     CartSerializer,
     CartAddItemSerializer,
@@ -14,7 +16,10 @@ from .serializers import (
     CartItemUpdateSerializer,
     CheckoutSerializer,
     OrderSerializer,
+    OrderReturnCreateSerializer,
+    OrderReturnReadSerializer,
 )
+from .services.zoho_returns import enqueue_push_return_to_zoho
 
 
 class CartDetailAPIView(APIView):
@@ -98,12 +103,15 @@ class CheckoutAPIView(APIView):
         ser.is_valid(raise_exception=True)
         cart = ser.validated_data['cart']
         store = ser.validated_data['store']
-        shipping_amount = ser.validated_data.get('shipping_amount') or Decimal('0')
+        if getattr(settings, 'CHECKOUT_TRUST_CLIENT_SHIPPING', False):
+            shipping_amount = ser.validated_data.get('shipping_amount') or Decimal('0')
+            shipping_amount = Decimal(shipping_amount).quantize(Decimal('0.01'))
+        else:
+            shipping_amount = Decimal(settings.DEFAULT_SHIPPING_AMOUNT).quantize(Decimal('0.01'))
 
         items = list(cart.items.select_related('product').all())
         subtotal = sum((it.line_subtotal for it in items), Decimal('0'))
         subtotal = subtotal.quantize(Decimal('0.01'))
-        shipping_amount = Decimal(shipping_amount).quantize(Decimal('0.01'))
         total = (subtotal + shipping_amount).quantize(Decimal('0.01'))
 
         billing_same = ser.validated_data['billing_same_as_shipping']
@@ -156,7 +164,9 @@ class CheckoutAPIView(APIView):
                 )
             cart.delete()
 
-        order = Order.objects.prefetch_related('items').get(pk=order.pk)
+        order = Order.objects.prefetch_related(
+            'items', 'returns__lines__order_item',
+        ).get(pk=order.pk)
         return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
 
 
@@ -168,7 +178,7 @@ class OrderListAPIView(generics.ListAPIView):
         return (
             Order.objects.filter(user=self.request.user)
             .select_related('store')
-            .prefetch_related('items')
+            .prefetch_related('items', 'returns__lines__order_item')
         )
 
 
@@ -180,5 +190,54 @@ class OrderDetailAPIView(generics.RetrieveAPIView):
         return (
             Order.objects.filter(user=self.request.user)
             .select_related('store')
-            .prefetch_related('items')
+            .prefetch_related('items', 'returns__lines__order_item')
+        )
+
+
+class OrderReturnListCreateAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        order = get_object_or_404(Order, pk=pk, user=request.user)
+        qs = order.returns.prefetch_related('lines').order_by('-created_at')
+        return Response(OrderReturnReadSerializer(qs, many=True).data)
+
+    def post(self, request, pk):
+        order = get_object_or_404(Order, pk=pk, user=request.user)
+        ser = OrderReturnCreateSerializer(
+            data=request.data,
+            context={'order': order, 'request': request},
+        )
+        ser.is_valid(raise_exception=True)
+        ret = ser.save()
+        enqueue_push_return_to_zoho(ret.pk)
+        ret = OrderReturn.objects.prefetch_related('lines').get(pk=ret.pk)
+        return Response(OrderReturnReadSerializer(ret).data, status=status.HTTP_201_CREATED)
+
+
+class OrderReorderAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        order = get_object_or_404(Order, pk=pk, user=request.user)
+        with transaction.atomic():
+            cart, _ = Cart.objects.select_for_update().get_or_create(
+                user=request.user,
+                store=order.store,
+            )
+            for oi in order.items.select_related('product'):
+                p = oi.product
+                if not p or not p.is_active:
+                    continue
+                item, created = CartItem.objects.select_for_update().get_or_create(
+                    cart=cart,
+                    product=p,
+                    defaults={'quantity': oi.quantity},
+                )
+                if not created:
+                    item.quantity += oi.quantity
+                    item.save(update_fields=['quantity'])
+        return Response(
+            {'detail': 'Items merged into your cart for this store.', 'store_id': order.store_id},
+            status=status.HTTP_200_OK,
         )

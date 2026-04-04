@@ -1,11 +1,12 @@
 from decimal import Decimal
 
+from django.db import transaction
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers
 
 from catalog.models import Product, Store
 
-from .models import Cart, CartItem, Order, OrderItem
+from .models import Cart, CartItem, Order, OrderItem, OrderReturn, OrderReturnLine
 
 
 class ProductMiniSerializer(serializers.ModelSerializer):
@@ -73,12 +74,24 @@ class OrderItemSerializer(serializers.ModelSerializer):
         model = OrderItem
         fields = (
             'id', 'product', 'product_name', 'sku',
-            'unit_price', 'quantity', 'line_total',
+            'unit_price', 'quantity', 'line_total', 'zoho_line_item_id',
         )
+
+
+def _completed_returns_total(order: Order) -> Decimal:
+    total = Decimal('0')
+    for ret in order.returns.filter(status=OrderReturn.Status.COMPLETED).prefetch_related(
+        'lines__order_item',
+    ):
+        for line in ret.lines.all():
+            total += line.order_item.unit_price * line.quantity
+    return total.quantize(Decimal('0.01'))
 
 
 class OrderSerializer(serializers.ModelSerializer):
     items = OrderItemSerializer(many=True, read_only=True)
+    returned_total = serializers.SerializerMethodField()
+    balance_remaining = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
@@ -90,18 +103,33 @@ class OrderSerializer(serializers.ModelSerializer):
             'billing_name', 'billing_phone', 'billing_address', 'billing_city',
             'billing_state', 'billing_postal_code', 'billing_country',
             'zoho_checkout_id', 'zoho_salesorder_id',
+            'returned_total', 'balance_remaining',
             'items', 'created_at', 'updated_at',
         )
         read_only_fields = (
             'status', 'subtotal', 'total', 'zoho_checkout_id', 'zoho_salesorder_id',
+            'returned_total', 'balance_remaining',
             'created_at', 'updated_at',
         )
+
+    def get_returned_total(self, obj):
+        return str(_completed_returns_total(obj))
+
+    def get_balance_remaining(self, obj):
+        br = (obj.total - _completed_returns_total(obj)).quantize(Decimal('0.01'))
+        if br < Decimal('0'):
+            br = Decimal('0')
+        return str(br)
 
 
 class CheckoutSerializer(serializers.Serializer):
     store_id = serializers.IntegerField()
     shipping_amount = serializers.DecimalField(
-        max_digits=12, decimal_places=2, required=False, default=Decimal('0'),
+        max_digits=12,
+        decimal_places=2,
+        required=False,
+        default=Decimal('0'),
+        min_value=Decimal('0'),
     )
 
     shipping_name = serializers.CharField(max_length=255)
@@ -147,3 +175,71 @@ class CheckoutSerializer(serializers.Serializer):
                     {f: 'Required when billing is not same as shipping.' for f in missing},
                 )
         return attrs
+
+
+class OrderReturnLineInputSerializer(serializers.Serializer):
+    order_item_id = serializers.IntegerField(min_value=1)
+    quantity = serializers.IntegerField(min_value=1)
+
+
+class OrderReturnCreateSerializer(serializers.Serializer):
+    note = serializers.CharField(required=False, allow_blank=True, default='')
+    lines = OrderReturnLineInputSerializer(many=True)
+
+    def validate_lines(self, rows):
+        if not rows:
+            raise serializers.ValidationError('At least one return line is required.')
+        seen = set()
+        for row in rows:
+            oid = row['order_item_id']
+            if oid in seen:
+                raise serializers.ValidationError('Duplicate order_item_id in request.')
+            seen.add(oid)
+        return rows
+
+    def validate(self, attrs):
+        order: Order = self.context['order']
+        for row in attrs['lines']:
+            oi = OrderItem.objects.filter(pk=row['order_item_id'], order=order).first()
+            if not oi:
+                raise serializers.ValidationError(
+                    {'lines': f'order_item_id {row["order_item_id"]} is not on this order.'},
+                )
+            remaining = oi.quantity - oi.quantity_in_active_returns()
+            if row['quantity'] > remaining:
+                raise serializers.ValidationError(
+                    {'lines': f'Quantity exceeds returnable amount for line {oi.pk}.'},
+                )
+        return attrs
+
+    def create(self, validated_data):
+        order = self.context['order']
+        user = self.context['request'].user
+        lines_data = validated_data['lines']
+        note = validated_data.get('note') or ''
+        with transaction.atomic():
+            ret = OrderReturn.objects.create(order=order, user=user, note=note)
+            for row in lines_data:
+                oi = OrderItem.objects.get(pk=row['order_item_id'], order=order)
+                OrderReturnLine.objects.create(
+                    order_return=ret,
+                    order_item=oi,
+                    quantity=row['quantity'],
+                )
+        return ret
+
+
+class OrderReturnLineReadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OrderReturnLine
+        fields = ('id', 'order_item', 'quantity')
+
+
+class OrderReturnReadSerializer(serializers.ModelSerializer):
+    lines = OrderReturnLineReadSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = OrderReturn
+        fields = (
+            'id', 'status', 'zoho_salesreturn_id', 'note', 'lines', 'created_at', 'updated_at',
+        )
