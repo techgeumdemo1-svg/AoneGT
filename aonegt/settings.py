@@ -114,9 +114,9 @@ FRONTEND_RESET_URL = os.getenv('FRONTEND_RESET_URL', 'aonegt://reset-password')
 
 # --- Zoho: registration gate ---
 # When True, /api/auth/register/ only succeeds if the email exists in Zoho (see REGISTER_ZOHO_EMAIL_SOURCE).
-# Set REGISTER_REQUIRE_ZOHO_CONTACT=false in .env for local dev without Zoho.
+# Default False so local dev works without Zoho; set REGISTER_REQUIRE_ZOHO_CONTACT=true in .env for production.
 REGISTER_REQUIRE_ZOHO_CONTACT = os.getenv(
-    'REGISTER_REQUIRE_ZOHO_CONTACT', 'True',
+    'REGISTER_REQUIRE_ZOHO_CONTACT', 'False',
 ).strip().lower() in ('true', '1', 'yes')
 # inventory = Zoho Inventory contacts (recommended). commerce_salesorders = Zoho Commerce sales orders search by email (needs past orders).
 REGISTER_ZOHO_EMAIL_SOURCE = os.getenv(
