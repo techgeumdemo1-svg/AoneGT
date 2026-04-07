@@ -1,4 +1,5 @@
 from django.urls import path
+
 from .views import (
     CartDetailAPIView,
     CartAddItemAPIView,
@@ -8,6 +9,8 @@ from .views import (
     OrderDetailAPIView,
     OrderReturnListCreateAPIView,
     OrderReorderAPIView,
+    ZohoProductListAPIView,
+    ZohoProductDetailAPIView,
 )
 
 urlpatterns = [
@@ -19,4 +22,8 @@ urlpatterns = [
     path('orders/<int:pk>/reorder/', OrderReorderAPIView.as_view(), name='shop-order-reorder'),
     path('orders/', OrderListAPIView.as_view(), name='shop-order-list'),
     path('orders/<int:pk>/', OrderDetailAPIView.as_view(), name='shop-order-detail'),
+
+    path('zoho-products/', ZohoProductListAPIView.as_view(), name='zoho-product-list'),
+    path('zoho-products/<str:product_id>/', ZohoProductDetailAPIView.as_view(), name='zoho-product-detail'),
+
 ]

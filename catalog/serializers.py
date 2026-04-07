@@ -6,7 +6,7 @@ class StoreListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Store
         fields = (
-            'id', 'name', 'slug', 'description', 'logo_url', 'sort_order',
+            'id', 'name', 'slug', 'category', 'description', 'logo_url', 'sort_order',
         )
 
 
@@ -14,7 +14,7 @@ class ProductListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
         fields = (
-            'id', 'name', 'slug', 'sku', 'price', 'compare_at_price',
+            'id', 'name', 'slug', 'category', 'sku', 'price', 'compare_at_price',
             'currency', 'image_url',
         )
 
@@ -25,7 +25,7 @@ class ProductDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
         fields = (
-            'id', 'store', 'name', 'slug', 'sku', 'description',
+            'id', 'store', 'name', 'slug', 'category', 'sku', 'description',
             'price', 'compare_at_price', 'currency', 'image_url',
             'created_at', 'updated_at',
         )
@@ -37,10 +37,12 @@ class StoreAdminSerializer(serializers.ModelSerializer):
     class Meta:
         model = Store
         fields = (
-            'id', 'name', 'slug', 'description', 'logo_url', 'is_active',
-            'zoho_site_id', 'sort_order',
+            'id', 'name', 'slug', 'category', 'description', 'logo_url', 'is_active',
+            'zoho_org_id', 'zoho_store_domain',
+            'client_id', 'client_secret', 'refresh_token', 'access_token', 'token_expiry',
+            'created_at', 'sort_order',
         )
-        read_only_fields = ('id',)
+        read_only_fields = ('id', 'created_at')
 
 
 class ProductAdminSerializer(serializers.ModelSerializer):
@@ -49,7 +51,7 @@ class ProductAdminSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
         fields = (
-            'id', 'store', 'name', 'slug', 'sku', 'description', 'price',
+            'id', 'store', 'name', 'slug', 'category', 'sku', 'description', 'price',
             'compare_at_price', 'currency', 'image_url', 'is_active',
             'zoho_product_id', 'created_at', 'updated_at',
         )

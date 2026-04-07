@@ -12,10 +12,19 @@ from .models import Cart, CartItem, Order, OrderItem, OrderReturn, OrderReturnLi
 class ProductMiniSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
-        fields = ('id', 'name', 'slug', 'sku', 'price', 'currency', 'image_url')
+        fields = (
+            'id', 'name', 'slug', 'category', 'sku', 'price', 'currency', 'image_url',
+        )
+
+
+class StoreTinySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Store
+        fields = ('id', 'name', 'slug')
 
 
 class CartItemSerializer(serializers.ModelSerializer):
+    store = StoreTinySerializer(read_only=True)
     product = ProductMiniSerializer(read_only=True)
     product_id = serializers.PrimaryKeyRelatedField(
         queryset=Product.objects.filter(is_active=True),
@@ -26,7 +35,21 @@ class CartItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CartItem
-        fields = ('id', 'product', 'product_id', 'quantity', 'line_subtotal')
+        fields = ('id', 'store', 'product', 'product_id', 'quantity', 'line_subtotal')
+
+    def get_line_subtotal(self, obj):
+        return str(obj.line_subtotal.quantize(Decimal('0.01')))
+
+
+class CartItemInGroupSerializer(serializers.ModelSerializer):
+    """Line inside a store group (store is omitted; it is on the parent group)."""
+
+    product = ProductMiniSerializer(read_only=True)
+    line_subtotal = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CartItem
+        fields = ('id', 'product', 'quantity', 'line_subtotal')
 
     def get_line_subtotal(self, obj):
         return str(obj.line_subtotal.quantize(Decimal('0.01')))
@@ -34,15 +57,41 @@ class CartItemSerializer(serializers.ModelSerializer):
 
 class CartSerializer(serializers.ModelSerializer):
     items = CartItemSerializer(many=True, read_only=True)
+    store_groups = serializers.SerializerMethodField()
     subtotal = serializers.SerializerMethodField()
 
     class Meta:
         model = Cart
-        fields = ('id', 'store', 'items', 'subtotal', 'updated_at')
+        fields = ('id', 'items', 'store_groups', 'subtotal', 'updated_at')
 
     def get_subtotal(self, obj):
         total = sum((item.line_subtotal for item in obj.items.all()), Decimal('0'))
         return str(total.quantize(Decimal('0.01')))
+
+    def get_store_groups(self, obj):
+        items = list(obj.items.all())
+        if not items:
+            return []
+        by_store = {}
+        for it in items:
+            by_store.setdefault(it.store_id, []).append(it)
+        for lines in by_store.values():
+            lines.sort(key=lambda x: x.pk)
+        def sort_key(sid):
+            st = by_store[sid][0].store
+            return (st.name.lower(), st.pk)
+
+        groups = []
+        for sid in sorted(by_store.keys(), key=sort_key):
+            lines = by_store[sid]
+            store = lines[0].store
+            sub = sum((i.line_subtotal for i in lines), Decimal('0'))
+            groups.append({
+                'store': StoreTinySerializer(store).data,
+                'items': CartItemInGroupSerializer(lines, many=True).data,
+                'subtotal': str(sub.quantize(Decimal('0.01'))),
+            })
+        return groups
 
 
 class CartAddItemSerializer(serializers.Serializer):
@@ -156,13 +205,17 @@ class CheckoutSerializer(serializers.Serializer):
         request = self.context.get('request')
         user = request.user if request else None
         cart = (
-            Cart.objects.filter(user=user, store=store)
-            .prefetch_related('items__product')
+            Cart.objects.filter(user=user)
+            .prefetch_related('items__product', 'items__store')
             .first()
         )
-        if not cart or not cart.items.exists():
-            raise serializers.ValidationError({'cart': 'Cart is empty for this store.'})
+        if not cart:
+            raise serializers.ValidationError({'cart': 'No cart found.'})
+        checkout_items = [i for i in cart.items.all() if i.store_id == store.pk]
+        if not checkout_items:
+            raise serializers.ValidationError({'cart': 'Cart has no items for this store.'})
         attrs['cart'] = cart
+        attrs['checkout_items'] = checkout_items
 
         if not attrs.get('billing_same_as_shipping'):
             required = [

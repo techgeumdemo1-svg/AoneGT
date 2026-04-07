@@ -139,9 +139,24 @@ except Exception:
 REGISTER_REQUIRE_ZOHO_CONTACT = os.getenv(
     'REGISTER_REQUIRE_ZOHO_CONTACT', 'False',
 ).strip().lower() in ('true', '1', 'yes')
+# inventory = Zoho Inventory contacts. commerce_salesorders | commerce | zoho_commerce = Zoho Commerce sales orders by email.
 REGISTER_ZOHO_EMAIL_SOURCE = os.getenv(
     'REGISTER_ZOHO_EMAIL_SOURCE', 'inventory',
 ).strip().lower()
 ZOHO_API_BASE_HOST = os.getenv('ZOHO_API_BASE_HOST', 'https://www.zohoapis.com').rstrip('/')
 ZOHO_INVENTORY_ORGANIZATION_ID = os.getenv('ZOHO_INVENTORY_ORGANIZATION_ID', '').strip()
 ZOHO_COMMERCE_ORGANIZATION_ID = os.getenv('ZOHO_COMMERCE_ORGANIZATION_ID', '').strip()
+
+# When True, register requires POST /api/auth/request-registration-code/ first, then registration_otp on register.
+REGISTER_REQUIRE_EMAIL_OTP = os.getenv(
+    'REGISTER_REQUIRE_EMAIL_OTP', 'False',
+).strip().lower() in ('true', '1', 'yes')
+
+# --- Zoho Commerce: OAuth refresh + storefront (see shop.services.zoho_commerce.ZohoCommerceService) ---
+ZOHO_COMMERCE_BASE_URL = os.getenv('ZOHO_COMMERCE_BASE_URL', 'https://commerce.zoho.com').rstrip('/')
+ZOHO_ACCOUNTS_URL = os.getenv('ZOHO_ACCOUNTS_URL', 'https://accounts.zoho.com').rstrip('/')
+ZOHO_STORE_DOMAIN = os.getenv('ZOHO_STORE_DOMAIN', '').strip()
+ZOHO_ORG_ID = (os.getenv('ZOHO_ORG_ID') or ZOHO_COMMERCE_ORGANIZATION_ID or '').strip()
+ZOHO_CLIENT_ID = os.getenv('ZOHO_CLIENT_ID', '').strip()
+ZOHO_CLIENT_SECRET = os.getenv('ZOHO_CLIENT_SECRET', '').strip()
+ZOHO_REFRESH_TOKEN = os.getenv('ZOHO_REFRESH_TOKEN', '').strip()

@@ -2,21 +2,38 @@ from django.conf import settings
 from django.contrib.auth import authenticate
 from rest_framework import serializers
 from rest_framework_simplejwt.tokens import RefreshToken
-from .models import User, PasswordResetOTP
+from .models import User, PasswordResetOTP, RegistrationOTP
 from .services.zoho_registration_gate import (
     ZohoContactCheckError,
     registration_email_check_configured,
     registration_email_exists_in_zoho,
+    resolved_register_zoho_email_source,
 )
 
 
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, min_length=8)
+    phone = serializers.CharField(max_length=32, required=True)
+    registration_otp = serializers.CharField(
+        write_only=True,
+        max_length=6,
+        min_length=6,
+        required=False,
+        allow_blank=True,
+    )
 
     class Meta:
         model = User
-        fields = ['id', 'first_name', 'last_name', 'email', 'password']
+        fields = [
+            'id', 'first_name', 'last_name', 'email', 'phone', 'password', 'registration_otp',
+        ]
         read_only_fields = ['id']
+
+    def validate_phone(self, value):
+        value = (value or '').strip()
+        if not value:
+            raise serializers.ValidationError('Phone number is required.')
+        return value
 
     def validate_email(self, value):
         normalized = value.strip().lower()
@@ -32,8 +49,7 @@ class RegisterSerializer(serializers.ModelSerializer):
                 )
             try:
                 if not registration_email_exists_in_zoho(normalized):
-                    src = getattr(settings, 'REGISTER_ZOHO_EMAIL_SOURCE', 'inventory')
-                    if src == 'commerce_salesorders':
+                    if resolved_register_zoho_email_source() == 'commerce_salesorders':
                         msg = (
                             'This email has no sales orders in Zoho Commerce yet, or it does '
                             'not match. Use the email from your store orders.'
@@ -51,9 +67,44 @@ class RegisterSerializer(serializers.ModelSerializer):
 
         return normalized
 
+    def validate(self, attrs):
+        email = attrs['email']
+        require_otp = getattr(settings, 'REGISTER_REQUIRE_EMAIL_OTP', False)
+        otp = attrs.pop('registration_otp', None) or ''
+        otp = str(otp).strip()
+        if require_otp:
+            if len(otp) != 6 or not otp.isdigit():
+                raise serializers.ValidationError(
+                    {'registration_otp': 'Enter the 6-digit code sent to your email.'},
+                )
+            row = (
+                RegistrationOTP.objects.filter(
+                    email__iexact=email,
+                    otp_code=otp,
+                    is_used=False,
+                )
+                .order_by('-created_at')
+                .first()
+            )
+            if not row or row.is_expired:
+                raise serializers.ValidationError(
+                    {'registration_otp': 'Invalid or expired verification code.'},
+                )
+            self._registration_otp_row = row
+        elif otp:
+            raise serializers.ValidationError(
+                {'registration_otp': 'Email verification code is not required for registration.'},
+            )
+        return attrs
+
     def create(self, validated_data):
         password = validated_data.pop('password')
-        return User.objects.create_user(password=password, **validated_data)
+        user = User.objects.create_user(password=password, **validated_data)
+        row = getattr(self, '_registration_otp_row', None)
+        if row:
+            row.is_used = True
+            row.save(update_fields=['is_used'])
+        return user
 
 
 class EmailCheckSerializer(serializers.Serializer):
@@ -61,6 +112,13 @@ class EmailCheckSerializer(serializers.Serializer):
 
     def validate_email(self, value):
         return value.lower()
+
+
+class RequestRegistrationOTPSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+    def validate_email(self, value):
+        return value.strip().lower()
 
 
 class LoginSerializer(serializers.Serializer):
@@ -117,4 +175,4 @@ class ResetPasswordSerializer(serializers.Serializer):
 class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ['id', 'first_name', 'last_name', 'email', 'created_at']
+        fields = ['id', 'first_name', 'last_name', 'email', 'phone', 'created_at']

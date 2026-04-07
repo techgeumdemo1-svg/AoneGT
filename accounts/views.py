@@ -4,10 +4,11 @@ from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import User, PasswordResetOTP
+from .models import User, PasswordResetOTP, RegistrationOTP
 from .serializers import (
     RegisterSerializer,
     EmailCheckSerializer,
+    RequestRegistrationOTPSerializer,
     LoginSerializer,
     ForgotPasswordRequestSerializer,
     ResetPasswordSerializer,
@@ -17,6 +18,7 @@ from .services.zoho_registration_gate import (
     ZohoContactCheckError,
     registration_email_check_configured,
     registration_email_exists_in_zoho,
+    resolved_register_zoho_email_source,
 )
 
 
@@ -52,8 +54,9 @@ class CheckEmailAPIView(APIView):
 
 class CheckZohoContactAPIView(APIView):
     """
-    Optional UX step: check if email exists as a Zoho Inventory customer contact.
-    When REGISTER_REQUIRE_ZOHO_CONTACT is False, returns exists_in_zoho: null.
+    Optional UX step before register: whether the email is allowed under the active Zoho source
+    (Inventory contacts vs Commerce sales orders). When REGISTER_REQUIRE_ZOHO_CONTACT is False,
+    returns exists_in_zoho: null.
     """
 
     def post(self, request):
@@ -90,7 +93,7 @@ class CheckZohoContactAPIView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
-        src = getattr(settings, 'REGISTER_ZOHO_EMAIL_SOURCE', 'inventory')
+        src = resolved_register_zoho_email_source()
         return Response(
             {
                 'email': email,
@@ -109,6 +112,57 @@ class CheckZohoContactAPIView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class RequestRegistrationOTPAPIView(APIView):
+    """
+    Sends a 6-digit code to the email for signup when REGISTER_REQUIRE_EMAIL_OTP is True.
+    Uses the same generic response whether the email is ineligible, to limit enumeration.
+    """
+
+    def post(self, request):
+        serializer = RequestRegistrationOTPSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data['email']
+
+        generic = {
+            'message': (
+                'If this email is eligible for registration, a verification code has been sent.'
+            ),
+            'email': email,
+        }
+
+        if User.objects.filter(email__iexact=email).exists():
+            return Response(generic, status=status.HTTP_200_OK)
+
+        if getattr(settings, 'REGISTER_REQUIRE_ZOHO_CONTACT', False):
+            if not registration_email_check_configured():
+                return Response(
+                    {
+                        'detail': (
+                            'Zoho is not configured for registration checks. Set '
+                            'ZOHO_ACCESS_TOKEN and the organization id for your '
+                            'REGISTER_ZOHO_EMAIL_SOURCE.'
+                        ),
+                    },
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+            try:
+                if not registration_email_exists_in_zoho(email):
+                    return Response(generic, status=status.HTTP_200_OK)
+            except ZohoContactCheckError as e:
+                return Response({'detail': str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        otp = RegistrationOTP.objects.create(email=email)
+        subject = 'AoneGt registration verification code'
+        message = (
+            f'Your registration verification code is: {otp.otp_code}\n'
+            f'This code expires in 10 minutes.\n\n'
+            f'If you did not request this, you can ignore this email.'
+        )
+        send_mail(subject, message, settings.DEFAULT_FROM_EMAIL, [email], fail_silently=False)
+
+        return Response(generic, status=status.HTTP_200_OK)
 
 
 class LoginAPIView(APIView):

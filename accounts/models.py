@@ -26,6 +26,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     first_name = models.CharField(max_length=150)
     last_name = models.CharField(max_length=150, blank=True)
     email = models.EmailField(unique=True)
+    phone = models.CharField(max_length=32, blank=True)
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -59,3 +60,31 @@ class PasswordResetOTP(models.Model):
     @property
     def is_expired(self):
         return timezone.now() > self.expires_at
+
+
+class RegistrationOTP(models.Model):
+    """One-time code sent to email before account creation (no User row yet)."""
+
+    email = models.EmailField(db_index=True)
+    otp_code = models.CharField(max_length=6)
+    is_used = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def save(self, *args, **kwargs):
+        self.email = (self.email or '').strip().lower()
+        if not self.otp_code:
+            self.otp_code = f'{random.randint(100000, 999999)}'
+        if not self.expires_at:
+            self.expires_at = timezone.now() + timedelta(minutes=10)
+        super().save(*args, **kwargs)
+
+    @property
+    def is_expired(self):
+        return timezone.now() > self.expires_at
+
+    def __str__(self):
+        return f'{self.email} ({self.otp_code})'
