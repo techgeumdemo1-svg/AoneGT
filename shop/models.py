@@ -8,21 +8,23 @@ from catalog.models import Product, Store
 
 
 class Cart(models.Model):
+    """One basket per user; each line carries its ``store`` (multi-store cart)."""
+
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='carts')
-    store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='carts')
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         constraints = [
-            models.UniqueConstraint(fields=['user', 'store'], name='shop_cart_user_store_uniq'),
+            models.UniqueConstraint(fields=['user'], name='shop_cart_user_uniq'),
         ]
 
     def __str__(self):
-        return f'Cart {self.user.email} @ {self.store.name}'
+        return f'Cart {self.user.email}'
 
 
 class CartItem(models.Model):
     cart = models.ForeignKey(Cart, on_delete=models.CASCADE, related_name='items')
+    store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='+')
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='cart_items')
     quantity = models.PositiveIntegerField(default=1)
 
