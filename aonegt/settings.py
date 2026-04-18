@@ -28,6 +28,8 @@ INSTALLED_APPS = [
     'catalog',
     'shop',
     'zoho_integration',
+    'offers',
+    
 ]
 
 MIDDLEWARE = [
