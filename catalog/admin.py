@@ -7,6 +7,7 @@ class StoreAdmin(admin.ModelAdmin):
     list_display = (
         'id',
         'name',
+        'contact_email',
         'category',
         'slug',
         'is_active',
@@ -16,11 +17,25 @@ class StoreAdmin(admin.ModelAdmin):
         'created_at',
     )
     list_filter = ('is_active',)
-    search_fields = ('name', 'slug', 'category', 'zoho_org_id')
+    search_fields = ('name', 'slug', 'contact_email', 'category', 'zoho_org_id')
     prepopulated_fields = {'slug': ('name',)}
     readonly_fields = ('created_at',)
     fieldsets = (
-        (None, {'fields': ('name', 'slug', 'category', 'description', 'logo_url', 'is_active', 'sort_order')}),
+        (
+            None,
+            {
+                'fields': (
+                    'name',
+                    'slug',
+                    'contact_email',
+                    'category',
+                    'description',
+                    'logo_url',
+                    'is_active',
+                    'sort_order',
+                )
+            },
+        ),
         ('Zoho Commerce', {'fields': ('zoho_org_id', 'zoho_store_domain')}),
         (
             'Zoho OAuth (optional; per-store — falls back to global env)',

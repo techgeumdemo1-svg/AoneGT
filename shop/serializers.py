@@ -94,20 +94,18 @@ class CartSerializer(serializers.ModelSerializer):
         return groups
 
 
-class CartAddItemSerializer(serializers.Serializer):
+class CartAddZohoItemSerializer(serializers.Serializer):
     store_id = serializers.IntegerField()
-    product_id = serializers.IntegerField()
+    zoho_product_id = serializers.CharField(max_length=120)
     quantity = serializers.IntegerField(min_value=1, default=1)
 
     def validate(self, attrs):
         store = get_object_or_404(Store, pk=attrs['store_id'], is_active=True)
-        product = get_object_or_404(
-            Product.objects.filter(is_active=True),
-            pk=attrs['product_id'],
-            store=store,
-        )
+        zoho_product_id = (attrs.get('zoho_product_id') or '').strip()
+        if not zoho_product_id:
+            raise serializers.ValidationError({'zoho_product_id': 'This field is required.'})
         attrs['store'] = store
-        attrs['product'] = product
+        attrs['zoho_product_id'] = zoho_product_id
         return attrs
 
 
@@ -152,11 +150,13 @@ class OrderSerializer(serializers.ModelSerializer):
             'billing_name', 'billing_phone', 'billing_address', 'billing_city',
             'billing_state', 'billing_postal_code', 'billing_country',
             'zoho_checkout_id', 'zoho_salesorder_id',
+            'zoho_sync_error', 'zoho_synced_at',
             'returned_total', 'balance_remaining',
             'items', 'created_at', 'updated_at',
         )
         read_only_fields = (
             'status', 'subtotal', 'total', 'zoho_checkout_id', 'zoho_salesorder_id',
+            'zoho_sync_error', 'zoho_synced_at',
             'returned_total', 'balance_remaining',
             'created_at', 'updated_at',
         )

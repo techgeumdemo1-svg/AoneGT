@@ -6,7 +6,7 @@ class StoreListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Store
         fields = (
-            'id', 'name', 'slug', 'category', 'description', 'logo_url', 'sort_order',
+            'id', 'name', 'slug', 'contact_email', 'category', 'description', 'logo_url', 'sort_order',
         )
 
 
@@ -37,7 +37,7 @@ class StoreAdminSerializer(serializers.ModelSerializer):
     class Meta:
         model = Store
         fields = (
-            'id', 'name', 'slug', 'category', 'description', 'logo_url', 'is_active',
+            'id', 'name', 'slug', 'contact_email', 'category', 'description', 'logo_url', 'is_active',
             'zoho_org_id', 'zoho_store_domain',
             'client_id', 'client_secret', 'refresh_token', 'access_token', 'token_expiry',
             'created_at', 'sort_order',

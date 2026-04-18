@@ -43,8 +43,9 @@ class CartItem(models.Model):
 
 class Order(models.Model):
     class Status(models.TextChoices):
-        PENDING_ZOHO = 'pending_zoho', 'Pending Zoho sync'
-        CONFIRMED = 'confirmed', 'Confirmed'
+        PENDING_ZOHO_SYNC = 'pending_zoho_sync', 'Pending Zoho sync'
+        SYNCED = 'synced', 'Synced'
+        SYNC_FAILED = 'sync_failed', 'Zoho sync failed'
         CANCELLED = 'cancelled', 'Cancelled'
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='orders')
@@ -52,7 +53,7 @@ class Order(models.Model):
     status = models.CharField(
         max_length=32,
         choices=Status.choices,
-        default=Status.PENDING_ZOHO,
+        default=Status.PENDING_ZOHO_SYNC,
     )
     currency = models.CharField(max_length=8, default='AED')
     subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0'))
@@ -78,6 +79,8 @@ class Order(models.Model):
 
     zoho_checkout_id = models.CharField(max_length=255, blank=True)
     zoho_salesorder_id = models.CharField(max_length=120, blank=True)
+    zoho_sync_error = models.TextField(blank=True)
+    zoho_synced_at = models.DateTimeField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

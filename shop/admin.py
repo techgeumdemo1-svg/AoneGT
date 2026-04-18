@@ -36,8 +36,8 @@ class OrderReturnAdmin(admin.ModelAdmin):
 
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
-    list_display = ('id', 'user', 'store', 'status', 'total', 'currency', 'created_at')
+    list_display = ('id', 'user', 'store', 'status', 'total', 'currency', 'zoho_synced_at', 'created_at')
     list_filter = ('status', 'store')
     search_fields = ('user__email', 'shipping_name', 'zoho_salesorder_id')
     inlines = [OrderItemInline]
-    readonly_fields = ('created_at', 'updated_at')
+    readonly_fields = ('created_at', 'updated_at', 'zoho_synced_at', 'zoho_sync_error')

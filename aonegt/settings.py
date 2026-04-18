@@ -27,6 +27,7 @@ INSTALLED_APPS = [
     'accounts',
     'catalog',
     'shop',
+    'zoho_integration',
 ]
 
 MIDDLEWARE = [
@@ -160,3 +161,6 @@ ZOHO_ORG_ID = (os.getenv('ZOHO_ORG_ID') or ZOHO_COMMERCE_ORGANIZATION_ID or '').
 ZOHO_CLIENT_ID = os.getenv('ZOHO_CLIENT_ID', '').strip()
 ZOHO_CLIENT_SECRET = os.getenv('ZOHO_CLIENT_SECRET', '').strip()
 ZOHO_REFRESH_TOKEN = os.getenv('ZOHO_REFRESH_TOKEN', '').strip()
+
+
+ZOHO_REDIRECT_URI = os.getenv("ZOHO_REDIRECT_URI")

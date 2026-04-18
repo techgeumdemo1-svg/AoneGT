@@ -12,6 +12,11 @@ from .services.zoho_commerce_products import (
     build_products_list_url,
     zoho_commerce_proxy_get,
 )
+from .services.zoho_sites import (
+    fetch_zoho_shop_products,
+    fetch_zoho_shops_from_accounts,
+)
+from shop.services.zoho_commerce import ZohoCommerceError
 from .serializers import (
     StoreListSerializer,
     ProductListSerializer,
@@ -70,6 +75,78 @@ class StoreProductListAPIView(generics.ListAPIView):
         if q:
             qs = qs.filter(Q(name__icontains=q) | Q(sku__icontains=q))
         return qs
+
+
+class ZohoCommerceShopListAPIView(APIView):
+    """
+    GET — list shops from Zoho Commerce sites index in a mobile-friendly shape.
+
+    Query:
+    - account_id=<zoho account pk> (optional): fetch shops for one configured
+      ZohoCommerceAccount; omitted means all active accounts.
+    """
+
+    def get(self, request):
+        raw_account_id = (request.query_params.get('account_id') or '').strip()
+        account_id = None
+        if raw_account_id:
+            try:
+                account_id = int(raw_account_id)
+            except (TypeError, ValueError):
+                return Response(
+                    {'status': 'error', 'message': 'account_id must be an integer.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        try:
+            data = fetch_zoho_shops_from_accounts(account_id=account_id)
+        except ZohoCommerceError as e:
+            return Response(
+                {'status': 'error', 'message': str(e)},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        return Response(
+            {
+                'status': 'success',
+                'message': 'Stores fetched successfully',
+                'mode': 'accounts',
+                'processed_account_count': data['processed_account_count'],
+                'count': len(data['shops']),
+                'stores': data['shops'],
+                'errors': data['errors'],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class ZohoCommerceShopProductListAPIView(APIView):
+    """
+    GET — list products for a selected Zoho shop id.
+    """
+
+    def get(self, request, shop_id: str):
+        account = (request.query_params.get('account') or 'primary').strip().lower()
+        page = request.query_params.get('page', 1)
+        per_page = request.query_params.get('per_page', 20)
+        try:
+            shop, products = fetch_zoho_shop_products(
+                shop_id, page=page, per_page=per_page, account=account,
+            )
+        except ZohoCommerceError as e:
+            msg = str(e)
+            st = status.HTTP_404_NOT_FOUND if 'not found' in msg.lower() else status.HTTP_503_SERVICE_UNAVAILABLE
+            return Response({'status': 'error', 'message': msg}, status=st)
+        return Response(
+            {
+                'status': 'success',
+                'message': 'Products fetched successfully',
+                'account': account,
+                'organization_id': shop.get('organization_id', ''),
+                'shop': shop,
+                'count': len(products),
+                'products': products,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class ZohoCommerceProductsProxyAPIView(APIView):
@@ -177,3 +254,4 @@ class AdminStoreProductDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
 
     def get_queryset(self):
         return Product.objects.filter(store_id=self.kwargs['store_id']).select_related('store')
+

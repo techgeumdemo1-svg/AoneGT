@@ -4,6 +4,7 @@ from django.db import models
 class Store(models.Model):
     name = models.CharField(max_length=255)
     slug = models.SlugField(max_length=255, unique=True)
+    contact_email = models.EmailField(blank=True)
     category = models.CharField(max_length=255, blank=True)
     description = models.TextField(blank=True)
     logo_url = models.URLField(max_length=500, blank=True)

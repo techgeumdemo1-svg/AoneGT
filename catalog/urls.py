@@ -3,6 +3,8 @@ from .views import (
     StoreListAPIView,
     StoreProductListAPIView,
     StoreProductDetailAPIView,
+    ZohoCommerceShopListAPIView,
+    ZohoCommerceShopProductListAPIView,
     ZohoCommerceProductsProxyAPIView,
     ZohoCommerceProductDetailProxyAPIView,
     AdminStoreListCreateAPIView,
@@ -12,6 +14,16 @@ from .views import (
 )
 
 urlpatterns = [
+    path(
+        'zoho/shops/',
+        ZohoCommerceShopListAPIView.as_view(),
+        name='catalog-zoho-shop-list',
+    ),
+    path(
+        'zoho/shops/<str:shop_id>/products/',
+        ZohoCommerceShopProductListAPIView.as_view(),
+        name='catalog-zoho-shop-product-list',
+    ),
     path(
         'zoho-commerce/products/',
         ZohoCommerceProductsProxyAPIView.as_view(),
@@ -45,4 +57,5 @@ urlpatterns = [
         StoreProductDetailAPIView.as_view(),
         name='catalog-store-product-detail',
     ),
+    
 ]

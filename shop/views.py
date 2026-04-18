@@ -3,7 +3,8 @@ from decimal import Decimal
 from django.conf import settings
 from django.db import transaction
 from django.shortcuts import get_object_or_404
-from catalog.models import Store
+from django.utils.text import slugify
+from catalog.models import Store, Product
 from rest_framework import generics, status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -12,7 +13,7 @@ from .models import Cart, CartItem, Order, OrderItem, OrderReturn
 from .services.zoho_commerce import ZohoCommerceError, ZohoCommerceService
 from .serializers import (
     CartSerializer,
-    CartAddItemSerializer,
+    CartAddZohoItemSerializer,
     CartItemSerializer,
     CartItemUpdateSerializer,
     CheckoutSerializer,
@@ -47,6 +48,70 @@ def _optional_store_for_zoho(request):
     return store, None
 
 
+def _as_decimal(raw, default='0'):
+    try:
+        return Decimal(str(raw)).quantize(Decimal('0.01'))
+    except Exception:
+        return Decimal(default).quantize(Decimal('0.01'))
+
+
+def _upsert_local_product_from_zoho(store: Store, zoho_product_id: str, payload: dict) -> Product:
+    product_blob = payload.get('product') if isinstance(payload, dict) else None
+    source = product_blob if isinstance(product_blob, dict) else payload
+    if not isinstance(source, dict):
+        raise ZohoCommerceError('Invalid product response from Zoho.')
+
+    name = str(
+        source.get('name')
+        or source.get('product_name')
+        or source.get('item_name')
+        or f'Zoho Product {zoho_product_id}'
+    ).strip()
+    sku = str(source.get('sku') or '').strip()
+    category = str(source.get('category_name') or source.get('category') or '').strip()
+    description = str(source.get('description') or '').strip()
+    currency = str(source.get('currency_code') or source.get('currency') or 'AED').strip() or 'AED'
+    price = _as_decimal(source.get('rate') or source.get('price') or source.get('selling_price') or '0')
+    compare_at_price_raw = source.get('regular_price') or source.get('compare_at_price')
+    compare_at_price = (
+        _as_decimal(compare_at_price_raw)
+        if compare_at_price_raw not in (None, '')
+        else None
+    )
+    image_url = str(
+        source.get('image_url')
+        or source.get('image_name')
+        or source.get('image')
+        or ''
+    ).strip()
+
+    product = Product.objects.filter(store=store, zoho_product_id=zoho_product_id).first()
+    base_slug = slugify(name) or f'zoho-{zoho_product_id}'
+    slug = base_slug[:255]
+    if product is None:
+        suffix = 1
+        while Product.objects.filter(store=store, slug=slug).exists():
+            suffix += 1
+            slug = f'{base_slug[:245]}-{suffix}'[:255]
+        product = Product(
+            store=store,
+            zoho_product_id=zoho_product_id,
+            slug=slug,
+        )
+
+    product.name = name[:255]
+    product.sku = sku[:120]
+    product.category = category[:255]
+    product.description = description
+    product.price = price
+    product.compare_at_price = compare_at_price
+    product.currency = currency[:8]
+    product.image_url = image_url[:500]
+    product.is_active = True
+    product.save()
+    return product
+
+
 class CartDetailAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -64,11 +129,25 @@ class CartAddItemAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        ser = CartAddItemSerializer(data=request.data)
+        ser = CartAddZohoItemSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         store = ser.validated_data['store']
-        product = ser.validated_data['product']
+        zoho_product_id = ser.validated_data['zoho_product_id']
         quantity = ser.validated_data['quantity']
+        product = Product.objects.filter(
+            is_active=True,
+            store=store,
+            zoho_product_id=zoho_product_id,
+        ).first()
+        if product is None:
+            try:
+                zoho_payload = ZohoCommerceService.get_product_detail_storefront(
+                    zoho_product_id,
+                    store=store,
+                )
+                product = _upsert_local_product_from_zoho(store, zoho_product_id, zoho_payload)
+            except ZohoCommerceError as e:
+                return Response({'detail': str(e)}, status=status.HTTP_502_BAD_GATEWAY)
 
         with transaction.atomic():
             cart, _ = Cart.objects.select_for_update().get_or_create(
@@ -151,7 +230,7 @@ class CheckoutAPIView(APIView):
             order = Order.objects.create(
                 user=request.user,
                 store=store,
-                status=Order.Status.PENDING_ZOHO,
+                status=Order.Status.PENDING_ZOHO_SYNC,
                 currency=currency,
                 subtotal=subtotal,
                 shipping_amount=shipping_amount,
