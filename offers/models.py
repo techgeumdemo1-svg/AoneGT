@@ -39,6 +39,8 @@ class WebhookConfig(models.Model):
         ('create_coupon', 'Create Coupon'),
         ('list_coupons', 'List Coupons'),
         ('delete_coupon', 'Delete Coupon'),
+        ('get_coupon', 'Get Coupon'),
+        ('update_coupon', 'Update Coupon'),
     ]
 
     organization = models.ForeignKey(

@@ -4,6 +4,8 @@ from .views import (
     OrganizationListView,
     ListCouponsView,
     CreateCouponView,
+    GetCouponView,
+    UpdateCouponView,
     DeleteCouponView,
 )
 
@@ -20,4 +22,6 @@ urlpatterns = [
     path('organizations/<int:org_id>/coupons/', ListCouponsView.as_view(), name='list-coupons'),
     path('organizations/<int:org_id>/coupons/create/', CreateCouponView.as_view(), name='create-coupon'),
     path('organizations/<int:org_id>/coupons/delete/', DeleteCouponView.as_view(), name='delete-coupon'),
+    path('organizations/<int:org_id>/coupons/<str:coupon_id>/', GetCouponView.as_view(), name='get-coupon'),
+    path('organizations/<int:org_id>/coupons/<str:coupon_id>/update/', UpdateCouponView.as_view(), name='update-coupon'),
 ]

@@ -7,6 +7,8 @@ from .serializers import (
     SuperuserLoginSerializer,
     OrganizationSerializer,
     CouponCreateSerializer,
+    CouponUpdateSerializer, 
+    CouponGetSerializer,
     CouponDeleteSerializer,
 )
 from .services import authenticate_superuser, ZohoWebhookService
@@ -139,5 +141,213 @@ class DeleteCouponView(APIView):
 
         return Response(
             {'message': 'Coupon deleted successfully.', 'data': result},
+            status=status.HTTP_200_OK
+        )
+        
+class GetCouponView(APIView):
+    """
+    GET /api/offers/organizations/<org_id>/coupons/<coupon_id>/
+    Fetches full details of a single coupon from Zoho Commerce.
+    Call this before showing the edit form so the client can pre-fill all fields.
+    """
+    permission_classes = [IsAdminUser]
+
+    # def get(self, request, org_id, coupon_id):
+    #     service = ZohoWebhookService()
+    #     try:  
+    #         result = service.get_coupon(org_id, coupon_id)
+    #     except ValueError as e:
+    #         return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    #     zoho_response = result.get('zoho_response', {})
+    #     # if zoho_response.get('code') != 0:
+    #     #     return Response(
+    #     #         {
+    #     #             'error': 'Zoho Commerce could not fetch the coupon.',
+    #     #             'zoho_message': zoho_response.get('message'),
+    #     #             'zoho_code': zoho_response.get('code'),
+    #     #         },
+    #     #         status=status.HTTP_400_BAD_REQUEST
+    #     #     )
+
+    #     # return Response(
+    #     #     {'message': 'Coupon fetched successfully.', 'data': result},
+    #     #     status=status.HTTP_200_OK
+    #     # )
+    #     if result.get('code') != 0:
+    #         return Response(
+    #             {
+    #                 'error': 'Zoho webhook error.',
+    #                 'zoho_message': result.get('message'),
+    #             },
+    #             status=status.HTTP_400_BAD_REQUEST
+    #         )
+
+    #     zoho_response = result.get('zoho_response', {})
+    #     if zoho_response.get('code') != 0:
+    #         return Response(
+    #             {
+    #                 'error': 'Zoho Commerce could not fetch the coupon.',
+    #                 'zoho_message': zoho_response.get('message'),
+    #                 'zoho_code': zoho_response.get('code'),
+    #             },
+    #             status=status.HTTP_400_BAD_REQUEST
+    #         )
+
+    #     return Response(
+    #         {'message': 'Coupon fetched successfully.', 'data': result},
+    #         status=status.HTTP_200_OK
+    #     )
+    def get(self, request, org_id, coupon_id):
+        service = ZohoWebhookService()
+        try:
+            result = service.get_coupon(org_id, coupon_id)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Accept both webhook envelopes:
+        # 1) {"code": 0, "zoho_response": {...}}
+        # 2) {"response": {"code": 0, "zoho_response": {...}}}
+        envelope = result.get('response', result)
+
+        if envelope.get('code') not in (None, 0):
+            return Response(
+                {
+                    'error': 'Zoho webhook error.',
+                    'zoho_message': envelope.get('message'),
+                    'zoho_code': envelope.get('code'),
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        zoho_response = envelope.get('zoho_response', envelope)
+
+        if not isinstance(zoho_response, dict):
+            return Response(
+                {
+                    'error': 'Invalid Zoho response format.',
+                    'zoho_message': 'Expected JSON object for zoho_response.',
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if zoho_response.get('code') not in (None, 0):
+            return Response(
+                {
+                    'error': 'Zoho Commerce could not fetch the coupon.',
+                    'zoho_message': zoho_response.get('message'),
+                    'zoho_code': zoho_response.get('code'),
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        coupon = zoho_response.get('coupon', {})
+
+        clean_coupon = {
+            "coupon_id": coupon.get("coupon_id"),
+            "coupon_code": coupon.get("coupon_code"),
+            "coupon_name": coupon.get("coupon_name") or coupon.get("name"),
+            "description": coupon.get("description"),
+            "discount_type": coupon.get("discount_type"),
+            "discount_value": coupon.get("discount_value"),
+            "max_discount_amount": coupon.get("max_discount_amount"),
+            "status": coupon.get("status"),
+            "is_active": coupon.get("is_active"),
+            "activation_time": coupon.get("activation_time"),
+            "expiry_at": coupon.get("expiry_at"),
+            "minimum_order_value": coupon.get("minimum_order_value"),
+            "max_redemption_count": coupon.get("max_redemption_count"),
+            "max_redemption_count_per_user": coupon.get("max_redemption_count_per_user"),
+            "eligible_products": coupon.get("eligible_products", {}),
+}
+
+        return Response(
+            {'message': 'Coupon fetched successfully.', 'data': clean_coupon},
+            status=status.HTTP_200_OK
+        )
+
+
+class UpdateCouponView(APIView):
+    """
+    PUT /api/offers/organizations/<org_id>/coupons/<coupon_id>/update/
+    Validates update fields (all optional), then calls the update_coupon webhook.
+    Only fields included in the request body are sent to Zoho.
+
+    Typical edit flow:
+      1. GET  /coupons/<coupon_id>/        → pre-fill the form
+      2. PUT  /coupons/<coupon_id>/update/ → submit changed fields only
+
+    Body example: {"coupon_name": "New Name", "discount_value": 75}
+    """
+    permission_classes = [IsAdminUser]
+
+    def put(self, request, org_id, coupon_id):
+        serializer = CouponUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        service = ZohoWebhookService()
+        try:
+            result = service.update_coupon(
+                org_id,
+                coupon_id,
+                serializer.validated_data
+            )
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Accept both webhook envelopes:
+        # 1) {"code": 0, "zoho_response": {...}}
+        # 2) {"response": {"code": 0, "zoho_response": {...}}}
+        envelope = result.get('response', result)
+
+        if envelope.get('code') not in (None, 0):
+            return Response(
+                {
+                    'error': 'Zoho webhook error.',
+                    'zoho_message': envelope.get('message'),
+                    'zoho_code': envelope.get('code'),
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        zoho_response = envelope.get('zoho_response', envelope)
+
+        if not isinstance(zoho_response, dict):
+            return Response(
+                {
+                    'error': 'Invalid Zoho response format.',
+                    'zoho_message': 'Expected JSON object for zoho_response.',
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if zoho_response.get('code') not in (None, 0):
+            return Response(
+                {
+                    'error': 'Zoho Commerce rejected the update.',
+                    'zoho_message': zoho_response.get('message'),
+                    'zoho_code': zoho_response.get('code'),
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        coupon = zoho_response.get('coupon', {})
+
+        clean_coupon = {
+            "coupon_id": coupon.get("coupon_id"),
+            "coupon_code": coupon.get("coupon_code"),
+            "coupon_name": coupon.get("coupon_name") or coupon.get("name"),
+            "description": coupon.get("description"),
+            "discount_type": coupon.get("discount_type"),
+            "discount_value": coupon.get("discount_value"),
+            "status": coupon.get("status"),
+            "is_active": coupon.get("is_active"),
+            "minimum_order_value": coupon.get("minimum_order_value"),
+            "activation_time": coupon.get("activation_time"),
+            "expiry_at": coupon.get("expiry_at"),
+            "updated_time": coupon.get("updated_time"),
+        }
+      
+        return Response(
+            {'message': 'Coupon updated successfully.', 'data': clean_coupon},
             status=status.HTTP_200_OK
         )

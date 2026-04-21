@@ -162,3 +162,22 @@ class ZohoWebhookService:
         """
         url = self._get_webhook_url(org_id, 'delete_coupon')
         return self._post(url, {"coupon_id": coupon_id})
+    
+    def get_coupon(self, org_id: int, coupon_id: str) -> dict:
+        """
+        POST {"coupon_id": "..."} to the get_coupon webhook.
+        Returns full coupon details from Zoho Commerce.
+        Used to pre-fill the edit form on the frontend.
+        """
+        url = self._get_webhook_url(org_id, 'get_coupon')
+        return self._post(url, {"coupon_id": coupon_id})
+
+    def update_coupon(self, org_id: int, coupon_id: str, update_data: dict) -> dict:
+        """
+        POST {"coupon_id": "...", ...update_fields} to the update_coupon webhook.
+        update_data comes from CouponUpdateSerializer.validated_data.
+        Only fields present in update_data are sent — Zoho ignores missing fields.
+        """
+        url = self._get_webhook_url(org_id, 'update_coupon')
+        payload = {"coupon_id": coupon_id, **update_data}
+        return self._post(url, payload)

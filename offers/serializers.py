@@ -113,3 +113,29 @@ class CouponCreateSerializer(serializers.Serializer):
 
 class CouponDeleteSerializer(serializers.Serializer):
     coupon_id = serializers.CharField()
+    
+
+class CouponGetSerializer(serializers.Serializer):
+    """Used to validate the coupon_id path param before fetching from Zoho."""
+    coupon_id = serializers.CharField()
+
+
+class CouponUpdateSerializer(serializers.Serializer):
+    # All fields optional — only include what you want to change
+    coupon_name                 = serializers.CharField(required=False)
+    coupon_code                = serializers.CharField(required=False, allow_blank=True)
+    description                 = serializers.CharField(required=False, allow_blank=True)
+    is_active                   = serializers.BooleanField(required=False)
+    show_in_storefront          = serializers.BooleanField(required=False)
+    discount_value              = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
+    max_discount_amount         = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
+    eligible_product_ids        = serializers.ListField(child=serializers.DictField(), required=False)
+    valid_from                  = serializers.CharField(required=False)
+    never_expires               = serializers.BooleanField(required=False)
+    valid_till                  = serializers.CharField(required=False, allow_blank=True)
+    minimum_cart_amount_enabled = serializers.BooleanField(required=False)
+    minimum_cart_amount         = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
+    store_limit_enabled         = serializers.BooleanField(required=False)
+    store_limit                 = serializers.IntegerField(required=False)
+    customer_limit_enabled      = serializers.BooleanField(required=False)
+    customer_limit              = serializers.IntegerField(required=False)
