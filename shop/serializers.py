@@ -10,11 +10,25 @@ from .models import Cart, CartItem, Order, OrderItem, OrderReturn, OrderReturnLi
 
 
 class ProductMiniSerializer(serializers.ModelSerializer):
+    image_url = serializers.SerializerMethodField()
+
     class Meta:
         model = Product
         fields = (
             'id', 'name', 'slug', 'category', 'sku', 'price', 'currency', 'image_url',
         )
+
+    def get_image_url(self, obj):
+        current = (getattr(obj, 'image_url', '') or '').strip()
+        if current:
+            return current
+        zoho_pid = (getattr(obj, 'zoho_product_id', '') or '').strip()
+        store_id = getattr(obj, 'store_id', None)
+        if not (zoho_pid and store_id):
+            return ''
+        request = self.context.get('request')
+        path = f'/api/shop/zoho-products/{zoho_pid}/image/?store_id={store_id}'
+        return request.build_absolute_uri(path) if request else path
 
 
 class StoreTinySerializer(serializers.ModelSerializer):
@@ -94,18 +108,34 @@ class CartSerializer(serializers.ModelSerializer):
         return groups
 
 
-class CartAddZohoItemSerializer(serializers.Serializer):
-    store_id = serializers.IntegerField()
+class CartAddFromZohoAccountSerializer(serializers.Serializer):
+    """
+    Same flow as store-list + product-list under /zoho/multi/... — uses ZohoCommerceAccount id
+    and organization_id from the store list, plus zoho_product_id from product list JSON.
+    Optional primary_domain from store list (needed to auto-create local Store if missing).
+    """
+
+    zoho_account_id = serializers.IntegerField(min_value=1)
+    organization_id = serializers.CharField(max_length=120)
     zoho_product_id = serializers.CharField(max_length=120)
     quantity = serializers.IntegerField(min_value=1, default=1)
+    primary_domain = serializers.CharField(
+        max_length=255,
+        required=False,
+        allow_blank=True,
+        help_text='From /zoho/multi/stores/ for this organization (e.g. www.example.com).',
+    )
 
     def validate(self, attrs):
-        store = get_object_or_404(Store, pk=attrs['store_id'], is_active=True)
         zoho_product_id = (attrs.get('zoho_product_id') or '').strip()
         if not zoho_product_id:
             raise serializers.ValidationError({'zoho_product_id': 'This field is required.'})
-        attrs['store'] = store
+        org = (attrs.get('organization_id') or '').strip()
+        if not org:
+            raise serializers.ValidationError({'organization_id': 'This field is required.'})
         attrs['zoho_product_id'] = zoho_product_id
+        attrs['organization_id'] = org
+        attrs['primary_domain'] = (attrs.get('primary_domain') or '').strip()
         return attrs
 
 

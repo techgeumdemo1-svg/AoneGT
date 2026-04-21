@@ -11,6 +11,7 @@ from .views import (
     OrderReorderAPIView,
     ZohoProductListAPIView,
     ZohoProductDetailAPIView,
+    ZohoProductImageProxyAPIView,
 )
 
 urlpatterns = [
@@ -25,5 +26,10 @@ urlpatterns = [
 
     path('zoho-products/', ZohoProductListAPIView.as_view(), name='zoho-product-list'),
     path('zoho-products/<str:product_id>/', ZohoProductDetailAPIView.as_view(), name='zoho-product-detail'),
+    path(
+        'zoho-products/<str:product_id>/image/',
+        ZohoProductImageProxyAPIView.as_view(),
+        name='zoho-product-image-proxy',
+    ),
 
 ]
