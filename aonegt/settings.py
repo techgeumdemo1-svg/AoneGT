@@ -164,3 +164,9 @@ ZOHO_REFRESH_TOKEN = os.getenv('ZOHO_REFRESH_TOKEN', '').strip()
 
 
 ZOHO_REDIRECT_URI = os.getenv("ZOHO_REDIRECT_URI")
+from datetime import timedelta
+
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(days=5),   # 👈 increase this
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=5),
+}
