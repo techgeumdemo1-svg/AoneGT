@@ -6,5 +6,7 @@ urlpatterns = [
     path('api/auth/', include('accounts.urls')),
     path('api/catalog/', include('catalog.urls')),
     path('api/shop/', include('shop.urls')),
-     path("zoho/", include("zoho_integration.urls"))
+    path("zoho/", include("zoho_integration.urls")),
+    path("offers/", include("offers.urls")),
+     
 ]
