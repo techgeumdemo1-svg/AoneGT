@@ -8,6 +8,7 @@ __pycache__/
 !.env.example
 
 *.sqlite3
+db.sqlite3
 
 .venv/
 venv/
