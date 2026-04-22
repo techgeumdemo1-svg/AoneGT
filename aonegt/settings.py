@@ -166,3 +166,6 @@ ZOHO_REFRESH_TOKEN = os.getenv('ZOHO_REFRESH_TOKEN', '').strip()
 
 
 ZOHO_REDIRECT_URI = os.getenv("ZOHO_REDIRECT_URI")
+
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
