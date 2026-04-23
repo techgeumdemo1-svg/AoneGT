@@ -1,3 +1,4 @@
+import traceback
 from django.conf import settings
 from django.core.mail import send_mail
 from rest_framework import status
@@ -172,37 +173,65 @@ class LoginAPIView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
+# class ForgotPasswordAPIView(APIView):
+#     def post(self, request):
+#         serializer = ForgotPasswordRequestSerializer(data=request.data)
+#         serializer.is_valid(raise_exception=True)
+#         email = serializer.validated_data['email']
+
+#         user = User.objects.filter(email__iexact=email).first()
+#         if user:
+#             otp = PasswordResetOTP.objects.create(user=user)
+#             subject = 'AoneGt Password Reset OTP'
+#             message = (
+#                 f'Hello {user.first_name},\n\n'
+#                 f'Your OTP for password reset is: {otp.otp_code}\n'
+#                 f'This OTP will expire in 10 minutes.\n\n'
+#                 f'Reset URL: {settings.FRONTEND_RESET_URL}\n\n'
+#                 f'If you did not request this, please ignore this email.'
+#             )
+#             send_mail(
+#                 subject, message, settings.DEFAULT_FROM_EMAIL, [user.email], fail_silently=False,
+#             )
+
+#         return Response(
+#             {
+#                 'message': (
+#                     'If an account exists for this email, a password reset code has been sent.'
+#                 ),
+#                 'email': email,
+#             },
+#             status=status.HTTP_200_OK,
+#         )
 class ForgotPasswordAPIView(APIView):
     def post(self, request):
-        serializer = ForgotPasswordRequestSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        email = serializer.validated_data['email']
+        try:
+            serializer = ForgotPasswordRequestSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            email = serializer.validated_data['email']
 
-        user = User.objects.filter(email__iexact=email).first()
-        if user:
-            otp = PasswordResetOTP.objects.create(user=user)
-            subject = 'AoneGt Password Reset OTP'
-            message = (
-                f'Hello {user.first_name},\n\n'
-                f'Your OTP for password reset is: {otp.otp_code}\n'
-                f'This OTP will expire in 10 minutes.\n\n'
-                f'Reset URL: {settings.FRONTEND_RESET_URL}\n\n'
-                f'If you did not request this, please ignore this email.'
-            )
-            send_mail(
-                subject, message, settings.DEFAULT_FROM_EMAIL, [user.email], fail_silently=False,
-            )
+            user = User.objects.filter(email__iexact=email).first()
+            if user:
+                otp = PasswordResetOTP.objects.create(user=user)
+                subject = 'AoneGt Password Reset OTP'
+                message = (
+                    f'Hello {user.first_name},\n\n'
+                    f'Your OTP for password reset is: {otp.otp_code}\n'
+                    f'This OTP will expire in 10 minutes.\n\n'
+                    f'Reset URL: {settings.FRONTEND_RESET_URL}\n\n'
+                    f'If you did not request this, please ignore this email.'
+                )
+                send_mail(
+                    subject, message, settings.DEFAULT_FROM_EMAIL, [user.email], fail_silently=False,
+                )
 
-        return Response(
-            {
-                'message': (
-                    'If an account exists for this email, a password reset code has been sent.'
-                ),
-                'email': email,
-            },
-            status=status.HTTP_200_OK,
-        )
-
+            return Response({'message': 'If an account exists for this email, a password reset code has been sent.', 'email': email}, status=status.HTTP_200_OK)
+        
+        except Exception as e:
+            return Response({
+                'error': str(e),
+                'trace': traceback.format_exc()
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class ResetPasswordAPIView(APIView):
     def post(self, request):
