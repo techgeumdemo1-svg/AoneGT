@@ -1,0 +1,36 @@
+from django.shortcuts import render
+
+from django.contrib.auth import get_user_model
+from django.conf import settings
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from rest_framework import status
+
+User = get_user_model()
+
+@api_view(['POST'])
+def create_superuser(request):
+    secret = request.headers.get("X-ADMIN-SECRET")
+
+    if not secret or secret != settings.SUPERUSER_API_SECRET:
+        return Response({"error": "Unauthorized"}, status=status.HTTP_403_FORBIDDEN)
+
+    username = request.data.get("username")
+    email = request.data.get("email")
+    password = request.data.get("password")
+
+    if not username or not password:
+        return Response({"error": "Username and password required"}, status=400)
+
+    if User.objects.filter(username=username).exists():
+        return Response({"error": "User already exists"}, status=400)
+
+    user = User.objects.create_superuser(
+        username=username,
+        email=email,
+        password=password
+    )
+
+    return Response({
+        "message": "Superuser created successfully"
+    }, status=201)

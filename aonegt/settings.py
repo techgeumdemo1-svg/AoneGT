@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+SUPERUSER_API_SECRET = os.environ.get("SUPERUSER_API_SECRET")
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY') or 'change-me-set-DJANGO_SECRET_KEY-in-env'
 DEBUG = os.getenv('DEBUG', 'True') == 'True'
 ALLOWED_HOSTS = [
@@ -29,6 +30,7 @@ INSTALLED_APPS = [
     'shop',
     'zoho_integration',
     'offers',
+    'superuser',
     
 ]
 

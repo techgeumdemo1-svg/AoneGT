@@ -10,6 +10,7 @@ urlpatterns = [
     path('api/shop/', include('shop.urls')),
     path("zoho/", include("zoho_integration.urls")),
     path("api/offers/", include("offers.urls"), name='offers'),
+     path('api/admin/', include('superuser.urls')),
      
 ]
 

@@ -20,3 +20,4 @@ env/
 # Django static/media (keep if you use them; otherwise ignore)
 staticfiles/
 media/
+FULL_CODE_README.md
