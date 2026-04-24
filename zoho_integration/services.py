@@ -170,3 +170,14 @@ class ZohoCommerceService:
         except requests.RequestException as e:
             raise ZohoIntegrationError(f"Zoho categories request failed: {e}") from e
         return _get_json_or_raise_error(response, label="categories request")
+
+    def get_category_detail(self, organization_id, category_id):
+        url = f"{self.commerce_base_url}/store/api/v1/categories/{category_id}"
+        params = {
+            "organization_id": organization_id,
+        }
+        try:
+            response = requests.get(url, headers=self._headers(), params=params, timeout=30)
+        except requests.RequestException as e:
+            raise ZohoIntegrationError(f"Zoho category detail request failed: {e}") from e
+        return _get_json_or_raise_error(response, label="category detail request")
