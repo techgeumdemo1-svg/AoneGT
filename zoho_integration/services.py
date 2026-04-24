@@ -1,11 +1,33 @@
 import requests
+import time
 
 
 class ZohoIntegrationError(Exception):
     pass
 
 
+_TOKEN_CACHE_TTL_FALLBACK_SECONDS = 50 * 60
+_TOKEN_CACHE_SAFETY_SECONDS = 30
+_TOKEN_CACHE: dict[str, tuple[str, float]] = {}
+
+
+def _token_cache_key(account) -> str:
+    account_id = getattr(account, "id", None)
+    if account_id is not None:
+        return f"id:{account_id}"
+    email = (getattr(account, "email", "") or "").strip().lower()
+    return f"email:{email}" if email else "anonymous"
+
+
 def get_zoho_access_token(account):
+    cache_key = _token_cache_key(account)
+    cached = _TOKEN_CACHE.get(cache_key)
+    now = time.time()
+    if cached:
+        cached_token, cached_expires_at = cached
+        if cached_token and cached_expires_at > now:
+            return cached_token
+
     accounts_url = (getattr(account, "accounts_url", "") or "https://accounts.zoho.com").rstrip("/")
     url = f"{accounts_url}/oauth/v2/token"
     payload = {
@@ -17,16 +39,36 @@ def get_zoho_access_token(account):
 
     try:
         response = requests.post(url, data=payload, timeout=30)
-        response.raise_for_status()
-        data = response.json()
     except requests.RequestException as e:
         raise ZohoIntegrationError(f"Zoho token request failed: {e}") from e
+
+    raw_text = (response.text or "").strip()
+    try:
+        data = response.json()
     except ValueError as e:
+        if not response.ok:
+            raise ZohoIntegrationError(
+                f"Zoho token request failed: HTTP {response.status_code}, body: {raw_text[:300]}"
+            ) from e
         raise ZohoIntegrationError("Invalid JSON from Zoho token endpoint.") from e
+
+    if not response.ok:
+        raise ZohoIntegrationError(
+            f"Zoho token request failed: HTTP {response.status_code}, response: {data}"
+        )
 
     token = data.get("access_token")
     if not token:
         raise ZohoIntegrationError(f"Failed to get access token: {data}")
+
+    expires_in = data.get("expires_in")
+    try:
+        expires_in_seconds = int(expires_in)
+    except (TypeError, ValueError):
+        expires_in_seconds = _TOKEN_CACHE_TTL_FALLBACK_SECONDS
+
+    cache_ttl = max(60, expires_in_seconds - _TOKEN_CACHE_SAFETY_SECONDS)
+    _TOKEN_CACHE[cache_key] = (token, now + cache_ttl)
     return token
 
 
@@ -68,10 +110,42 @@ class ZohoCommerceService:
     def list_stores(self):
         return get_all_zoho_stores(self.account)
 
-    def list_products(self, organization_id, page=1, per_page=200):
+    def list_products(self, organization_id, page=1, per_page=200, category_id=None):
         # Products/variants docs indicate store APIs use items READ scope.
         # Some endpoints need organization_id in query params.
         url = f"{self.commerce_base_url}/store/api/v1/products"
+        params = {
+            "organization_id": organization_id,
+            "page": page,
+            "per_page": per_page,
+        }
+        if category_id:
+            params["category_id"] = category_id
+        try:
+            response = requests.get(url, headers=self._headers(), params=params, timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            raise ZohoIntegrationError(f"Zoho products request failed: {e}") from e
+        except ValueError as e:
+            raise ZohoIntegrationError("Invalid JSON from Zoho products endpoint.") from e
+
+    def get_product_detail(self, organization_id, product_id):
+        url = f"{self.commerce_base_url}/store/api/v1/products/{product_id}"
+        params = {
+            "organization_id": organization_id,
+        }
+        try:
+            response = requests.get(url, headers=self._headers(), params=params, timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            raise ZohoIntegrationError(f"Zoho product detail request failed: {e}") from e
+        except ValueError as e:
+            raise ZohoIntegrationError("Invalid JSON from Zoho product detail endpoint.") from e
+
+    def list_categories(self, organization_id, page=1, per_page=200):
+        url = f"{self.commerce_base_url}/store/api/v1/categories"
         params = {
             "organization_id": organization_id,
             "page": page,
@@ -82,6 +156,6 @@ class ZohoCommerceService:
             response.raise_for_status()
             return response.json()
         except requests.RequestException as e:
-            raise ZohoIntegrationError(f"Zoho products request failed: {e}") from e
+            raise ZohoIntegrationError(f"Zoho categories request failed: {e}") from e
         except ValueError as e:
-            raise ZohoIntegrationError("Invalid JSON from Zoho products endpoint.") from e
+            raise ZohoIntegrationError("Invalid JSON from Zoho categories endpoint.") from e
