@@ -515,6 +515,7 @@ class MultiAccountZohoStoreListAPIView(APIView):
                         stores = [s for s in raw if isinstance(s, dict)]
                 for store in stores:
                     result.append({
+                        "account_id": account.id,
                         "account_name": account.name,
                         "account_email": account.email,
                         "store_id": store.get("zsite_id") or store.get("store_id"),
