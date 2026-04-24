@@ -91,6 +91,25 @@ def get_all_zoho_stores(account):
         raise ZohoIntegrationError("Invalid JSON from Zoho stores endpoint.") from e
 
 
+def _get_json_or_raise_error(response, *, label: str):
+    """Parse JSON; on HTTP error include Zoho response body in the exception message."""
+    if not response.ok:
+        try:
+            err_data = response.json()
+        except ValueError:
+            body_preview = (response.text or "")[:500]
+            raise ZohoIntegrationError(
+                f"Zoho {label} failed: HTTP {response.status_code}, body: {body_preview}"
+            ) from None
+        raise ZohoIntegrationError(
+            f"Zoho {label} failed: HTTP {response.status_code}, response: {err_data}"
+        ) from None
+    try:
+        return response.json()
+    except ValueError as e:
+        raise ZohoIntegrationError(f"Invalid JSON from Zoho {label} endpoint.") from e
+
+
 class ZohoCommerceService:
     def __init__(self, account):
         self.account = account
@@ -123,12 +142,9 @@ class ZohoCommerceService:
             params["category_id"] = category_id
         try:
             response = requests.get(url, headers=self._headers(), params=params, timeout=30)
-            response.raise_for_status()
-            return response.json()
         except requests.RequestException as e:
             raise ZohoIntegrationError(f"Zoho products request failed: {e}") from e
-        except ValueError as e:
-            raise ZohoIntegrationError("Invalid JSON from Zoho products endpoint.") from e
+        return _get_json_or_raise_error(response, label="products request")
 
     def get_product_detail(self, organization_id, product_id):
         url = f"{self.commerce_base_url}/store/api/v1/products/{product_id}"
@@ -137,14 +153,12 @@ class ZohoCommerceService:
         }
         try:
             response = requests.get(url, headers=self._headers(), params=params, timeout=30)
-            response.raise_for_status()
-            return response.json()
         except requests.RequestException as e:
             raise ZohoIntegrationError(f"Zoho product detail request failed: {e}") from e
-        except ValueError as e:
-            raise ZohoIntegrationError("Invalid JSON from Zoho product detail endpoint.") from e
+        return _get_json_or_raise_error(response, label="product detail request")
 
-    def list_categories(self, organization_id, page=1, per_page=200):
+    def list_categories(self, organization_id, page=1, per_page=100):
+        # per_page=200 may return 400 on some orgs; 100 is a safe default.
         url = f"{self.commerce_base_url}/store/api/v1/categories"
         params = {
             "organization_id": organization_id,
@@ -153,9 +167,17 @@ class ZohoCommerceService:
         }
         try:
             response = requests.get(url, headers=self._headers(), params=params, timeout=30)
-            response.raise_for_status()
-            return response.json()
         except requests.RequestException as e:
             raise ZohoIntegrationError(f"Zoho categories request failed: {e}") from e
-        except ValueError as e:
-            raise ZohoIntegrationError("Invalid JSON from Zoho categories endpoint.") from e
+        return _get_json_or_raise_error(response, label="categories request")
+
+    def get_category_detail(self, organization_id, category_id):
+        url = f"{self.commerce_base_url}/store/api/v1/categories/{category_id}"
+        params = {
+            "organization_id": organization_id,
+        }
+        try:
+            response = requests.get(url, headers=self._headers(), params=params, timeout=30)
+        except requests.RequestException as e:
+            raise ZohoIntegrationError(f"Zoho category detail request failed: {e}") from e
+        return _get_json_or_raise_error(response, label="category detail request")

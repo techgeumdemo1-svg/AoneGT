@@ -11,6 +11,7 @@ from .serializers import (
     RequestRegistrationOTPSerializer,
     LoginSerializer,
     ForgotPasswordRequestSerializer,
+    VerifyResetOTPSerializer,
     ResetPasswordSerializer,
     UserProfileSerializer,
 )
@@ -230,6 +231,31 @@ class ResetPasswordAPIView(APIView):
         otp.save(update_fields=['is_used'])
 
         return Response({'message': 'Password reset successful.'}, status=status.HTTP_200_OK)
+
+
+class VerifyResetOTPAPIView(APIView):
+    def post(self, request):
+        serializer = VerifyResetOTPSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data['email']
+        otp_code = serializer.validated_data['otp']
+
+        user = User.objects.filter(email__iexact=email).first()
+        otp = None
+        if user:
+            otp = PasswordResetOTP.objects.filter(
+                user=user, otp_code=otp_code, is_used=False,
+            ).first()
+        if not user or not otp or otp.is_expired:
+            return Response(
+                {'detail': 'Invalid or expired reset OTP.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response(
+            {'message': 'OTP verified successfully.'},
+            status=status.HTTP_200_OK,
+        )
 
 
 class ProfileAPIView(APIView):

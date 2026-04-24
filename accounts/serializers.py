@@ -160,6 +160,20 @@ class ForgotPasswordRequestSerializer(serializers.Serializer):
         return value.lower()
 
 
+class VerifyResetOTPSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    otp = serializers.CharField(max_length=6, min_length=6)
+
+    def validate_email(self, value):
+        return value.strip().lower()
+
+    def validate_otp(self, value):
+        otp = str(value).strip()
+        if not otp.isdigit() or len(otp) != 6:
+            raise serializers.ValidationError('Enter a valid 6-digit OTP.')
+        return otp
+
+
 class ResetPasswordSerializer(serializers.Serializer):
     email = serializers.EmailField()
     otp = serializers.CharField(max_length=6)
