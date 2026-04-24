@@ -1,4 +1,4 @@
-from django.http import JsonResponse
+from django.http import JsonResponse, HttpResponseRedirect
 from django.conf import settings
 import requests
 from typing import Optional
@@ -8,6 +8,7 @@ from rest_framework import status
 
 from .models import ZohoCommerceAccount
 from .services import ZohoCommerceService
+from catalog.models import Store
 
 
 def _is_top_level_category(category: dict) -> bool:
@@ -56,12 +57,14 @@ def _category_name(category: dict) -> str:
     return (category.get("name") or category.get("category_name") or "").strip()
 
 
-def _category_summary(category: dict) -> dict:
+def _category_summary(category: dict, fallback_image_url: str = "") -> dict:
+    image_url = _extract_image_url(category) or fallback_image_url
     return {
         "category_id": str(category.get("category_id") or category.get("id") or "").strip(),
         "name": _category_name(category),
         "url": category.get("url") or "",
         "sibling_order": category.get("sibling_order", 0),
+        "image_url": image_url,
     }
 
 
@@ -111,6 +114,46 @@ def _extract_price(payload: dict) -> str:
     return "0"
 
 
+def _extract_image_url(payload: dict) -> str:
+    direct = _first_present_value(
+        payload,
+        [
+            "image_url",
+            "image_name",
+            "image",
+            "product_image",
+            "image_path",
+            "image_src",
+            "thumbnail_url",
+        ],
+    )
+    if direct is not None:
+        return str(direct)
+
+    for list_key in ("images", "product_images", "documents", "attachments"):
+        rows = payload.get(list_key) or []
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            url = _first_present_value(
+                row,
+                [
+                    "image_url",
+                    "url",
+                    "download_url",
+                    "secure_url",
+                    "file_url",
+                    "src",
+                    "thumbnail_url",
+                ],
+            )
+            if url is not None:
+                return str(url)
+    return ""
+
+
 def _product_summary(product: dict) -> dict:
     return {
         "product_id": str(product.get("product_id") or product.get("item_id") or product.get("id") or "").strip(),
@@ -122,11 +165,7 @@ def _product_summary(product: dict) -> dict:
         ),
         "sku": product.get("sku") or product.get("product_sku") or "",
         "price": _extract_price(product),
-        "image_url": (
-            product.get("image_url")
-            or product.get("image_name")
-            or ""
-        ),
+        "image_url": _extract_image_url(product),
     }
 
 
@@ -619,11 +658,22 @@ class MultiAccountZohoProductListAPIView(APIView):
                         if detail_sku:
                             product["sku"] = detail_sku
                     if not (product.get("image_url") or product.get("image_name")):
-                        detail_image = detail_product.get("image_url") or detail_product.get("image_name")
+                        detail_image = _extract_image_url(detail_product)
                         if detail_image:
                             product["image_url"] = detail_image
 
             product_summaries = [_product_summary(p) for p in products]
+            store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
+            if store:
+                for row in product_summaries:
+                    if (row.get("image_url") or "").strip():
+                        continue
+                    pid = (row.get("product_id") or "").strip()
+                    if not pid:
+                        continue
+                    row["image_url"] = request.build_absolute_uri(
+                        f"/api/shop/zoho-products/{pid}/image/?store_id={store.pk}"
+                    )
 
             return Response({
                 "status": "success",
@@ -659,7 +709,16 @@ class MultiAccountZohoCategoryListAPIView(APIView):
             categories = data.get("categories", []) or data.get("category", [])
             categories = [c for c in categories if isinstance(c, dict)]
             main_categories = _menu_categories_for_response(categories)
-            main_categories = [_category_summary(c) for c in main_categories if _category_name(c)]
+            main_categories = [
+                _category_summary(
+                    c,
+                    fallback_image_url=request.build_absolute_uri(
+                        f"/zoho/multi/accounts/{account.id}/categories/{organization_id}/{str(c.get('category_id') or c.get('id') or '').strip()}/image/"
+                    ) if str(c.get("category_id") or c.get("id") or "").strip() else "",
+                )
+                for c in main_categories
+                if _category_name(c)
+            ]
 
             return Response({
                 "status": "success",
@@ -674,3 +733,54 @@ class MultiAccountZohoCategoryListAPIView(APIView):
                 "status": "error",
                 "message": str(e),
             }, status=400)
+
+
+class MultiAccountZohoCategoryImageProxyAPIView(APIView):
+    def get(self, request, account_id, organization_id, category_id):
+        try:
+            account = ZohoCommerceAccount.objects.get(id=account_id, is_active=True)
+        except ZohoCommerceAccount.DoesNotExist:
+            return Response({"detail": "Zoho account not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        service = ZohoCommerceService(account)
+
+        try:
+            data = service.list_categories(organization_id=organization_id)
+            categories = data.get("categories", []) or data.get("category", [])
+            categories = [c for c in categories if isinstance(c, dict)]
+            match = next(
+                (
+                    c for c in categories
+                    if str(c.get("category_id") or c.get("id") or "").strip() == str(category_id).strip()
+                ),
+                None,
+            )
+            if not match:
+                return Response({"detail": "Category not found"}, status=status.HTTP_404_NOT_FOUND)
+
+            image_url = _extract_image_url(match)
+            if not image_url:
+                try:
+                    detail = service.get_category_detail(
+                        organization_id=organization_id,
+                        category_id=category_id,
+                    )
+                except Exception:
+                    detail = {}
+                detail_row = (
+                    detail.get("category")
+                    or detail.get("data")
+                    or {}
+                )
+                if isinstance(detail_row, dict):
+                    image_url = _extract_image_url(detail_row)
+
+            if not image_url:
+                return Response(
+                    {"detail": "No image URL available for this category."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            return HttpResponseRedirect(image_url)
+        except Exception as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
