@@ -1,6 +1,8 @@
 from django.urls import path
 
 from .views import (
+    UserAddressListCreateAPIView,
+    UserAddressDetailAPIView,
     CartDetailAPIView,
     CartAddItemAPIView,
     CartItemDetailAPIView,
@@ -15,6 +17,8 @@ from .views import (
 )
 
 urlpatterns = [
+    path('addresses/', UserAddressListCreateAPIView.as_view(), name='shop-address-list-create'),
+    path('addresses/<int:pk>/', UserAddressDetailAPIView.as_view(), name='shop-address-detail'),
     path('cart/', CartDetailAPIView.as_view(), name='shop-cart'),
     path('cart/items/', CartAddItemAPIView.as_view(), name='shop-cart-add-item'),
     path('cart/items/<int:pk>/', CartItemDetailAPIView.as_view(), name='shop-cart-item'),
