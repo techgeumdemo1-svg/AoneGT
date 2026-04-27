@@ -577,6 +577,106 @@ class MultiAccountZohoStoreListAPIView(APIView):
         }, status=status.HTTP_200_OK)
 
 
+def _multi_account_product_list_response(request, account, organization_id: str):
+    service = ZohoCommerceService(account)
+    category_id = (request.GET.get("category_id") or "").strip() or None
+    include_descendants = _as_bool(request.GET.get("include_descendants"), default=True)
+
+    if category_id and include_descendants:
+        category_data = service.list_categories(organization_id=organization_id)
+        category_rows = category_data.get("categories", []) or category_data.get("category", [])
+        category_rows = [c for c in category_rows if isinstance(c, dict)]
+        category_ids = _collect_category_and_descendants(category_rows, category_id)
+
+        products = []
+        seen_product_ids: set[str] = set()
+        for current_category_id in category_ids:
+            data = service.list_products(
+                organization_id=organization_id,
+                category_id=current_category_id,
+            )
+            rows = data.get("products", []) or data.get("items", [])
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                pid = str(
+                    row.get("product_id")
+                    or row.get("item_id")
+                    or row.get("id")
+                    or ""
+                ).strip()
+                if pid and pid in seen_product_ids:
+                    continue
+                if pid:
+                    seen_product_ids.add(pid)
+                products.append(row)
+    else:
+        data = service.list_products(
+            organization_id=organization_id,
+            category_id=category_id,
+        )
+        products = data.get("products", []) or data.get("items", [])
+    products = [p for p in products if isinstance(p, dict)]
+
+    # Enrich missing prices from product detail endpoint.
+    for product in products:
+        if _extract_price(product) not in ("0", "0.00"):
+            continue
+        pid = str(product.get("product_id") or product.get("item_id") or product.get("id") or "").strip()
+        if not pid:
+            continue
+        try:
+            detail_data = service.get_product_detail(
+                organization_id=organization_id,
+                product_id=pid,
+            )
+        except Exception:
+            continue
+
+        detail_product = (
+            detail_data.get("product")
+            or detail_data.get("item")
+            or detail_data.get("data")
+            or {}
+        )
+        if isinstance(detail_product, dict):
+            detail_price = _extract_price(detail_product)
+            if detail_price not in ("0", "0.00"):
+                product["rate"] = detail_price
+            if not (product.get("sku") or product.get("product_sku")):
+                detail_sku = detail_product.get("sku") or detail_product.get("product_sku")
+                if detail_sku:
+                    product["sku"] = detail_sku
+            if not (product.get("image_url") or product.get("image_name")):
+                detail_image = _extract_image_url(detail_product)
+                if detail_image:
+                    product["image_url"] = detail_image
+
+    product_summaries = [_product_summary(p) for p in products]
+    store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
+    if store:
+        for row in product_summaries:
+            if (row.get("image_url") or "").strip():
+                continue
+            pid = (row.get("product_id") or "").strip()
+            if not pid:
+                continue
+            row["image_url"] = request.build_absolute_uri(
+                f"/api/shop/zoho-products/{pid}/image/?store_id={store.pk}"
+            )
+
+    return Response({
+        "status": "success",
+        "account_name": account.name,
+        "account_email": account.email,
+        "organization_id": organization_id,
+        "category_id": category_id,
+        "include_descendants": include_descendants,
+        "count": len(product_summaries),
+        "products": product_summaries,
+    })
+
+
 class MultiAccountZohoProductListAPIView(APIView):
     def get(self, request, account_id, organization_id):
         try:
@@ -587,104 +687,56 @@ class MultiAccountZohoProductListAPIView(APIView):
                 "message": "Zoho account not found"
             }, status=404)
 
-        service = ZohoCommerceService(account)
-        category_id = (request.GET.get("category_id") or "").strip() or None
-        include_descendants = _as_bool(request.GET.get("include_descendants"), default=True)
+        try:
+            return _multi_account_product_list_response(
+                request=request,
+                account=account,
+                organization_id=organization_id,
+            )
+        except Exception as e:
+            return Response({
+                "status": "error",
+                "message": str(e),
+            }, status=400)
+
+
+class MultiAccountZohoProductListQueryAPIView(APIView):
+    def get(self, request):
+        account_id_raw = (request.GET.get("account_id") or "").strip()
+        organization_id = (request.GET.get("organization_id") or "").strip()
+        if not account_id_raw:
+            return Response(
+                {"status": "error", "message": "account_id query parameter is required"},
+                status=400,
+            )
+        if not organization_id:
+            return Response(
+                {"status": "error", "message": "organization_id query parameter is required"},
+                status=400,
+            )
 
         try:
-            if category_id and include_descendants:
-                category_data = service.list_categories(organization_id=organization_id)
-                category_rows = category_data.get("categories", []) or category_data.get("category", [])
-                category_rows = [c for c in category_rows if isinstance(c, dict)]
-                category_ids = _collect_category_and_descendants(category_rows, category_id)
+            account_id = int(account_id_raw)
+        except ValueError:
+            return Response(
+                {"status": "error", "message": "account_id must be an integer"},
+                status=400,
+            )
 
-                products = []
-                seen_product_ids: set[str] = set()
-                for current_category_id in category_ids:
-                    data = service.list_products(
-                        organization_id=organization_id,
-                        category_id=current_category_id,
-                    )
-                    rows = data.get("products", []) or data.get("items", [])
-                    for row in rows:
-                        if not isinstance(row, dict):
-                            continue
-                        pid = str(
-                            row.get("product_id")
-                            or row.get("item_id")
-                            or row.get("id")
-                            or ""
-                        ).strip()
-                        if pid and pid in seen_product_ids:
-                            continue
-                        if pid:
-                            seen_product_ids.add(pid)
-                        products.append(row)
-            else:
-                data = service.list_products(
-                    organization_id=organization_id,
-                    category_id=category_id,
-                )
-                products = data.get("products", []) or data.get("items", [])
-            products = [p for p in products if isinstance(p, dict)]
-
-            # Enrich missing prices from product detail endpoint.
-            for product in products:
-                if _extract_price(product) not in ("0", "0.00"):
-                    continue
-                pid = str(product.get("product_id") or product.get("item_id") or product.get("id") or "").strip()
-                if not pid:
-                    continue
-                try:
-                    detail_data = service.get_product_detail(
-                        organization_id=organization_id,
-                        product_id=pid,
-                    )
-                except Exception:
-                    continue
-
-                detail_product = (
-                    detail_data.get("product")
-                    or detail_data.get("item")
-                    or detail_data.get("data")
-                    or {}
-                )
-                if isinstance(detail_product, dict):
-                    detail_price = _extract_price(detail_product)
-                    if detail_price not in ("0", "0.00"):
-                        product["rate"] = detail_price
-                    if not (product.get("sku") or product.get("product_sku")):
-                        detail_sku = detail_product.get("sku") or detail_product.get("product_sku")
-                        if detail_sku:
-                            product["sku"] = detail_sku
-                    if not (product.get("image_url") or product.get("image_name")):
-                        detail_image = _extract_image_url(detail_product)
-                        if detail_image:
-                            product["image_url"] = detail_image
-
-            product_summaries = [_product_summary(p) for p in products]
-            store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
-            if store:
-                for row in product_summaries:
-                    if (row.get("image_url") or "").strip():
-                        continue
-                    pid = (row.get("product_id") or "").strip()
-                    if not pid:
-                        continue
-                    row["image_url"] = request.build_absolute_uri(
-                        f"/api/shop/zoho-products/{pid}/image/?store_id={store.pk}"
-                    )
-
+        try:
+            account = ZohoCommerceAccount.objects.get(id=account_id, is_active=True)
+        except ZohoCommerceAccount.DoesNotExist:
             return Response({
-                "status": "success",
-                "account_name": account.name,
-                "account_email": account.email,
-                "organization_id": organization_id,
-                "category_id": category_id,
-                "include_descendants": include_descendants,
-                "count": len(product_summaries),
-                "products": product_summaries,
-            })
+                "status": "error",
+                "message": "Zoho account not found"
+            }, status=404)
+
+        try:
+            return _multi_account_product_list_response(
+                request=request,
+                account=account,
+                organization_id=organization_id,
+            )
         except Exception as e:
             return Response({
                 "status": "error",
