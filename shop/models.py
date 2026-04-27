@@ -7,6 +7,38 @@ from django.db.models import Sum
 from catalog.models import Product, Store
 
 
+class UserAddress(models.Model):
+    class AddressType(models.TextChoices):
+        HOME = 'home', 'Home'
+        WORK = 'work', 'Work'
+        OTHER = 'other', 'Other'
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='saved_addresses',
+    )
+    full_name = models.CharField(max_length=255)
+    phone_number = models.CharField(max_length=50)
+    address = models.CharField(max_length=500)
+    city = models.CharField(max_length=120)
+    state = models.CharField(max_length=120, blank=True)
+    address_type = models.CharField(
+        max_length=20,
+        choices=AddressType.choices,
+        default=AddressType.HOME,
+    )
+    is_default = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-is_default', '-updated_at', '-created_at']
+
+    def __str__(self):
+        return f'{self.user_id}: {self.full_name} ({self.get_address_type_display()})'
+
+
 class Cart(models.Model):
     """One basket per user; each line carries its ``store`` (multi-store cart)."""
 
@@ -48,6 +80,13 @@ class Order(models.Model):
         SYNC_FAILED = 'sync_failed', 'Zoho sync failed'
         CANCELLED = 'cancelled', 'Cancelled'
 
+    class PaymentMethod(models.TextChoices):
+        GEIDEA = 'geidea', 'Geidea'
+        CREDIT_DEBIT_CARD = 'credit_debit_card', 'Credit / Debit Card'
+        CARD_ON_DELIVERY = 'card_on_delivery', 'Card on Delivery'
+        CASH_ON_DELIVERY = 'cash_on_delivery', 'Cash on Delivery'
+        PAY_BY_LINK = 'pay_by_link', 'Pay by Link'
+
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='orders')
     store = models.ForeignKey(Store, on_delete=models.PROTECT, related_name='orders')
     status = models.CharField(
@@ -56,7 +95,14 @@ class Order(models.Model):
         default=Status.PENDING_ZOHO_SYNC,
     )
     currency = models.CharField(max_length=8, default='AED')
+    payment_method = models.CharField(
+        max_length=32,
+        choices=PaymentMethod.choices,
+        default=PaymentMethod.CASH_ON_DELIVERY,
+    )
     subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0'))
+    vat_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('5.00'))
+    vat_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0'))
     shipping_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0'))
     total = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0'))
 

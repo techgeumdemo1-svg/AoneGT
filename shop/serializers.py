@@ -6,7 +6,15 @@ from rest_framework import serializers
 
 from catalog.models import Product, Store
 
-from .models import Cart, CartItem, Order, OrderItem, OrderReturn, OrderReturnLine
+from .models import (
+    Cart,
+    CartItem,
+    Order,
+    OrderItem,
+    OrderReturn,
+    OrderReturnLine,
+    UserAddress,
+)
 
 
 class ProductMiniSerializer(serializers.ModelSerializer):
@@ -146,6 +154,65 @@ class CartItemUpdateSerializer(serializers.ModelSerializer):
         extra_kwargs = {'quantity': {'min_value': 1}}
 
 
+class UserAddressSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UserAddress
+        fields = (
+            'id',
+            'full_name',
+            'phone_number',
+            'address',
+            'city',
+            'state',
+            'address_type',
+            'is_default',
+            'created_at',
+            'updated_at',
+        )
+        read_only_fields = ('id', 'created_at', 'updated_at')
+
+    def validate_full_name(self, value):
+        value = (value or '').strip()
+        if not value:
+            raise serializers.ValidationError('Full name is required.')
+        return value
+
+    def validate_phone_number(self, value):
+        value = (value or '').strip()
+        if not value:
+            raise serializers.ValidationError('Phone number is required.')
+        return value
+
+    def validate_address(self, value):
+        value = (value or '').strip()
+        if not value:
+            raise serializers.ValidationError('Address is required.')
+        return value
+
+    def validate_city(self, value):
+        value = (value or '').strip()
+        if not value:
+            raise serializers.ValidationError('City is required.')
+        return value
+
+    def validate_state(self, value):
+        return (value or '').strip()
+
+    def create(self, validated_data):
+        user = self.context['request'].user
+        validated_data['user'] = user
+        if validated_data.get('is_default'):
+            UserAddress.objects.filter(user=user, is_default=True).update(is_default=False)
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        if validated_data.get('is_default'):
+            UserAddress.objects.filter(user=instance.user, is_default=True).exclude(
+                pk=instance.pk,
+            ).update(is_default=False)
+        return super().update(instance, validated_data)
+
+
 class OrderItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = OrderItem
@@ -173,7 +240,8 @@ class OrderSerializer(serializers.ModelSerializer):
     class Meta:
         model = Order
         fields = (
-            'id', 'store', 'status', 'currency', 'subtotal', 'shipping_amount', 'total',
+            'id', 'store', 'status', 'currency', 'payment_method',
+            'subtotal', 'vat_percent', 'vat_amount', 'shipping_amount', 'total',
             'shipping_name', 'shipping_phone', 'shipping_address', 'shipping_city',
             'shipping_state', 'shipping_postal_code', 'shipping_country',
             'billing_same_as_shipping',
@@ -185,7 +253,8 @@ class OrderSerializer(serializers.ModelSerializer):
             'items', 'created_at', 'updated_at',
         )
         read_only_fields = (
-            'status', 'subtotal', 'total', 'zoho_checkout_id', 'zoho_salesorder_id',
+            'status', 'subtotal', 'vat_percent', 'vat_amount', 'total',
+            'zoho_checkout_id', 'zoho_salesorder_id',
             'zoho_sync_error', 'zoho_synced_at',
             'returned_total', 'balance_remaining',
             'created_at', 'updated_at',
@@ -203,6 +272,19 @@ class OrderSerializer(serializers.ModelSerializer):
 
 class CheckoutSerializer(serializers.Serializer):
     store_id = serializers.IntegerField()
+    address_id = serializers.IntegerField(required=False, min_value=1)
+    payment_method = serializers.ChoiceField(
+        choices=Order.PaymentMethod.choices,
+        required=False,
+        default=Order.PaymentMethod.CASH_ON_DELIVERY,
+    )
+    vat_percent = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        required=False,
+        min_value=Decimal('0'),
+        default=Decimal('5.00'),
+    )
     shipping_amount = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
@@ -211,13 +293,13 @@ class CheckoutSerializer(serializers.Serializer):
         min_value=Decimal('0'),
     )
 
-    shipping_name = serializers.CharField(max_length=255)
-    shipping_phone = serializers.CharField(max_length=50)
-    shipping_address = serializers.CharField(max_length=500)
-    shipping_city = serializers.CharField(max_length=120)
+    shipping_name = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    shipping_phone = serializers.CharField(max_length=50, required=False, allow_blank=True)
+    shipping_address = serializers.CharField(max_length=500, required=False, allow_blank=True)
+    shipping_city = serializers.CharField(max_length=120, required=False, allow_blank=True)
     shipping_state = serializers.CharField(max_length=120, required=False, allow_blank=True)
     shipping_postal_code = serializers.CharField(max_length=32, required=False, allow_blank=True)
-    shipping_country = serializers.CharField(max_length=120)
+    shipping_country = serializers.CharField(max_length=120, required=False, allow_blank=True)
 
     billing_same_as_shipping = serializers.BooleanField(default=True)
     billing_name = serializers.CharField(max_length=255, required=False, allow_blank=True)
@@ -246,6 +328,32 @@ class CheckoutSerializer(serializers.Serializer):
             raise serializers.ValidationError({'cart': 'Cart has no items for this store.'})
         attrs['cart'] = cart
         attrs['checkout_items'] = checkout_items
+
+        address_id = attrs.get('address_id')
+        if address_id:
+            address = UserAddress.objects.filter(
+                pk=address_id,
+                user=request.user if request else None,
+            ).first()
+            if not address:
+                raise serializers.ValidationError({'address_id': 'Address not found.'})
+            attrs['shipping_name'] = address.full_name
+            attrs['shipping_phone'] = address.phone_number
+            attrs['shipping_address'] = address.address
+            attrs['shipping_city'] = address.city
+            attrs['shipping_state'] = address.state
+            attrs['shipping_postal_code'] = attrs.get('shipping_postal_code') or ''
+            attrs['shipping_country'] = attrs.get('shipping_country') or 'UAE'
+        else:
+            required_ship = [
+                'shipping_name', 'shipping_phone', 'shipping_address',
+                'shipping_city', 'shipping_country',
+            ]
+            missing_ship = [f for f in required_ship if not (attrs.get(f) or '').strip()]
+            if missing_ship:
+                raise serializers.ValidationError(
+                    {f: 'This field is required unless address_id is provided.' for f in missing_ship},
+                )
 
         if not attrs.get('billing_same_as_shipping'):
             required = [

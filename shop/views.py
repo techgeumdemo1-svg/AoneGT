@@ -13,7 +13,7 @@ from rest_framework import generics, status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import Cart, CartItem, Order, OrderItem, OrderReturn
+from .models import Cart, CartItem, Order, OrderItem, OrderReturn, UserAddress
 from .services.zoho_commerce import ZohoCommerceError, ZohoCommerceService
 from .serializers import (
     CartSerializer,
@@ -24,6 +24,7 @@ from .serializers import (
     OrderSerializer,
     OrderReturnCreateSerializer,
     OrderReturnReadSerializer,
+    UserAddressSerializer,
 )
 from .services.zoho_returns import enqueue_push_return_to_zoho
 
@@ -389,6 +390,27 @@ class CartDetailAPIView(APIView):
         return Response(CartSerializer(cart).data, status=status.HTTP_200_OK)
 
 
+class UserAddressListCreateAPIView(generics.ListCreateAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = UserAddressSerializer
+
+    def get_queryset(self):
+        return UserAddress.objects.filter(user=self.request.user).order_by(
+            '-is_default', '-updated_at', '-created_at',
+        )
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+
+class UserAddressDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = UserAddressSerializer
+
+    def get_queryset(self):
+        return UserAddress.objects.filter(user=self.request.user)
+
+
 class CartAddItemAPIView(APIView):
     """
     Add to cart using the same ids as /zoho/multi/stores/ and
@@ -482,7 +504,9 @@ class CheckoutAPIView(APIView):
             shipping_amount = Decimal(settings.DEFAULT_SHIPPING_AMOUNT).quantize(Decimal('0.01'))
         subtotal = sum((it.line_subtotal for it in items), Decimal('0'))
         subtotal = subtotal.quantize(Decimal('0.01'))
-        total = (subtotal + shipping_amount).quantize(Decimal('0.01'))
+        vat_percent = Decimal(ser.validated_data.get('vat_percent') or '0').quantize(Decimal('0.01'))
+        vat_amount = ((subtotal * vat_percent) / Decimal('100')).quantize(Decimal('0.01'))
+        total = (subtotal + vat_amount + shipping_amount).quantize(Decimal('0.01'))
 
         billing_same = ser.validated_data['billing_same_as_shipping']
         ship = {k: ser.validated_data[k] for k in (
@@ -513,7 +537,10 @@ class CheckoutAPIView(APIView):
                 store=store,
                 status=Order.Status.PENDING_ZOHO_SYNC,
                 currency=currency,
+                payment_method=ser.validated_data['payment_method'],
                 subtotal=subtotal,
+                vat_percent=vat_percent,
+                vat_amount=vat_amount,
                 shipping_amount=shipping_amount,
                 total=total,
                 billing_same_as_shipping=billing_same,
