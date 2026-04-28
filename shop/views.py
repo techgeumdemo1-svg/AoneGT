@@ -13,7 +13,7 @@ from rest_framework import generics, status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import Cart, CartItem, Order, OrderItem, OrderReturn, UserAddress
+from .models import Cart, CartItem, Order, OrderItem, OrderReturn, UserAddress, WishlistItem
 from .services.zoho_commerce import ZohoCommerceError, ZohoCommerceService
 from .serializers import (
     CartSerializer,
@@ -25,8 +25,12 @@ from .serializers import (
     OrderReturnCreateSerializer,
     OrderReturnReadSerializer,
     UserAddressSerializer,
+    WishlistItemSerializer,
+    WishlistMoveToCartSerializer,
 )
 from .services.zoho_returns import enqueue_push_return_to_zoho
+
+WISHLIST_MAX_ITEMS_PER_USER = 100
 
 
 def _optional_store_for_zoho(request):
@@ -442,6 +446,18 @@ class CartAddItemAPIView(APIView):
         if resolve_err:
             return Response({'detail': resolve_err}, status=status.HTTP_400_BAD_REQUEST)
 
+        existing_qs = WishlistItem.objects.filter(user=request.user)
+        existing_count = existing_qs.count()
+        existing_item = existing_qs.filter(product__zoho_product_id=zoho_product_id).first()
+        if existing_count >= WISHLIST_MAX_ITEMS_PER_USER and not existing_item:
+            return Response(
+                {
+                    'detail': f'Wishlist limit reached. Maximum {WISHLIST_MAX_ITEMS_PER_USER} items allowed.',
+                    'max_items': WISHLIST_MAX_ITEMS_PER_USER,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         data, err, st = _perform_cart_add_zoho_product(
             request.user,
             store,
@@ -486,6 +502,118 @@ class CartItemDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
 
     def perform_destroy(self, instance):
         super().perform_destroy(instance)
+
+
+class WishlistListCreateAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        qs = WishlistItem.objects.filter(user=request.user).select_related('product', 'store')
+        return Response(WishlistItemSerializer(qs, many=True, context={'request': request}).data)
+
+    def post(self, request):
+        ser = CartAddFromZohoAccountSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        account = get_object_or_404(
+            ZohoCommerceAccount.objects.filter(is_active=True),
+            pk=ser.validated_data['zoho_account_id'],
+        )
+        organization_id = ser.validated_data['organization_id']
+        zoho_product_id = ser.validated_data['zoho_product_id']
+        primary_domain = ser.validated_data.get('primary_domain') or ''
+
+        store, resolve_err = _resolve_or_create_store_for_zoho_account(
+            account,
+            organization_id,
+            primary_domain,
+        )
+        if resolve_err:
+            return Response({'detail': resolve_err}, status=status.HTTP_400_BAD_REQUEST)
+
+        product = Product.objects.filter(
+            is_active=True,
+            store=store,
+            zoho_product_id=zoho_product_id,
+        ).first()
+        # Use account-level detail endpoint as source-of-truth.
+        # If this fails, do not silently save fallback values.
+        try:
+            account_service = ZohoAccountService(account)
+            zoho_payload = account_service.get_product_detail(
+                organization_id=organization_id,
+                product_id=zoho_product_id,
+            )
+        except Exception as e:
+            return Response(
+                {'detail': f'Unable to fetch full product detail from Zoho: {e}'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        try:
+            product = _upsert_local_product_from_zoho(store, zoho_product_id, zoho_payload)
+        except Exception as e:
+            return Response({'detail': str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        item, created = WishlistItem.objects.get_or_create(
+            user=request.user,
+            product=product,
+            defaults={'store': store},
+        )
+        if item.store_id != store.pk:
+            item.store = store
+            item.save(update_fields=['store'])
+
+        payload = WishlistItemSerializer(item, context={'request': request}).data
+        payload['already_exists'] = not created
+        return Response(payload, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class WishlistItemDetailAPIView(generics.RetrieveDestroyAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = WishlistItemSerializer
+
+    def get_queryset(self):
+        return WishlistItem.objects.filter(user=self.request.user).select_related('product', 'store')
+
+
+class WishlistMoveToCartAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        item = get_object_or_404(
+            WishlistItem.objects.select_related('product', 'store'),
+            pk=pk,
+            user=request.user,
+        )
+        ser = WishlistMoveToCartSerializer(data=request.data or {})
+        ser.is_valid(raise_exception=True)
+
+        quantity = ser.validated_data['quantity']
+        remove_from_wishlist = ser.validated_data['remove_from_wishlist']
+
+        with transaction.atomic():
+            cart, _ = Cart.objects.select_for_update().get_or_create(user=request.user)
+            cart_item, created = CartItem.objects.select_for_update().get_or_create(
+                cart=cart,
+                product=item.product,
+                defaults={'quantity': quantity, 'store': item.store},
+            )
+            if not created:
+                cart_item.quantity += quantity
+                cart_item.store = item.store
+                cart_item.save(update_fields=['quantity', 'store'])
+
+            if remove_from_wishlist:
+                item.delete()
+
+        cart_item = CartItem.objects.select_related('product', 'store').get(pk=cart_item.pk)
+        response_data = {
+            'status': 'success',
+            'message': 'Wishlist item moved to cart.',
+            'removed_from_wishlist': remove_from_wishlist,
+            'cart_item': CartItemSerializer(cart_item, context={'request': request}).data,
+        }
+        return Response(response_data, status=status.HTTP_200_OK)
 
 
 class CheckoutAPIView(APIView):

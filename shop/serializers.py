@@ -14,6 +14,7 @@ from .models import (
     OrderReturn,
     OrderReturnLine,
     UserAddress,
+    WishlistItem,
 )
 
 
@@ -152,6 +153,20 @@ class CartItemUpdateSerializer(serializers.ModelSerializer):
         model = CartItem
         fields = ('quantity',)
         extra_kwargs = {'quantity': {'min_value': 1}}
+
+
+class WishlistItemSerializer(serializers.ModelSerializer):
+    store = StoreTinySerializer(read_only=True)
+    product = ProductMiniSerializer(read_only=True)
+
+    class Meta:
+        model = WishlistItem
+        fields = ('id', 'store', 'product', 'created_at')
+
+
+class WishlistMoveToCartSerializer(serializers.Serializer):
+    quantity = serializers.IntegerField(min_value=1, required=False, default=1)
+    remove_from_wishlist = serializers.BooleanField(required=False, default=True)
 
 
 class UserAddressSerializer(serializers.ModelSerializer):

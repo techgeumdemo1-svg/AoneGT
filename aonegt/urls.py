@@ -2,11 +2,9 @@ from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
-from .views import health_version
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    path("health/version/", health_version),
     path('api/auth/', include('accounts.urls')),
     path('api/catalog/', include('catalog.urls')),
     path('api/shop/', include('shop.urls')),

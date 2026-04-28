@@ -169,6 +169,17 @@ def _product_summary(product: dict) -> dict:
     }
 
 
+def _extract_description(payload: dict) -> str:
+    return str(
+        payload.get("description")
+        or payload.get("product_description")
+        or payload.get("short_description")
+        or payload.get("long_description")
+        or payload.get("description_html")
+        or ""
+    ).strip()
+
+
 def _as_bool(value: Optional[str], default: bool = False) -> bool:
     raw = (value or "").strip().lower()
     if not raw:
@@ -737,6 +748,116 @@ class MultiAccountZohoProductListQueryAPIView(APIView):
                 account=account,
                 organization_id=organization_id,
             )
+        except Exception as e:
+            return Response({
+                "status": "error",
+                "message": str(e),
+            }, status=400)
+
+
+class MultiAccountZohoProductDetailQueryAPIView(APIView):
+    def get(self, request):
+        account_id_raw = (request.GET.get("account_id") or "").strip()
+        organization_id = (request.GET.get("organization_id") or "").strip()
+        product_id = (request.GET.get("product_id") or "").strip()
+
+        if not account_id_raw:
+            return Response(
+                {"status": "error", "message": "account_id query parameter is required"},
+                status=400,
+            )
+        if not organization_id:
+            return Response(
+                {"status": "error", "message": "organization_id query parameter is required"},
+                status=400,
+            )
+        if not product_id:
+            return Response(
+                {"status": "error", "message": "product_id query parameter is required"},
+                status=400,
+            )
+
+        try:
+            account_id = int(account_id_raw)
+        except ValueError:
+            return Response(
+                {"status": "error", "message": "account_id must be an integer"},
+                status=400,
+            )
+
+        try:
+            account = ZohoCommerceAccount.objects.get(id=account_id, is_active=True)
+        except ZohoCommerceAccount.DoesNotExist:
+            return Response(
+                {"status": "error", "message": "Zoho account not found"},
+                status=404,
+            )
+
+        try:
+            service = ZohoCommerceService(account)
+            detail_data = service.get_product_detail(
+                organization_id=organization_id,
+                product_id=product_id,
+            )
+            product = (
+                detail_data.get("product")
+                or detail_data.get("item")
+                or detail_data.get("data")
+                or detail_data
+            )
+            if not isinstance(product, dict):
+                return Response(
+                    {"status": "error", "message": "Invalid Zoho product detail payload"},
+                    status=502,
+                )
+
+            summary = _product_summary(product)
+            image_url = (summary.get("image_url") or "").strip()
+            store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
+            if not image_url and store and product_id:
+                image_url = request.build_absolute_uri(
+                    f"/api/shop/zoho-products/{product_id}/image/?store_id={store.pk}"
+                )
+
+            currency = str(
+                product.get("currency_code")
+                or product.get("currency")
+                or "AED"
+            ).strip() or "AED"
+
+            primary_domain = ""
+            if store and (store.zoho_store_domain or "").strip():
+                primary_domain = store.zoho_store_domain.strip()
+            elif "://" in str(product.get("product_url") or ""):
+                primary_domain = str(product.get("product_url")).split("/")[2]
+
+            return Response({
+                "status": "success",
+                "account_id": account.id,
+                "account_name": account.name,
+                "account_email": account.email,
+                "organization_id": str(organization_id),
+                "product": {
+                    "product_id": summary.get("product_id") or product_id,
+                    "product_name": summary.get("product_name"),
+                    "sku": summary.get("sku"),
+                    "price": summary.get("price"),
+                    "currency": currency,
+                    "description": _extract_description(product),
+                    "image_url": image_url,
+                },
+                "add_to_cart": {
+                    "endpoint": request.build_absolute_uri("/api/shop/cart/items/"),
+                    "method": "POST",
+                    "payload": {
+                        "zoho_account_id": account.id,
+                        "organization_id": str(organization_id),
+                        "zoho_product_id": summary.get("product_id") or product_id,
+                        "quantity": 1,
+                        "primary_domain": primary_domain,
+                    },
+                },
+            }, status=200)
         except Exception as e:
             return Response({
                 "status": "error",
