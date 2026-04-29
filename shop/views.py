@@ -394,6 +394,22 @@ class CartDetailAPIView(APIView):
         return Response(CartSerializer(cart).data, status=status.HTTP_200_OK)
 
 
+class CartClearAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request):
+        cart, _ = Cart.objects.get_or_create(user=request.user)
+        deleted_count, _details = cart.items.all().delete()
+        return Response(
+            {
+                'status': 'success',
+                'message': 'Cart cleared successfully.',
+                'deleted_items': int(deleted_count),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class UserAddressListCreateAPIView(generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = UserAddressSerializer
@@ -858,22 +874,76 @@ class ZohoProductImageProxyAPIView(APIView):
 
     permission_classes = [AllowAny]
 
+    @staticmethod
+    def _is_usable_image_url(value: str) -> bool:
+        raw = (value or '').strip()
+        return raw.startswith('http://') or raw.startswith('https://')
+
     def get(self, request, product_id):
         store, err = _optional_store_for_zoho(request)
         if err:
             return err
         try:
-            data = ZohoCommerceService.get_product_detail_storefront(
-                product_id,
-                store=store,
-            )
-            image_url = _extract_image_url_from_zoho_payload(data)
-            if not image_url:
-                return Response(
-                    {'detail': 'No direct image URL found in Zoho payload for this product.'},
-                    status=status.HTTP_404_NOT_FOUND,
+            image_url = ''
+
+            # 1) Storefront detail (public) first.
+            try:
+                data = ZohoCommerceService.get_product_detail_storefront(
+                    product_id,
+                    store=store,
                 )
-            return redirect(image_url)
+                image_url = _extract_image_url_from_zoho_payload(data)
+            except ZohoCommerceError:
+                image_url = ''
+            if self._is_usable_image_url(image_url):
+                return redirect(image_url)
+
+            # 2) Local catalog fallback if image was previously saved.
+            if store is not None:
+                local_image = (
+                    Product.objects.filter(store=store, zoho_product_id=str(product_id))
+                    .values_list('image_url', flat=True)
+                    .first()
+                ) or ''
+                if self._is_usable_image_url(local_image):
+                    return redirect(local_image)
+
+                # 3) Account-level detail fallback (OAuth store API).
+                org_id = str(getattr(store, 'zoho_org_id', '') or '').strip()
+                if org_id:
+                    account = ZohoCommerceAccount.objects.filter(
+                        is_active=True,
+                        organization_id=org_id,
+                    ).first()
+                    if account is not None:
+                        try:
+                            detail = ZohoAccountService(account).get_product_detail(
+                                organization_id=org_id,
+                                product_id=str(product_id),
+                            )
+                            source = (
+                                detail.get('product')
+                                or detail.get('item')
+                                or detail.get('data')
+                                or detail
+                            )
+                            if isinstance(source, dict):
+                                image_url = _extract_image_url_from_zoho_payload(source)
+                                if self._is_usable_image_url(image_url):
+                                    return redirect(image_url)
+                        except Exception:
+                            pass
+
+            placeholder_url = str(getattr(settings, 'ZOHO_IMAGE_PLACEHOLDER_URL', '') or '').strip()
+            if self._is_usable_image_url(placeholder_url):
+                return redirect(placeholder_url)
+
+            return Response(
+                {
+                    'detail': 'No direct image URL found in Zoho payload for this product.',
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
         except ZohoCommerceError as e:
             msg = str(e)
             st = (

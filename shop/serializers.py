@@ -47,6 +47,7 @@ class StoreTinySerializer(serializers.ModelSerializer):
 
 
 class CartItemSerializer(serializers.ModelSerializer):
+    item_id = serializers.IntegerField(source='id', read_only=True)
     store = StoreTinySerializer(read_only=True)
     product = ProductMiniSerializer(read_only=True)
     product_id = serializers.PrimaryKeyRelatedField(
@@ -58,7 +59,7 @@ class CartItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CartItem
-        fields = ('id', 'store', 'product', 'product_id', 'quantity', 'line_subtotal')
+        fields = ('item_id', 'store', 'product', 'product_id', 'quantity', 'line_subtotal')
 
     def get_line_subtotal(self, obj):
         return str(obj.line_subtotal.quantize(Decimal('0.01')))
@@ -67,25 +68,27 @@ class CartItemSerializer(serializers.ModelSerializer):
 class CartItemInGroupSerializer(serializers.ModelSerializer):
     """Line inside a store group (store is omitted; it is on the parent group)."""
 
+    item_id = serializers.IntegerField(source='id', read_only=True)
     product = ProductMiniSerializer(read_only=True)
     line_subtotal = serializers.SerializerMethodField()
 
     class Meta:
         model = CartItem
-        fields = ('id', 'product', 'quantity', 'line_subtotal')
+        fields = ('item_id', 'product', 'quantity', 'line_subtotal')
 
     def get_line_subtotal(self, obj):
         return str(obj.line_subtotal.quantize(Decimal('0.01')))
 
 
 class CartSerializer(serializers.ModelSerializer):
+    cart_id = serializers.IntegerField(source='id', read_only=True)
     items = CartItemSerializer(many=True, read_only=True)
     store_groups = serializers.SerializerMethodField()
     subtotal = serializers.SerializerMethodField()
 
     class Meta:
         model = Cart
-        fields = ('id', 'items', 'store_groups', 'subtotal', 'updated_at')
+        fields = ('cart_id', 'items', 'store_groups', 'subtotal', 'updated_at')
 
     def get_subtotal(self, obj):
         total = sum((item.line_subtotal for item in obj.items.all()), Decimal('0'))
@@ -251,12 +254,23 @@ class OrderSerializer(serializers.ModelSerializer):
     items = OrderItemSerializer(many=True, read_only=True)
     returned_total = serializers.SerializerMethodField()
     balance_remaining = serializers.SerializerMethodField()
+    order_code = serializers.SerializerMethodField()
+    display_status = serializers.SerializerMethodField()
+    items_count = serializers.SerializerMethodField()
+    can_reorder = serializers.SerializerMethodField()
+    can_return = serializers.SerializerMethodField()
+    return_status = serializers.SerializerMethodField()
+    order_date = serializers.SerializerMethodField()
+    refunded_amount = serializers.SerializerMethodField()
+    net_paid = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
         fields = (
             'id', 'store', 'status', 'currency', 'payment_method',
             'subtotal', 'vat_percent', 'vat_amount', 'shipping_amount', 'total',
+            'order_code', 'display_status', 'items_count',
+            'can_reorder', 'can_return', 'return_status', 'order_date',
             'shipping_name', 'shipping_phone', 'shipping_address', 'shipping_city',
             'shipping_state', 'shipping_postal_code', 'shipping_country',
             'billing_same_as_shipping',
@@ -264,16 +278,73 @@ class OrderSerializer(serializers.ModelSerializer):
             'billing_state', 'billing_postal_code', 'billing_country',
             'zoho_checkout_id', 'zoho_salesorder_id',
             'zoho_sync_error', 'zoho_synced_at',
-            'returned_total', 'balance_remaining',
+            'returned_total', 'balance_remaining', 'refunded_amount', 'net_paid',
             'items', 'created_at', 'updated_at',
         )
         read_only_fields = (
             'status', 'subtotal', 'vat_percent', 'vat_amount', 'total',
             'zoho_checkout_id', 'zoho_salesorder_id',
             'zoho_sync_error', 'zoho_synced_at',
-            'returned_total', 'balance_remaining',
+            'order_code', 'display_status', 'items_count',
+            'can_reorder', 'can_return', 'return_status', 'order_date',
+            'returned_total', 'balance_remaining', 'refunded_amount', 'net_paid',
             'created_at', 'updated_at',
         )
+
+    @staticmethod
+    def _to_base36(num: int) -> str:
+        chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+        if num <= 0:
+            return '0'
+        out = ''
+        n = num
+        while n:
+            n, rem = divmod(n, 36)
+            out = chars[rem] + out
+        return out
+
+    def get_order_code(self, obj):
+        # Stable 6-char code for UI cards, e.g. A1B2C3.
+        if obj.zoho_salesorder_id:
+            raw = ''.join(ch for ch in str(obj.zoho_salesorder_id).upper() if ch.isalnum())
+            if raw:
+                return raw[-6:].rjust(6, '0')
+        return self._to_base36(int(obj.pk or 0)).rjust(6, '0')
+
+    def get_display_status(self, obj):
+        mapping = {
+            Order.Status.SYNCED: 'Delivered',
+            Order.Status.PENDING_ZOHO_SYNC: 'Pending',
+            Order.Status.SYNC_FAILED: 'Pending',
+            Order.Status.CANCELLED: 'Cancelled',
+        }
+        return mapping.get(obj.status, 'Pending')
+
+    def get_items_count(self, obj):
+        return int(sum((int(it.quantity or 0) for it in obj.items.all()), 0))
+
+    def get_can_reorder(self, obj):
+        return bool(obj.items.exists())
+
+    def get_can_return(self, obj):
+        if obj.status != Order.Status.SYNCED:
+            return False
+        return self._order_return_status(obj) != 'full'
+
+    def _order_return_status(self, obj):
+        total = Decimal(str(obj.total or '0'))
+        refunded = _completed_returns_total(obj)
+        if refunded <= Decimal('0'):
+            return 'none'
+        if refunded >= total and total > Decimal('0'):
+            return 'full'
+        return 'partial'
+
+    def get_return_status(self, obj):
+        return self._order_return_status(obj)
+
+    def get_order_date(self, obj):
+        return obj.created_at.strftime('%d %b %Y')
 
     def get_returned_total(self, obj):
         return str(_completed_returns_total(obj))
@@ -283,6 +354,12 @@ class OrderSerializer(serializers.ModelSerializer):
         if br < Decimal('0'):
             br = Decimal('0')
         return str(br)
+
+    def get_refunded_amount(self, obj):
+        return self.get_returned_total(obj)
+
+    def get_net_paid(self, obj):
+        return self.get_balance_remaining(obj)
 
 
 class CheckoutSerializer(serializers.Serializer):

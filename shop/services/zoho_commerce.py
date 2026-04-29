@@ -285,6 +285,17 @@ class ZohoCommerceService:
                 params={'format': 'json'},
                 timeout=30,
             )
+            # Some Zoho stores reject storefront detail by id with 405.
+            # Fallback to the authenticated admin product-detail endpoint.
+            if response.status_code in (404, 405):
+                admin_url = f'{settings.ZOHO_COMMERCE_BASE_URL}/store/api/v1/products/{pid}'
+                admin_response = requests.get(
+                    admin_url,
+                    headers=cls.admin_headers(store),
+                    timeout=30,
+                )
+                admin_response.raise_for_status()
+                return admin_response.json()
             response.raise_for_status()
             return response.json()
         except requests.RequestException as e:

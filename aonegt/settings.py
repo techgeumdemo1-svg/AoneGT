@@ -183,6 +183,11 @@ ZOHO_ORG_ID = (os.getenv('ZOHO_ORG_ID') or ZOHO_COMMERCE_ORGANIZATION_ID or '').
 ZOHO_CLIENT_ID = os.getenv('ZOHO_CLIENT_ID', '').strip()
 ZOHO_CLIENT_SECRET = os.getenv('ZOHO_CLIENT_SECRET', '').strip()
 ZOHO_REFRESH_TOKEN = os.getenv('ZOHO_REFRESH_TOKEN', '').strip()
+# Optional image fallback used by /api/shop/zoho-products/<id>/image/ when Zoho has no image URL.
+ZOHO_IMAGE_PLACEHOLDER_URL = os.getenv(
+    'ZOHO_IMAGE_PLACEHOLDER_URL',
+    'https://placehold.co/600x600?text=No+Image',
+).strip()
 
 
 ZOHO_REDIRECT_URI = os.getenv("ZOHO_REDIRECT_URI")

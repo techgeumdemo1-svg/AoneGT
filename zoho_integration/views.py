@@ -667,7 +667,14 @@ def _multi_account_product_list_response(request, account, organization_id: str)
     store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
     if store:
         for row in product_summaries:
-            if (row.get("image_url") or "").strip():
+            current_image = (row.get("image_url") or "").strip()
+            # Zoho sometimes returns only an image filename (not a usable URL).
+            # In that case, replace it with our proxy URL.
+            if current_image and (
+                current_image.startswith("http://")
+                or current_image.startswith("https://")
+                or current_image.startswith("/")
+            ):
                 continue
             pid = (row.get("product_id") or "").strip()
             if not pid:
@@ -814,6 +821,14 @@ class MultiAccountZohoProductDetailQueryAPIView(APIView):
             summary = _product_summary(product)
             image_url = (summary.get("image_url") or "").strip()
             store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
+            # If Zoho returned only a filename (e.g. "WhatsApp Image ... .jpeg"),
+            # it isn't a usable URL for the frontend—force proxy fallback.
+            if image_url and not (
+                image_url.startswith("http://")
+                or image_url.startswith("https://")
+                or image_url.startswith("/")
+            ):
+                image_url = ""
             if not image_url and store and product_id:
                 image_url = request.build_absolute_uri(
                     f"/api/shop/zoho-products/{product_id}/image/?store_id={store.pk}"
@@ -865,6 +880,69 @@ class MultiAccountZohoProductDetailQueryAPIView(APIView):
             }, status=400)
 
 
+def _multi_account_category_list_response(request, account, organization_id: str):
+    service = ZohoCommerceService(account)
+    data = service.list_categories(organization_id=organization_id)
+    categories = data.get("categories", []) or data.get("category", [])
+    categories = [c for c in categories if isinstance(c, dict)]
+
+    # Optional query params:
+    # - category_id: return categories under this parent/root category
+    # - include_descendants: whether to include all descendants (default true)
+    query_category_id = (request.GET.get("category_id") or "").strip() or None
+    include_descendants = _as_bool(request.GET.get("include_descendants"), default=True)
+
+    if query_category_id:
+        root_id = str(query_category_id).strip()
+        visible_categories = [c for c in categories if c.get("visibility") is not False]
+        if include_descendants:
+            category_ids = set(_collect_category_and_descendants(visible_categories, root_id))
+        else:
+            category_ids = set()
+            for c in visible_categories:
+                cid = str(c.get("category_id") or c.get("id") or "").strip()
+                if not cid:
+                    continue
+                parent_id = str(c.get("parent_category_id") or c.get("parent_id") or "").strip()
+                if parent_id == root_id:
+                    category_ids.add(cid)
+
+        filtered_categories = [
+            c for c in visible_categories
+            if str(c.get("category_id") or c.get("id") or "").strip() in category_ids
+        ]
+        main_categories = sorted(
+            filtered_categories,
+            key=lambda x: (x.get("sibling_order", 0), _category_name(x).lower()),
+        )
+    else:
+        # Default: return top-level menu categories (current behavior).
+        main_categories = _menu_categories_for_response(categories)
+
+    main_categories = [
+        _category_summary(
+            c,
+            fallback_image_url=request.build_absolute_uri(
+                f"/zoho/multi/accounts/{account.id}/categories/{organization_id}/{str(c.get('category_id') or c.get('id') or '').strip()}/image/"
+            ) if str(c.get("category_id") or c.get("id") or "").strip() else "",
+        )
+        for c in main_categories
+        if _category_name(c)
+    ]
+
+    return Response({
+        "status": "success",
+        "account_id": account.id,
+        "account_name": account.name,
+        "account_email": account.email,
+        "organization_id": organization_id,
+        "category_id": query_category_id,
+        "include_descendants": include_descendants,
+        "count": len(main_categories),
+        "categories": main_categories,
+    })
+
+
 class MultiAccountZohoCategoryListAPIView(APIView):
     def get(self, request, account_id, organization_id):
         try:
@@ -874,33 +952,45 @@ class MultiAccountZohoCategoryListAPIView(APIView):
                 "status": "error",
                 "message": "Zoho account not found"
             }, status=404)
-
-        service = ZohoCommerceService(account)
-
         try:
-            data = service.list_categories(organization_id=organization_id)
-            categories = data.get("categories", []) or data.get("category", [])
-            categories = [c for c in categories if isinstance(c, dict)]
-            main_categories = _menu_categories_for_response(categories)
-            main_categories = [
-                _category_summary(
-                    c,
-                    fallback_image_url=request.build_absolute_uri(
-                        f"/zoho/multi/accounts/{account.id}/categories/{organization_id}/{str(c.get('category_id') or c.get('id') or '').strip()}/image/"
-                    ) if str(c.get("category_id") or c.get("id") or "").strip() else "",
-                )
-                for c in main_categories
-                if _category_name(c)
-            ]
-
+            return _multi_account_category_list_response(request, account, str(organization_id))
+        except Exception as e:
             return Response({
-                "status": "success",
-                "account_name": account.name,
-                "account_email": account.email,
-                "organization_id": organization_id,
-                "count": len(main_categories),
-                "categories": main_categories,
-            })
+                "status": "error",
+                "message": str(e),
+            }, status=400)
+
+
+class MultiAccountZohoCategoryListQueryAPIView(APIView):
+    def get(self, request):
+        account_id_raw = (request.GET.get("account_id") or "").strip()
+        organization_id = (request.GET.get("organization_id") or "").strip()
+        if not account_id_raw:
+            return Response(
+                {"status": "error", "message": "account_id query parameter is required"},
+                status=400,
+            )
+        if not organization_id:
+            return Response(
+                {"status": "error", "message": "organization_id query parameter is required"},
+                status=400,
+            )
+        try:
+            account_id = int(account_id_raw)
+        except ValueError:
+            return Response(
+                {"status": "error", "message": "account_id must be an integer"},
+                status=400,
+            )
+        try:
+            account = ZohoCommerceAccount.objects.get(id=account_id, is_active=True)
+        except ZohoCommerceAccount.DoesNotExist:
+            return Response(
+                {"status": "error", "message": "Zoho account not found"},
+                status=404,
+            )
+        try:
+            return _multi_account_category_list_response(request, account, organization_id)
         except Exception as e:
             return Response({
                 "status": "error",
