@@ -57,8 +57,23 @@ def _category_name(category: dict) -> str:
     return (category.get("name") or category.get("category_name") or "").strip()
 
 
-def _category_summary(category: dict, fallback_image_url: str = "") -> dict:
-    image_url = _extract_image_url(category) or fallback_image_url
+def build_image_url(store_domain: str, image_url: str) -> str:
+    raw = (image_url or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith(("http://", "https://")):
+        return raw
+    domain = (store_domain or "").strip().replace("https://", "").replace("http://", "")
+    if not domain:
+        return ""
+    if not raw.startswith("/"):
+        raw = f"/{raw}"
+    return f"https://{domain}{raw}"
+
+
+def _category_summary(category: dict, fallback_image_url: str = "", store_domain: str = "") -> dict:
+    extracted = _extract_image_url(category)
+    image_url = build_image_url(store_domain, extracted) or extracted or fallback_image_url
     return {
         "category_id": str(category.get("category_id") or category.get("id") or "").strip(),
         "name": _category_name(category),
@@ -155,6 +170,7 @@ def _extract_image_url(payload: dict) -> str:
 
 
 def _product_summary(product: dict) -> dict:
+    raw_image = _extract_image_url(product)
     return {
         "product_id": str(product.get("product_id") or product.get("item_id") or product.get("id") or "").strip(),
         "product_name": (
@@ -165,7 +181,7 @@ def _product_summary(product: dict) -> dict:
         ),
         "sku": product.get("sku") or product.get("product_sku") or "",
         "price": _extract_price(product),
-        "image_url": _extract_image_url(product),
+        "image_url": raw_image,
     }
 
 
@@ -665,9 +681,14 @@ def _multi_account_product_list_response(request, account, organization_id: str)
 
     product_summaries = [_product_summary(p) for p in products]
     store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
+    store_domain = (getattr(store, "zoho_store_domain", "") or "").strip() if store else ""
     if store:
         for row in product_summaries:
             current_image = (row.get("image_url") or "").strip()
+            normalized_image = build_image_url(store_domain, current_image)
+            if normalized_image:
+                row["image_url"] = normalized_image
+                continue
             # Zoho sometimes returns only an image filename (not a usable URL).
             # In that case, replace it with our proxy URL.
             if current_image and (
@@ -760,6 +781,131 @@ class MultiAccountZohoProductListQueryAPIView(APIView):
                 "status": "error",
                 "message": str(e),
             }, status=400)
+
+
+class MultiAccountZohoProductSearchAPIView(APIView):
+    """
+    Query params:
+      - account_id (required)
+      - organization_id (required)
+      - q (required): case-insensitive search text
+      - limit (optional, default=20, max=100)
+    """
+
+    def get(self, request):
+        account_id_raw = (request.GET.get("account_id") or "").strip()
+        organization_id = (request.GET.get("organization_id") or "").strip()
+        query = (request.GET.get("q") or "").strip()
+        limit_raw = (request.GET.get("limit") or "").strip()
+
+        if not account_id_raw:
+            return Response(
+                {"status": "error", "message": "account_id query parameter is required"},
+                status=400,
+            )
+        if not organization_id:
+            return Response(
+                {"status": "error", "message": "organization_id query parameter is required"},
+                status=400,
+            )
+        if not query:
+            return Response(
+                {"status": "error", "message": "q query parameter is required"},
+                status=400,
+            )
+
+        try:
+            account_id = int(account_id_raw)
+        except ValueError:
+            return Response(
+                {"status": "error", "message": "account_id must be an integer"},
+                status=400,
+            )
+
+        try:
+            limit = int(limit_raw) if limit_raw else 20
+        except ValueError:
+            return Response(
+                {"status": "error", "message": "limit must be an integer"},
+                status=400,
+            )
+        if limit < 1:
+            limit = 1
+        if limit > 100:
+            limit = 100
+
+        try:
+            account = ZohoCommerceAccount.objects.get(id=account_id, is_active=True)
+        except ZohoCommerceAccount.DoesNotExist:
+            return Response(
+                {"status": "error", "message": "Zoho account not found"},
+                status=404,
+            )
+
+        service = ZohoCommerceService(account)
+        try:
+            data = service.list_products(organization_id=organization_id, page=1, per_page=200)
+            products = data.get("products", []) or data.get("items", [])
+            products = [p for p in products if isinstance(p, dict)]
+            needle = query.lower()
+
+            matched_rows = []
+            for row in products:
+                product_name = str(
+                    row.get("name")
+                    or row.get("product_name")
+                    or row.get("item_name")
+                    or ""
+                ).strip()
+                sku = str(row.get("sku") or row.get("product_sku") or "").strip()
+                product_id = str(row.get("product_id") or row.get("item_id") or row.get("id") or "").strip()
+
+                haystack = " ".join([product_name, sku, product_id]).lower()
+                if needle in haystack:
+                    matched_rows.append(row)
+
+            product_summaries = [_product_summary(p) for p in matched_rows]
+            store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
+            store_domain = (getattr(store, "zoho_store_domain", "") or "").strip() if store else ""
+            if store:
+                for row in product_summaries:
+                    current_image = (row.get("image_url") or "").strip()
+                    normalized_image = build_image_url(store_domain, current_image)
+                    if normalized_image:
+                        row["image_url"] = normalized_image
+                        continue
+                    if current_image and (
+                        current_image.startswith("http://")
+                        or current_image.startswith("https://")
+                        or current_image.startswith("/")
+                    ):
+                        continue
+                    pid = (row.get("product_id") or "").strip()
+                    if not pid:
+                        continue
+                    row["image_url"] = request.build_absolute_uri(
+                        f"/api/shop/zoho-products/{pid}/image/?store_id={store.pk}"
+                    )
+
+            product_summaries = product_summaries[:limit]
+            return Response(
+                {
+                    "status": "success",
+                    "account_id": account.id,
+                    "account_name": account.name,
+                    "account_email": account.email,
+                    "organization_id": organization_id,
+                    "q": query,
+                    "count": len(product_summaries),
+                    "products": product_summaries,
+                },
+                status=200,
+            )
+        except Exception as e:
+            return Response(
+                {"status": "error", "message": str(e)},
+                status=400,
+            )
 
 
 class MultiAccountZohoProductDetailQueryAPIView(APIView):
@@ -919,12 +1065,15 @@ def _multi_account_category_list_response(request, account, organization_id: str
         # Default: return top-level menu categories (current behavior).
         main_categories = _menu_categories_for_response(categories)
 
+    store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
+    store_domain = (getattr(store, "zoho_store_domain", "") or "").strip() if store else ""
     main_categories = [
         _category_summary(
             c,
             fallback_image_url=request.build_absolute_uri(
                 f"/zoho/multi/accounts/{account.id}/categories/{organization_id}/{str(c.get('category_id') or c.get('id') or '').strip()}/image/"
             ) if str(c.get("category_id") or c.get("id") or "").strip() else "",
+            store_domain=store_domain,
         )
         for c in main_categories
         if _category_name(c)
@@ -998,6 +1147,115 @@ class MultiAccountZohoCategoryListQueryAPIView(APIView):
             }, status=400)
 
 
+class MultiAccountZohoCategorySearchAPIView(APIView):
+    """
+    Query params:
+      - account_id (required)
+      - organization_id (required)
+      - q (required): case-insensitive search text
+      - limit (optional, default=20, max=100)
+    """
+
+    def get(self, request):
+        account_id_raw = (request.GET.get("account_id") or "").strip()
+        organization_id = (request.GET.get("organization_id") or "").strip()
+        query = (request.GET.get("q") or "").strip()
+        limit_raw = (request.GET.get("limit") or "").strip()
+
+        if not account_id_raw:
+            return Response(
+                {"status": "error", "message": "account_id query parameter is required"},
+                status=400,
+            )
+        if not organization_id:
+            return Response(
+                {"status": "error", "message": "organization_id query parameter is required"},
+                status=400,
+            )
+        if not query:
+            return Response(
+                {"status": "error", "message": "q query parameter is required"},
+                status=400,
+            )
+
+        try:
+            account_id = int(account_id_raw)
+        except ValueError:
+            return Response(
+                {"status": "error", "message": "account_id must be an integer"},
+                status=400,
+            )
+
+        try:
+            limit = int(limit_raw) if limit_raw else 20
+        except ValueError:
+            return Response(
+                {"status": "error", "message": "limit must be an integer"},
+                status=400,
+            )
+        if limit < 1:
+            limit = 1
+        if limit > 100:
+            limit = 100
+
+        try:
+            account = ZohoCommerceAccount.objects.get(id=account_id, is_active=True)
+        except ZohoCommerceAccount.DoesNotExist:
+            return Response(
+                {"status": "error", "message": "Zoho account not found"},
+                status=404,
+            )
+
+        service = ZohoCommerceService(account)
+        try:
+            data = service.list_categories(organization_id=organization_id)
+            categories = data.get("categories", []) or data.get("category", [])
+            categories = [c for c in categories if isinstance(c, dict)]
+            needle = query.lower()
+
+            matched = []
+            store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
+            store_domain = (getattr(store, "zoho_store_domain", "") or "").strip() if store else ""
+            for c in categories:
+                name = _category_name(c)
+                if not name:
+                    continue
+                if needle in name.lower():
+                    matched.append(
+                        _category_summary(
+                            c,
+                            fallback_image_url=request.build_absolute_uri(
+                                f"/zoho/multi/accounts/{account.id}/categories/{organization_id}/{str(c.get('category_id') or c.get('id') or '').strip()}/image/"
+                            ) if str(c.get("category_id") or c.get("id") or "").strip() else "",
+                            store_domain=store_domain,
+                        )
+                    )
+
+            matched = sorted(
+                matched,
+                key=lambda x: (x.get("sibling_order", 0), str(x.get("name") or "").lower()),
+            )[:limit]
+
+            return Response(
+                {
+                    "status": "success",
+                    "account_id": account.id,
+                    "account_name": account.name,
+                    "account_email": account.email,
+                    "organization_id": organization_id,
+                    "q": query,
+                    "count": len(matched),
+                    "categories": matched,
+                },
+                status=200,
+            )
+        except Exception as e:
+            return Response(
+                {"status": "error", "message": str(e)},
+                status=400,
+            )
+
+
 class MultiAccountZohoCategoryImageProxyAPIView(APIView):
     def get(self, request, account_id, organization_id, category_id):
         try:
@@ -1037,6 +1295,10 @@ class MultiAccountZohoCategoryImageProxyAPIView(APIView):
                 )
                 if isinstance(detail_row, dict):
                     image_url = _extract_image_url(detail_row)
+
+            store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
+            store_domain = (getattr(store, "zoho_store_domain", "") or "").strip() if store else ""
+            image_url = build_image_url(store_domain, image_url) or image_url
 
             if not image_url:
                 return Response(

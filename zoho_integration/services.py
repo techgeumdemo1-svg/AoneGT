@@ -72,23 +72,38 @@ def get_zoho_access_token(account):
     return token
 
 
-def get_all_zoho_stores(account):
-    access_token = get_zoho_access_token(account)
+def clear_zoho_access_token_cache(account):
+    cache_key = _token_cache_key(account)
+    _TOKEN_CACHE.pop(cache_key, None)
 
+
+def get_all_zoho_stores(account):
     base_url = (getattr(account, "commerce_base_url", "") or "https://commerce.zoho.com").rstrip("/")
     url = f"{base_url}/zs-site/api/v1/index/sites"
-    headers = {
-        "Authorization": f"Zoho-oauthtoken {access_token}",
-        "Accept": "application/json",
-    }
-    try:
-        response = requests.get(url, headers=headers, timeout=30)
-        response.raise_for_status()
-        return response.json()
-    except requests.RequestException as e:
-        raise ZohoIntegrationError(f"Zoho stores request failed: {e}") from e
-    except ValueError as e:
-        raise ZohoIntegrationError("Invalid JSON from Zoho stores endpoint.") from e
+
+    # Retry once on 401 by clearing token cache and refreshing.
+    for attempt in (1, 2):
+        access_token = get_zoho_access_token(account)
+        headers = {
+            "Authorization": f"Zoho-oauthtoken {access_token}",
+            "Accept": "application/json",
+        }
+        try:
+            response = requests.get(url, headers=headers, timeout=30)
+        except requests.RequestException as e:
+            raise ZohoIntegrationError(f"Zoho stores request failed: {e}") from e
+
+        if response.status_code == 401 and attempt == 1:
+            clear_zoho_access_token_cache(account)
+            continue
+
+        try:
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            raise ZohoIntegrationError(f"Zoho stores request failed: {e}") from e
+        except ValueError as e:
+            raise ZohoIntegrationError("Invalid JSON from Zoho stores endpoint.") from e
 
 
 def _get_json_or_raise_error(response, *, label: str):

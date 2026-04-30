@@ -394,6 +394,38 @@ class CartDetailAPIView(APIView):
         return Response(CartSerializer(cart).data, status=status.HTTP_200_OK)
 
 
+class CartSummaryAPIView(APIView):
+    """
+    Lightweight cart footer/badge summary.
+    - products_count: number of distinct lines in cart
+    - items_count: sum of quantities (e.g., 4+2+4 = 10)
+    - subtotal: total price
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        cart, _ = Cart.objects.get_or_create(user=request.user)
+        cart = (
+            Cart.objects.filter(pk=cart.pk)
+            .prefetch_related('items__product')
+            .first()
+        )
+        items = list(cart.items.all()) if cart else []
+        items_count = int(sum((int(i.quantity or 0) for i in items), 0))
+        products_count = int(len(items))
+        subtotal = sum((i.line_subtotal for i in items), Decimal('0')).quantize(Decimal('0.01'))
+        return Response(
+            {
+                'cart_id': cart.pk if cart else None,
+                'products_count': products_count,
+                'items_count': items_count,
+                'subtotal': str(subtotal),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class CartClearAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
