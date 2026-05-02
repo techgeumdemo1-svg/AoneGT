@@ -715,21 +715,79 @@ class WishlistListCreateAPIView(APIView):
         return Response(payload, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
-class WishlistItemDetailAPIView(generics.RetrieveDestroyAPIView):
+class WishlistItemDetailAPIView(APIView):
     permission_classes = [IsAuthenticated]
-    serializer_class = WishlistItemSerializer
 
-    def get_queryset(self):
-        return WishlistItem.objects.filter(user=self.request.user).select_related('product', 'store')
+    def _get_item_from_query(self, request):
+        raw = (request.query_params.get('wishlist_item_id') or '').strip()
+        if not raw:
+            return None, Response(
+                {'detail': 'wishlist_item_id query parameter is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            wid = int(raw)
+        except ValueError:
+            return None, Response(
+                {'detail': 'wishlist_item_id must be an integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        item = WishlistItem.objects.filter(
+            pk=wid,
+            user=request.user,
+        ).select_related('product', 'store').first()
+        if item is None:
+            return None, Response(
+                {'detail': 'Wishlist item not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return item, None
+
+    def get(self, request):
+        item, err = self._get_item_from_query(request)
+        if err:
+            return err
+        return Response(
+            WishlistItemSerializer(item, context={'request': request}).data,
+            status=status.HTTP_200_OK,
+        )
+
+    def delete(self, request):
+        item, err = self._get_item_from_query(request)
+        if err:
+            return err
+        deleted_id = item.pk
+        item.delete()
+        return Response(
+            {
+                'status': 'success',
+                'message': 'Wishlist item removed.',
+                'wishlist_item_id': deleted_id,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class WishlistMoveToCartAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def post(self, request, pk):
+    def post(self, request):
+        raw = (request.query_params.get('wishlist_item_id') or '').strip()
+        if not raw:
+            return Response(
+                {'detail': 'wishlist_item_id query parameter is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            wid = int(raw)
+        except ValueError:
+            return Response(
+                {'detail': 'wishlist_item_id must be an integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         item = get_object_or_404(
             WishlistItem.objects.select_related('product', 'store'),
-            pk=pk,
+            pk=wid,
             user=request.user,
         )
         ser = WishlistMoveToCartSerializer(data=request.data or {})
