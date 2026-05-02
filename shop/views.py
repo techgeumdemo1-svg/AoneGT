@@ -20,6 +20,7 @@ from .serializers import (
     CartAddFromZohoAccountSerializer,
     CartItemSerializer,
     CartItemUpdateSerializer,
+    CartItemDeltaSerializer,
     CheckoutSerializer,
     OrderSerializer,
     OrderReturnCreateSerializer,
@@ -136,7 +137,19 @@ def _upsert_local_product_from_zoho(store: Store, zoho_product_id: str, payload:
     ).strip()
 
     product = Product.objects.filter(store=store, zoho_product_id=zoho_product_id).first()
-    base_slug = slugify(name) or f'zoho-{zoho_product_id}'
+    fallback_name = f'Zoho Product {zoho_product_id}'
+    slug_source = name
+    if (slug_source or '').strip() == fallback_name:
+        # Prefer another meaningful identifier before falling back to raw id.
+        slug_source = (
+            source.get('product_name')
+            or source.get('item_name')
+            or source.get('seo_keyword')
+            or source.get('sku')
+            or first_variant.get('sku')
+            or zoho_product_id
+        )
+    base_slug = slugify(str(slug_source or '').strip()) or f'product-{zoho_product_id}'
     slug = base_slug[:255]
     if product is None:
         suffix = 1
@@ -149,7 +162,6 @@ def _upsert_local_product_from_zoho(store: Store, zoho_product_id: str, payload:
             slug=slug,
         )
 
-    fallback_name = f'Zoho Product {zoho_product_id}'
     resolved_name = name
     if (
         product.pk
@@ -179,6 +191,17 @@ def _upsert_local_product_from_zoho(store: Store, zoho_product_id: str, payload:
     resolved_compare_at_price = compare_at_price
     if resolved_compare_at_price in (None, ''):
         resolved_compare_at_price = product.compare_at_price
+
+    # If product was created earlier with a technical slug, upgrade it once
+    # a meaningful name becomes available.
+    if product.pk and (product.slug or '').startswith('zoho-product-'):
+        desired_base_slug = slugify(resolved_name) or base_slug
+        desired_slug = desired_base_slug[:255]
+        suffix = 1
+        while Product.objects.filter(store=store, slug=desired_slug).exclude(pk=product.pk).exists():
+            suffix += 1
+            desired_slug = f'{desired_base_slug[:245]}-{suffix}'[:255]
+        product.slug = desired_slug
 
     product.name = resolved_name[:255]
     product.sku = resolved_sku
@@ -320,6 +343,15 @@ def _perform_cart_add_zoho_product(
     organization_id: Optional[str] = None,
 ):
     """Returns (response_data|None, error_detail|None, http_status)."""
+    def _product_is_valid_for_cart(p: Product, pid: str) -> bool:
+        fallback_name = f'Zoho Product {pid}'
+        name_ok = bool((p.name or '').strip()) and (p.name or '').strip() != fallback_name
+        try:
+            price_ok = Decimal(str(p.price or '0')) > Decimal('0')
+        except Exception:
+            price_ok = False
+        return name_ok and price_ok
+
     fresh_zoho_payload = None
     if account is not None and organization_id:
         try:
@@ -364,6 +396,27 @@ def _perform_cart_add_zoho_product(
             product = _upsert_local_product_from_zoho(store, zoho_product_id, detail_payload)
         except ZohoCommerceError:
             pass
+
+    # Enforce a valid product snapshot for cart responses:
+    # - non-fallback name
+    # - price greater than zero
+    # When account/org is present, retry once with account-level detail endpoint.
+    if product is not None and not _product_is_valid_for_cart(product, zoho_product_id):
+        if account is not None and organization_id:
+            try:
+                detail_payload = ZohoAccountService(account).get_product_detail(
+                    organization_id=organization_id,
+                    product_id=zoho_product_id,
+                )
+                product = _upsert_local_product_from_zoho(store, zoho_product_id, detail_payload)
+            except Exception:
+                pass
+        if not _product_is_valid_for_cart(product, zoho_product_id):
+            return (
+                None,
+                'Unable to fetch complete product name/price from Zoho for this item.',
+                status.HTTP_502_BAD_GATEWAY,
+            )
 
     with transaction.atomic():
         cart, _ = Cart.objects.select_for_update().get_or_create(user=user)
@@ -474,6 +527,70 @@ class CartAddItemAPIView(APIView):
 
     permission_classes = [IsAuthenticated]
 
+    def _get_item_from_query(self, request):
+        item_id_raw = (request.query_params.get('item_id') or '').strip()
+        if not item_id_raw:
+            return None, Response(
+                {'detail': 'item_id query parameter is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            item_id = int(item_id_raw)
+        except ValueError:
+            return None, Response(
+                {'detail': 'item_id must be an integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        item = CartItem.objects.filter(
+            pk=item_id,
+            cart__user=request.user,
+        ).select_related('product', 'store').first()
+        if item is None:
+            return None, Response(
+                {'detail': 'Cart item not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return item, None
+
+    def get(self, request):
+        item, err = self._get_item_from_query(request)
+        if err:
+            return err
+        return Response(CartItemSerializer(item, context={'request': request}).data, status=status.HTTP_200_OK)
+
+    def patch(self, request):
+        item, err = self._get_item_from_query(request)
+        if err:
+            return err
+        if 'action' in request.data:
+            delta_ser = CartItemDeltaSerializer(data=request.data)
+            delta_ser.is_valid(raise_exception=True)
+            action = delta_ser.validated_data['action']
+            step = delta_ser.validated_data['step']
+            if action == 'increment':
+                item.quantity = int(item.quantity) + int(step)
+            else:
+                item.quantity = max(1, int(item.quantity) - int(step))
+            item.save(update_fields=['quantity'])
+        else:
+            ser = CartItemUpdateSerializer(item, data=request.data, partial=True)
+            ser.is_valid(raise_exception=True)
+            ser.save()
+        item.refresh_from_db()
+        item = CartItem.objects.select_related('product', 'store').get(pk=item.pk)
+        return Response(CartItemSerializer(item, context={'request': request}).data, status=status.HTTP_200_OK)
+
+    def delete(self, request):
+        item, err = self._get_item_from_query(request)
+        if err:
+            return err
+        deleted_item_id = item.pk
+        item.delete()
+        return Response(
+            {'status': 'success', 'message': 'Cart item removed.', 'item_id': deleted_item_id},
+            status=status.HTTP_200_OK,
+        )
+
     def post(self, request):
         ser = CartAddFromZohoAccountSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
@@ -532,24 +649,6 @@ class CartAddItemAPIView(APIView):
         result['line_total'] = result.get('line_subtotal', '0.00')
         result['total_amount'] = result.get('line_subtotal', '0.00')
         return Response(result, status=st)
-
-
-class CartItemDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
-    permission_classes = [IsAuthenticated]
-    serializer_class = CartItemSerializer
-
-    def get_queryset(self):
-        return CartItem.objects.filter(cart__user=self.request.user).select_related(
-            'product', 'store',
-        )
-
-    def get_serializer_class(self):
-        if self.request.method in ('PATCH', 'PUT'):
-            return CartItemUpdateSerializer
-        return CartItemSerializer
-
-    def perform_destroy(self, instance):
-        super().perform_destroy(instance)
 
 
 class WishlistListCreateAPIView(APIView):

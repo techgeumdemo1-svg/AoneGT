@@ -158,13 +158,44 @@ class CartItemUpdateSerializer(serializers.ModelSerializer):
         extra_kwargs = {'quantity': {'min_value': 1}}
 
 
+class CartItemDeltaSerializer(serializers.Serializer):
+    action = serializers.ChoiceField(choices=('increment', 'decrement'))
+    step = serializers.IntegerField(min_value=1, required=False, default=1)
+
+
+class WishlistStoreSerializer(serializers.ModelSerializer):
+    store_id = serializers.IntegerField(source='id', read_only=True)
+
+    class Meta:
+        model = Store
+        fields = ('store_id', 'name', 'slug')
+
+
+class WishlistProductSerializer(serializers.ModelSerializer):
+    product_id = serializers.IntegerField(source='id', read_only=True)
+
+    class Meta:
+        model = Product
+        fields = (
+            'product_id',
+            'name',
+            'slug',
+            'category',
+            'sku',
+            'price',
+            'currency',
+            'image_url',
+        )
+
+
 class WishlistItemSerializer(serializers.ModelSerializer):
-    store = StoreTinySerializer(read_only=True)
-    product = ProductMiniSerializer(read_only=True)
+    wishlist_item_id = serializers.IntegerField(source='id', read_only=True)
+    store = WishlistStoreSerializer(read_only=True)
+    product = WishlistProductSerializer(read_only=True)
 
     class Meta:
         model = WishlistItem
-        fields = ('id', 'store', 'product', 'created_at')
+        fields = ('wishlist_item_id', 'store', 'product', 'created_at')
 
 
 class WishlistMoveToCartSerializer(serializers.Serializer):
