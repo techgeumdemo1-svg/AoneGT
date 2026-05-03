@@ -1,9 +1,14 @@
+import uuid
+
 from django.conf import settings
 from django.core.mail import send_mail
+from django.db import transaction
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from shop.models import Cart, Order, UserAddress, WishlistItem
+
 from .models import User, PasswordResetOTP, RegistrationOTP
 from .serializers import (
     RegisterSerializer,
@@ -14,6 +19,8 @@ from .serializers import (
     VerifyResetOTPSerializer,
     ResetPasswordSerializer,
     UserProfileSerializer,
+    UserProfileUpdateSerializer,
+    DeleteAccountConfirmSerializer,
 )
 from .services.zoho_registration_gate import (
     ZohoContactCheckError,
@@ -263,3 +270,87 @@ class ProfileAPIView(APIView):
 
     def get(self, request):
         return Response(UserProfileSerializer(request.user).data, status=status.HTTP_200_OK)
+
+    def patch(self, request):
+        serializer = UserProfileUpdateSerializer(
+            request.user,
+            data=request.data,
+            partial=True,
+            context={'request': request},
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        request.user.refresh_from_db()
+        return Response(UserProfileSerializer(request.user).data, status=status.HTTP_200_OK)
+
+
+class DeactivateAccountAPIView(APIView):
+    """
+    Marks the user inactive. Existing JWTs stay valid until expiry; login will be rejected.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+        user.is_active = False
+        user.save(update_fields=['is_active'])
+        return Response(
+            {
+                'status': 'success',
+                'message': 'Your account has been deactivated.',
+                'user': UserProfileSerializer(user).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class DeleteAccountAPIView(APIView):
+    """
+    Removes the account. Users with order history cannot be removed (Order.user is PROTECT);
+    those accounts are anonymized and deactivated instead. Others are deleted from the DB.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = DeleteAccountConfirmSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        user = request.user
+        has_orders = Order.objects.filter(user=user).exists()
+
+        with transaction.atomic():
+            Cart.objects.filter(user=user).delete()
+            WishlistItem.objects.filter(user=user).delete()
+            UserAddress.objects.filter(user=user).delete()
+            PasswordResetOTP.objects.filter(user=user).delete()
+
+            if has_orders:
+                suffix = uuid.uuid4().hex[:12]
+                user.email = f'deleted-{user.pk}-{suffix}@invalid.invalid'
+                user.first_name = 'Deleted'
+                user.last_name = ''
+                user.phone = ''
+                user.is_active = False
+                user.set_unusable_password()
+                user.save()
+                mode = 'anonymized'
+                body = {
+                    'status': 'success',
+                    'message': (
+                        'Your personal data has been removed from your profile. '
+                        'Order history is retained under an anonymized account.'
+                    ),
+                    'mode': mode,
+                }
+            else:
+                user.delete()
+                mode = 'deleted'
+                body = {
+                    'status': 'success',
+                    'message': 'Your account and associated data have been deleted.',
+                    'mode': mode,
+                }
+
+        return Response(body, status=status.HTTP_200_OK)

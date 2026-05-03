@@ -189,4 +189,42 @@ class ResetPasswordSerializer(serializers.Serializer):
 class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ['id', 'first_name', 'last_name', 'email', 'phone', 'created_at']
+        fields = ['id', 'first_name', 'last_name', 'email', 'phone', 'is_active', 'created_at']
+        read_only_fields = fields
+
+
+class UserProfileUpdateSerializer(serializers.ModelSerializer):
+    """PATCH body: any of first_name, last_name, phone, email."""
+
+    class Meta:
+        model = User
+        fields = ['first_name', 'last_name', 'phone', 'email']
+
+    def validate_email(self, value):
+        normalized = value.strip().lower()
+        request = self.context.get('request')
+        user = getattr(request, 'user', None) if request else None
+        qs = User.objects.filter(email__iexact=normalized)
+        if user and getattr(user, 'pk', None):
+            qs = qs.exclude(pk=user.pk)
+        if qs.exists():
+            raise serializers.ValidationError('This email is already in use.')
+        return normalized
+
+    def validate_first_name(self, value):
+        value = (value or '').strip()
+        if not value:
+            raise serializers.ValidationError('First name cannot be empty.')
+        return value
+
+    def validate_phone(self, value):
+        return (value or '').strip()
+
+
+class DeleteAccountConfirmSerializer(serializers.Serializer):
+    confirm = serializers.BooleanField(required=True)
+
+    def validate_confirm(self, value):
+        if value is not True:
+            raise serializers.ValidationError('You must send confirm: true to delete your account.')
+        return value

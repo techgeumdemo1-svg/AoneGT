@@ -263,10 +263,13 @@ class UserAddressSerializer(serializers.ModelSerializer):
 
 
 class OrderItemSerializer(serializers.ModelSerializer):
+    item_id = serializers.IntegerField(source='id', read_only=True)
+    product_id = serializers.IntegerField(read_only=True)
+
     class Meta:
         model = OrderItem
         fields = (
-            'id', 'product', 'product_name', 'sku',
+            'item_id', 'product_id', 'product_name', 'sku',
             'unit_price', 'quantity', 'line_total', 'zoho_line_item_id',
         )
 
@@ -282,6 +285,7 @@ def _completed_returns_total(order: Order) -> Decimal:
 
 
 class OrderSerializer(serializers.ModelSerializer):
+    order_id = serializers.IntegerField(source='id', read_only=True)
     items = OrderItemSerializer(many=True, read_only=True)
     returned_total = serializers.SerializerMethodField()
     balance_remaining = serializers.SerializerMethodField()
@@ -298,7 +302,7 @@ class OrderSerializer(serializers.ModelSerializer):
     class Meta:
         model = Order
         fields = (
-            'id', 'store', 'status', 'currency', 'payment_method',
+            'order_id', 'store', 'status', 'currency', 'payment_method',
             'subtotal', 'vat_percent', 'vat_amount', 'shipping_amount', 'total',
             'order_code', 'display_status', 'items_count',
             'can_reorder', 'can_return', 'return_status', 'order_date',
@@ -313,7 +317,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'items', 'created_at', 'updated_at',
         )
         read_only_fields = (
-            'status', 'subtotal', 'vat_percent', 'vat_amount', 'total',
+            'order_id', 'status', 'subtotal', 'vat_percent', 'vat_amount', 'total',
             'zoho_checkout_id', 'zoho_salesorder_id',
             'zoho_sync_error', 'zoho_synced_at',
             'order_code', 'display_status', 'items_count',
