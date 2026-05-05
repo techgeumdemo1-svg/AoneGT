@@ -1,5 +1,8 @@
 from django.urls import path
 from .views import (
+    BannerListAPIView,
+    BannerAdminListCreateAPIView,
+    BannerAdminDetailAPIView,
     StoreListAPIView,
     StoreProductListAPIView,
     StoreProductDetailAPIView,
@@ -14,6 +17,9 @@ from .views import (
 )
 
 urlpatterns = [
+    path('banners/', BannerListAPIView.as_view(), name='catalog-banners-list'),
+    path('admin/banners/', BannerAdminListCreateAPIView.as_view(), name='catalog-admin-banners-list-create'),
+    path('admin/banners/<int:pk>/', BannerAdminDetailAPIView.as_view(), name='catalog-admin-banner-detail'),
     path(
         'zoho/shops/',
         ZohoCommerceShopListAPIView.as_view(),

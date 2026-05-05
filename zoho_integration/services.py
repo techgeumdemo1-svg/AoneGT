@@ -11,6 +11,42 @@ _TOKEN_CACHE_SAFETY_SECONDS = 30
 _TOKEN_CACHE: dict[str, tuple[str, float]] = {}
 
 
+def _request_get_with_retries(url, *, headers, params, timeout=30, label="request"):
+    """
+    Retry transient network failures a few times before raising a clear error.
+    """
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            return requests.get(url, headers=headers, params=params, timeout=timeout)
+        except requests.ConnectionError as e:
+            last_error = e
+            # Immediate retries for first two attempts; short backoff before final.
+            if attempt < 3:
+                time.sleep(0.6 * attempt)
+                continue
+            msg = str(e)
+            if "10065" in msg or "unreachable host" in msg.lower():
+                raise ZohoIntegrationError(
+                    f"Zoho {label} failed: network unreachable to host in URL {url}. "
+                    "Check internet/DNS/firewall, or verify the account commerce_base_url."
+                ) from e
+            raise ZohoIntegrationError(f"Zoho {label} failed: network connection error: {e}") from e
+        except requests.Timeout as e:
+            last_error = e
+            if attempt < 3:
+                time.sleep(0.6 * attempt)
+                continue
+            raise ZohoIntegrationError(
+                f"Zoho {label} failed: request timed out after retries."
+            ) from e
+        except requests.RequestException as e:
+            raise ZohoIntegrationError(f"Zoho {label} failed: {e}") from e
+    if last_error:
+        raise ZohoIntegrationError(f"Zoho {label} failed: {last_error}")
+    raise ZohoIntegrationError(f"Zoho {label} failed: unknown request error")
+
+
 def _token_cache_key(account) -> str:
     account_id = getattr(account, "id", None)
     if account_id is not None:
@@ -155,10 +191,13 @@ class ZohoCommerceService:
         }
         if category_id:
             params["category_id"] = category_id
-        try:
-            response = requests.get(url, headers=self._headers(), params=params, timeout=30)
-        except requests.RequestException as e:
-            raise ZohoIntegrationError(f"Zoho products request failed: {e}") from e
+        response = _request_get_with_retries(
+            url,
+            headers=self._headers(),
+            params=params,
+            timeout=30,
+            label="products request",
+        )
         return _get_json_or_raise_error(response, label="products request")
 
     def get_product_detail(self, organization_id, product_id):
@@ -166,10 +205,13 @@ class ZohoCommerceService:
         params = {
             "organization_id": organization_id,
         }
-        try:
-            response = requests.get(url, headers=self._headers(), params=params, timeout=30)
-        except requests.RequestException as e:
-            raise ZohoIntegrationError(f"Zoho product detail request failed: {e}") from e
+        response = _request_get_with_retries(
+            url,
+            headers=self._headers(),
+            params=params,
+            timeout=30,
+            label="product detail request",
+        )
         return _get_json_or_raise_error(response, label="product detail request")
 
     def list_categories(self, organization_id, page=1, per_page=100):
@@ -180,10 +222,13 @@ class ZohoCommerceService:
             "page": page,
             "per_page": per_page,
         }
-        try:
-            response = requests.get(url, headers=self._headers(), params=params, timeout=30)
-        except requests.RequestException as e:
-            raise ZohoIntegrationError(f"Zoho categories request failed: {e}") from e
+        response = _request_get_with_retries(
+            url,
+            headers=self._headers(),
+            params=params,
+            timeout=30,
+            label="categories request",
+        )
         return _get_json_or_raise_error(response, label="categories request")
 
     def get_category_detail(self, organization_id, category_id):
@@ -191,8 +236,11 @@ class ZohoCommerceService:
         params = {
             "organization_id": organization_id,
         }
-        try:
-            response = requests.get(url, headers=self._headers(), params=params, timeout=30)
-        except requests.RequestException as e:
-            raise ZohoIntegrationError(f"Zoho category detail request failed: {e}") from e
+        response = _request_get_with_retries(
+            url,
+            headers=self._headers(),
+            params=params,
+            timeout=30,
+            label="category detail request",
+        )
         return _get_json_or_raise_error(response, label="category detail request")

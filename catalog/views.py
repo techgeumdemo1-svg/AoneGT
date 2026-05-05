@@ -2,10 +2,10 @@ from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
 from rest_framework.pagination import PageNumberPagination
-from rest_framework.permissions import IsAdminUser
+from rest_framework.permissions import AllowAny, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import Store, Product
+from .models import Banner, Store, Product
 from .services.zoho_commerce_products import (
     ZohoCommerceProductError,
     build_product_editpage_url,
@@ -23,6 +23,8 @@ from .serializers import (
     ProductDetailSerializer,
     StoreAdminSerializer,
     ProductAdminSerializer,
+    BannerSerializer,
+    BannerAdminSerializer,
 )
 
 
@@ -50,6 +52,45 @@ class ProductPageNumberPagination(PageNumberPagination):
     page_size = 20
     page_size_query_param = 'page_size'
     max_page_size = 100
+
+
+class BannerListAPIView(generics.ListAPIView):
+    """
+    GET — active banners for carousel.
+
+    Query: store_id (optional). When set, returns banners with no store (global)
+    plus banners for that store.
+    """
+
+    permission_classes = [AllowAny]
+    serializer_class = BannerSerializer
+
+    def get_queryset(self):
+        qs = Banner.objects.filter(is_active=True).select_related('store').order_by('sort_order', 'id')
+        raw = self.request.query_params.get('store_id')
+        if raw is None or str(raw).strip() == '':
+            return qs
+        try:
+            sid = int(raw)
+        except (TypeError, ValueError):
+            return Banner.objects.none()
+        return qs.filter(Q(store_id__isnull=True) | Q(store_id=sid))
+
+
+class BannerAdminListCreateAPIView(generics.ListCreateAPIView):
+    """Staff only (JWT + is_staff). GET all banners; POST add."""
+
+    permission_classes = [IsAdminUser]
+    queryset = Banner.objects.select_related('store').order_by('sort_order', 'id')
+    serializer_class = BannerAdminSerializer
+
+
+class BannerAdminDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
+    """Staff only. GET/PATCH/DELETE one banner."""
+
+    permission_classes = [IsAdminUser]
+    queryset = Banner.objects.select_related('store').all()
+    serializer_class = BannerAdminSerializer
 
 
 class StoreListAPIView(generics.ListAPIView):

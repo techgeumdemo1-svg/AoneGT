@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Store, Product
+from .models import Banner, Store, Product
 
 
 @admin.register(Store)
@@ -43,6 +43,14 @@ class StoreAdmin(admin.ModelAdmin):
         ),
         ('Meta', {'fields': ('created_at',)}),
     )
+
+
+@admin.register(Banner)
+class BannerAdmin(admin.ModelAdmin):
+    list_display = ('id', 'title', 'store', 'sort_order', 'is_active', 'updated_at')
+    list_filter = ('is_active', 'store')
+    search_fields = ('title', 'subtitle', 'image_url')
+    autocomplete_fields = ('store',)
 
 
 @admin.register(Product)

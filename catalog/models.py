@@ -40,6 +40,33 @@ class Store(models.Model):
         return self.name
 
 
+class Banner(models.Model):
+    """Promotional carousel image for app storefront (optional per-store scope)."""
+
+    store = models.ForeignKey(
+        Store,
+        on_delete=models.CASCADE,
+        related_name='banners',
+        null=True,
+        blank=True,
+        help_text='If empty, banner applies to all stores when listing without filter.',
+    )
+    title = models.CharField(max_length=200, blank=True)
+    subtitle = models.CharField(max_length=300, blank=True)
+    image_url = models.URLField(max_length=500)
+    link_url = models.URLField(max_length=500, blank=True)
+    sort_order = models.PositiveIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['sort_order', 'id']
+
+    def __str__(self):
+        return self.title or f'Banner {self.pk}'
+
+
 class Product(models.Model):
     store = models.ForeignKey(Store, on_delete=models.CASCADE, related_name='products')
     name = models.CharField(max_length=255)

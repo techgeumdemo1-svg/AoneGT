@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Store, Product
+from .models import Store, Product, Banner
 
 
 class StoreListSerializer(serializers.ModelSerializer):
@@ -43,6 +43,53 @@ class StoreAdminSerializer(serializers.ModelSerializer):
             'created_at', 'sort_order',
         )
         read_only_fields = ('id', 'created_at')
+
+
+class BannerSerializer(serializers.ModelSerializer):
+    """Public read — carousel banners."""
+
+    banner_id = serializers.IntegerField(source='id', read_only=True)
+    store_id = serializers.IntegerField(source='store_id', read_only=True, allow_null=True)
+
+    class Meta:
+        model = Banner
+        fields = (
+            'banner_id',
+            'store_id',
+            'title',
+            'subtitle',
+            'image_url',
+            'link_url',
+            'sort_order',
+        )
+
+
+class BannerAdminSerializer(serializers.ModelSerializer):
+    """Staff-only create/update."""
+
+    banner_id = serializers.IntegerField(source='id', read_only=True)
+    store_id = serializers.PrimaryKeyRelatedField(
+        queryset=Store.objects.all(),
+        source='store',
+        required=False,
+        allow_null=True,
+    )
+
+    class Meta:
+        model = Banner
+        fields = (
+            'banner_id',
+            'store_id',
+            'title',
+            'subtitle',
+            'image_url',
+            'link_url',
+            'sort_order',
+            'is_active',
+            'created_at',
+            'updated_at',
+        )
+        read_only_fields = ('banner_id', 'created_at', 'updated_at')
 
 
 class ProductAdminSerializer(serializers.ModelSerializer):

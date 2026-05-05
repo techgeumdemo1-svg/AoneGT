@@ -1,7 +1,9 @@
 from django.http import JsonResponse, HttpResponseRedirect
 from django.conf import settings
+import re
 import requests
 from typing import Optional
+from urllib.parse import quote
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -71,9 +73,69 @@ def build_image_url(store_domain: str, image_url: str) -> str:
     return f"https://{domain}{raw}"
 
 
+def build_zoho_cdn_document_url(store_domain: str, payload: dict) -> str:
+    """Best-effort Zoho CDN URL from document ids (preferred) or file name."""
+    domain = (store_domain or "").strip().replace("https://", "").replace("http://", "")
+    if not domain:
+        return ""
+    top_document_id = str(payload.get("document_id") or "").strip()
+    if top_document_id:
+        return (
+            f"https://cdn1.zohoecommerce.com/category-images/{quote(top_document_id)}/800x800"
+            f"?storefront_domain={domain}"
+        )
+    rows = payload.get("documents") or payload.get("attachments") or []
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_document_id = str(row.get("document_id") or "").strip()
+            if row_document_id:
+                return (
+                    f"https://cdn1.zohoecommerce.com/category-images/{quote(row_document_id)}/800x800"
+                    f"?storefront_domain={domain}"
+                )
+            file_name = str(row.get("file_name") or row.get("name") or "").strip()
+            if file_name:
+                return f"https://cdn1.zohoecommerce.com/{quote(file_name)}?storefront_domain={domain}"
+    file_name = str(payload.get("file_name") or "").strip()
+    if file_name:
+        return f"https://cdn1.zohoecommerce.com/{quote(file_name)}?storefront_domain={domain}"
+    return ""
+
+
+def build_zoho_cdn_product_document_url(store_domain: str, payload: dict) -> str:
+    """Best-effort Zoho product image URL from product document ids."""
+    domain = (store_domain or "").strip().replace("https://", "").replace("http://", "")
+    if not domain:
+        return ""
+    top_document_id = str(payload.get("document_id") or "").strip()
+    if top_document_id:
+        return (
+            f"https://cdn1.zohoecommerce.com/product-images/{quote(top_document_id)}/800x800"
+            f"?storefront_domain={domain}"
+        )
+    rows = payload.get("documents") or payload.get("attachments") or payload.get("images") or []
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_document_id = str(row.get("document_id") or row.get("id") or "").strip()
+            if row_document_id:
+                return (
+                    f"https://cdn1.zohoecommerce.com/product-images/{quote(row_document_id)}/800x800"
+                    f"?storefront_domain={domain}"
+                )
+    return ""
+
+
 def _category_summary(category: dict, fallback_image_url: str = "", store_domain: str = "") -> dict:
     extracted = _extract_image_url(category)
-    image_url = build_image_url(store_domain, extracted) or extracted or fallback_image_url
+    image_url = build_image_url(store_domain, extracted) or extracted
+    if not image_url:
+        image_url = build_zoho_cdn_document_url(store_domain, category)
+    if not image_url:
+        image_url = fallback_image_url
     return {
         "category_id": str(category.get("category_id") or category.get("id") or "").strip(),
         "name": _category_name(category),
@@ -130,6 +192,16 @@ def _extract_price(payload: dict) -> str:
 
 
 def _extract_image_url(payload: dict) -> str:
+    def _looks_like_image_url(value: str) -> bool:
+        v = (value or "").strip().lower()
+        if not (v.startswith("http://") or v.startswith("https://") or v.startswith("/")):
+            return False
+        image_markers = (
+            ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".bmp", ".avif", ".ico",
+            "/image", "/images", "image_id=", "imagetype=", "product-images",
+        )
+        return any(marker in v for marker in image_markers)
+
     direct = _first_present_value(
         payload,
         [
@@ -143,7 +215,9 @@ def _extract_image_url(payload: dict) -> str:
         ],
     )
     if direct is not None:
-        return str(direct)
+        candidate = str(direct).replace("&amp;", "&").strip()
+        if _looks_like_image_url(candidate):
+            return candidate
 
     for list_key in ("images", "product_images", "documents", "attachments"):
         rows = payload.get(list_key) or []
@@ -165,12 +239,64 @@ def _extract_image_url(payload: dict) -> str:
                 ],
             )
             if url is not None:
-                return str(url)
+                candidate = str(url).replace("&amp;", "&").strip()
+                if _looks_like_image_url(candidate):
+                    return candidate
+
+    # Some Zoho category payloads embed image tags in HTML fields.
+    for html_key in ("description_html", "description", "category_content", "content"):
+        raw_html = payload.get(html_key)
+        if not raw_html:
+            continue
+        text = str(raw_html)
+        match = re.search(r"""<img[^>]+src=["']([^"']+)["']""", text, flags=re.IGNORECASE)
+        if match:
+            candidate = match.group(1).replace("&amp;", "&").strip()
+            if _looks_like_image_url(candidate):
+                return candidate
+
+    # Last-resort recursive scan for nested payloads returned by different Zoho endpoints.
+    def _walk(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                key = str(k).lower()
+                if isinstance(v, str):
+                    val = v.strip()
+                    if not val:
+                        continue
+                    if key in ("image_url", "thumbnail_url", "src", "file_url", "download_url"):
+                        candidate = val.replace("&amp;", "&")
+                        if _looks_like_image_url(candidate):
+                            return candidate
+                    img = re.search(r"""<img[^>]+src=["']([^"']+)["']""", val, flags=re.IGNORECASE)
+                    if img:
+                        candidate = img.group(1).replace("&amp;", "&").strip()
+                        if _looks_like_image_url(candidate):
+                            return candidate
+                    if _looks_like_image_url(val):
+                        return val.replace("&amp;", "&")
+                elif isinstance(v, (dict, list)):
+                    nested = _walk(v)
+                    if nested:
+                        return nested
+        elif isinstance(node, list):
+            for row in node:
+                nested = _walk(row)
+                if nested:
+                    return nested
+        return ""
+
+    nested_url = _walk(payload)
+    if nested_url:
+        return nested_url
     return ""
 
 
-def _product_summary(product: dict) -> dict:
+def _product_summary(product: dict, store_domain: str = "") -> dict:
     raw_image = _extract_image_url(product)
+    image_url = raw_image
+    if not image_url:
+        image_url = build_zoho_cdn_product_document_url(store_domain, product)
     return {
         "product_id": str(product.get("product_id") or product.get("item_id") or product.get("id") or "").strip(),
         "product_name": (
@@ -181,7 +307,7 @@ def _product_summary(product: dict) -> dict:
         ),
         "sku": product.get("sku") or product.get("product_sku") or "",
         "price": _extract_price(product),
-        "image_url": raw_image,
+        "image_url": image_url,
     }
 
 
@@ -679,9 +805,9 @@ def _multi_account_product_list_response(request, account, organization_id: str)
                 if detail_image:
                     product["image_url"] = detail_image
 
-    product_summaries = [_product_summary(p) for p in products]
     store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
     store_domain = (getattr(store, "zoho_store_domain", "") or "").strip() if store else ""
+    product_summaries = [_product_summary(p, store_domain=store_domain) for p in products]
     if store:
         for row in product_summaries:
             current_image = (row.get("image_url") or "").strip()
@@ -864,9 +990,9 @@ class MultiAccountZohoProductSearchAPIView(APIView):
                 if needle in haystack:
                     matched_rows.append(row)
 
-            product_summaries = [_product_summary(p) for p in matched_rows]
             store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
             store_domain = (getattr(store, "zoho_store_domain", "") or "").strip() if store else ""
+            product_summaries = [_product_summary(p, store_domain=store_domain) for p in matched_rows]
             if store:
                 for row in product_summaries:
                     current_image = (row.get("image_url") or "").strip()
@@ -964,9 +1090,10 @@ class MultiAccountZohoProductDetailQueryAPIView(APIView):
                     status=502,
                 )
 
-            summary = _product_summary(product)
-            image_url = (summary.get("image_url") or "").strip()
             store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
+            store_domain = (getattr(store, "zoho_store_domain", "") or "").strip() if store else ""
+            summary = _product_summary(product, store_domain=store_domain)
+            image_url = (summary.get("image_url") or "").strip()
             # If Zoho returned only a filename (e.g. "WhatsApp Image ... .jpeg"),
             # it isn't a usable URL for the frontend—force proxy fallback.
             if image_url and not (
@@ -1280,6 +1407,8 @@ class MultiAccountZohoCategoryImageProxyAPIView(APIView):
                 return Response({"detail": "Category not found"}, status=status.HTTP_404_NOT_FOUND)
 
             image_url = _extract_image_url(match)
+            detail_row = {}
+            fallback_row = None
             if not image_url:
                 try:
                     detail = service.get_category_detail(
@@ -1296,9 +1425,44 @@ class MultiAccountZohoCategoryImageProxyAPIView(APIView):
                 if isinstance(detail_row, dict):
                     image_url = _extract_image_url(detail_row)
 
+            # Fallback: if this category has no own image in Zoho payload,
+            # try descendants (children/grandchildren) and use the first image found.
+            if not image_url:
+                wanted_parent = str(category_id).strip()
+                by_parent = {}
+                for row in categories:
+                    parent_id = str(
+                        row.get("parent_category_id")
+                        or row.get("parent_id")
+                        or row.get("parent")
+                        or ""
+                    ).strip()
+                    by_parent.setdefault(parent_id, []).append(row)
+
+                queue = list(by_parent.get(wanted_parent, []))
+                seen = set()
+                while queue and not image_url:
+                    row = queue.pop(0)
+                    row_id = str(row.get("category_id") or row.get("id") or "").strip()
+                    if not row_id or row_id in seen:
+                        continue
+                    seen.add(row_id)
+                    if fallback_row is None:
+                        fallback_row = row
+                    image_url = _extract_image_url(row)
+                    if image_url:
+                        break
+                    queue.extend(by_parent.get(row_id, []))
+
             store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
             store_domain = (getattr(store, "zoho_store_domain", "") or "").strip() if store else ""
             image_url = build_image_url(store_domain, image_url) or image_url
+            if not image_url:
+                image_url = build_zoho_cdn_document_url(store_domain, match)
+            if not image_url and isinstance(detail_row, dict):
+                image_url = build_zoho_cdn_document_url(store_domain, detail_row)
+            if not image_url and isinstance(fallback_row, dict):
+                image_url = build_zoho_cdn_document_url(store_domain, fallback_row)
 
             if not image_url:
                 return Response(
