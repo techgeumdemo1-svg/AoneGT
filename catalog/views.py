@@ -255,6 +255,47 @@ class StoreProductDetailAPIView(APIView):
         return Response(ProductDetailSerializer(product).data, status=status.HTTP_200_OK)
 
 
+class RelatedProductSuggestionListAPIView(generics.ListAPIView):
+    """
+    GET — related product suggestions for one product in a store.
+
+    Query:
+    - limit (optional, default 10, max 20)
+    """
+
+    serializer_class = ProductListSerializer
+
+    def get_queryset(self):
+        store = get_object_or_404(Store, pk=self.kwargs['store_id'], is_active=True)
+        product = get_object_or_404(
+            Product,
+            pk=self.kwargs['pk'],
+            store=store,
+            is_active=True,
+        )
+
+        raw_limit = self.request.query_params.get('limit', 10)
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            limit = 10
+        limit = max(1, min(limit, 20))
+
+        base_qs = Product.objects.filter(store=store, is_active=True).exclude(pk=product.pk)
+
+        if product.category:
+            related_qs = list(base_qs.filter(category__iexact=product.category).order_by('name')[:limit])
+            if len(related_qs) >= limit:
+                return related_qs
+            needed = limit - len(related_qs)
+            fallback_qs = list(
+                base_qs.exclude(pk__in=[p.pk for p in related_qs]).order_by('name')[:needed]
+            )
+            return related_qs + fallback_qs
+
+        return base_qs.order_by('name')[:limit]
+
+
 class AdminStoreListCreateAPIView(generics.ListCreateAPIView):
     """
     Staff only (JWT + is_staff). GET all stores; POST create a store.

@@ -948,12 +948,36 @@ class OrderReturnListCreateAPIView(APIView):
 class OrderReorderAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def post(self, request, pk):
-        order = get_object_or_404(Order, pk=pk, user=request.user)
+    def post(self, request, pk=None):
+        order_id = pk
+        if order_id is None:
+            raw_order_id = (request.query_params.get('order_id') or '').strip()
+            if not raw_order_id:
+                return Response(
+                    {'detail': "order_id query param is required."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                order_id = int(raw_order_id)
+            except (TypeError, ValueError):
+                return Response(
+                    {'detail': "order_id must be an integer."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        order = get_object_or_404(Order, pk=order_id, user=request.user)
+        mode = (request.query_params.get('mode') or 'merge').strip().lower()
+        if mode not in {'merge', 'replace'}:
+            return Response(
+                {'detail': "Invalid mode. Use 'merge' or 'replace'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         with transaction.atomic():
             cart, _ = Cart.objects.select_for_update().get_or_create(
                 user=request.user,
             )
+            if mode == 'replace':
+                cart.items.all().delete()
             for oi in order.items.select_related('product'):
                 p = oi.product
                 if not p or not p.is_active:
@@ -969,7 +993,11 @@ class OrderReorderAPIView(APIView):
                     item.store = st
                     item.save(update_fields=['quantity', 'store'])
         return Response(
-            {'detail': 'Items merged into your cart.', 'store_id': order.store_id},
+            {
+                'detail': 'Items added to your cart.',
+                'mode': mode,
+                'store_id': order.store_id,
+            },
             status=status.HTTP_200_OK,
         )
 

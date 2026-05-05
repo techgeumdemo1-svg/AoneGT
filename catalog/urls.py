@@ -3,6 +3,7 @@ from .views import (
     BannerListAPIView,
     BannerAdminListCreateAPIView,
     BannerAdminDetailAPIView,
+    RelatedProductSuggestionListAPIView,
     StoreListAPIView,
     StoreProductListAPIView,
     StoreProductDetailAPIView,
@@ -62,6 +63,11 @@ urlpatterns = [
         'stores/<int:store_id>/products/<int:pk>/',
         StoreProductDetailAPIView.as_view(),
         name='catalog-store-product-detail',
+    ),
+    path(
+        'stores/<int:store_id>/products/<int:pk>/related/',
+        RelatedProductSuggestionListAPIView.as_view(),
+        name='catalog-related-product-suggestions',
     ),
     
 ]
