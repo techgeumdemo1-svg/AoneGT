@@ -1,10 +1,14 @@
 from decimal import Decimal
 
+from django.conf import settings
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers
 
 from catalog.models import Product, Store
+from shop.services.zoho_commerce import ZohoCommerceError, ZohoCommerceService
+from zoho_integration.models import ZohoCommerceAccount
+from zoho_integration.services import ZohoCommerceService as ZohoAccountService
 
 from .models import (
     Cart,
@@ -173,6 +177,102 @@ class WishlistStoreSerializer(serializers.ModelSerializer):
 
 class WishlistProductSerializer(serializers.ModelSerializer):
     product_id = serializers.IntegerField(source='id', read_only=True)
+    image_url = serializers.SerializerMethodField()
+
+    @staticmethod
+    def _is_usable_image_url(value: str) -> bool:
+        raw = (value or '').strip()
+        return raw.startswith('http://') or raw.startswith('https://') or raw.startswith('/')
+
+    @staticmethod
+    def _extract_image_url_from_zoho_payload(payload: dict) -> str:
+        if not isinstance(payload, dict):
+            return ''
+        source = payload.get('product') if isinstance(payload.get('product'), dict) else payload
+        if not isinstance(source, dict):
+            return ''
+        docs = source.get('documents') if isinstance(source.get('documents'), list) else []
+        first_doc = docs[0] if docs and isinstance(docs[0], dict) else {}
+        variants = source.get('variants') if isinstance(source.get('variants'), list) else []
+        first_variant = variants[0] if variants and isinstance(variants[0], dict) else {}
+        variant_docs = first_variant.get('documents') if isinstance(first_variant.get('documents'), list) else []
+        first_variant_doc = (
+            variant_docs[0] if variant_docs and isinstance(variant_docs[0], dict) else {}
+        )
+        return str(
+            source.get('image_url')
+            or source.get('image')
+            or source.get('image_path')
+            or first_doc.get('image_url')
+            or first_doc.get('url')
+            or first_doc.get('document_url')
+            or first_doc.get('download_url')
+            or first_variant_doc.get('image_url')
+            or first_variant_doc.get('url')
+            or first_variant_doc.get('document_url')
+            or first_variant_doc.get('download_url')
+            or ''
+        ).strip()
+
+    def get_image_url(self, obj):
+        current = (getattr(obj, 'image_url', '') or '').strip()
+        if self._is_usable_image_url(current):
+            return current
+        zoho_pid = (getattr(obj, 'zoho_product_id', '') or '').strip()
+        store_id = getattr(obj, 'store_id', None)
+        if not (zoho_pid and store_id):
+            return ''
+        store = getattr(obj, 'store', None) or Store.objects.filter(pk=store_id).first()
+        if store is not None:
+            try:
+                data = ZohoCommerceService.get_product_detail_storefront(
+                    zoho_pid,
+                    store=store,
+                )
+                direct = self._extract_image_url_from_zoho_payload(data)
+                if self._is_usable_image_url(direct):
+                    return direct
+            except ZohoCommerceError:
+                pass
+
+            # Account-level fallback can expose direct CDN URLs on some orgs.
+            org_id = str(getattr(store, 'zoho_org_id', '') or '').strip()
+            if org_id:
+                account = None
+                for row in ZohoCommerceAccount.objects.filter(is_active=True):
+                    if str(getattr(row, 'organization_id', '') or '').strip() == org_id:
+                        account = row
+                        break
+                if account is not None:
+                    try:
+                        detail = ZohoAccountService(account).get_product_detail(
+                            organization_id=org_id,
+                            product_id=str(zoho_pid),
+                        )
+                        source = (
+                            detail.get('product')
+                            or detail.get('item')
+                            or detail.get('data')
+                            or detail
+                        )
+                        if isinstance(source, dict):
+                            direct = self._extract_image_url_from_zoho_payload(source)
+                            if self._is_usable_image_url(direct):
+                                return direct
+                    except Exception:
+                        pass
+                    proxy_path = (
+                        f'/zoho/multi/accounts/{account.id}/categories/{org_id}/{zoho_pid}/image/'
+                    )
+                    request = self.context.get('request')
+                    return request.build_absolute_uri(proxy_path) if request else proxy_path
+            # Fallback that does not require account/org mapping.
+            request = self.context.get('request')
+            shop_proxy_path = f'/api/shop/zoho-products/{zoho_pid}/image/?store_id={store.id}'
+            return request.build_absolute_uri(shop_proxy_path) if request else shop_proxy_path
+
+        placeholder = str(getattr(settings, 'ZOHO_IMAGE_PLACEHOLDER_URL', '') or '').strip()
+        return placeholder if self._is_usable_image_url(placeholder) else ''
 
     class Meta:
         model = Product

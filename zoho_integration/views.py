@@ -1172,6 +1172,7 @@ def _multi_account_category_list_response(request, account, organization_id: str
     data = service.list_categories(organization_id=organization_id)
     categories = data.get("categories", []) or data.get("category", [])
     categories = [c for c in categories if isinstance(c, dict)]
+    placeholder_url = str(getattr(settings, "ZOHO_IMAGE_PLACEHOLDER_URL", "") or "").strip()
 
     # Optional query params:
     # - category_id: return categories under this parent/root category
@@ -1208,20 +1209,130 @@ def _multi_account_category_list_response(request, account, organization_id: str
 
     store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
     store_domain = (getattr(store, "zoho_store_domain", "") or "").strip() if store else ""
+    by_parent: dict[str, list[dict]] = {}
+    for row in categories:
+        parent_id = str(
+            row.get("parent_category_id")
+            or row.get("parent_id")
+            or row.get("parent")
+            or ""
+        ).strip()
+        by_parent.setdefault(parent_id, []).append(row)
+
+    def _first_descendant_with_image(root_category_id: str):
+        queue = list(by_parent.get(root_category_id, []))
+        seen: set[str] = set()
+        while queue:
+            row = queue.pop(0)
+            cid = str(row.get("category_id") or row.get("id") or "").strip()
+            if not cid or cid in seen:
+                continue
+            seen.add(cid)
+            candidate = (
+                _extract_image_url(row)
+                or build_zoho_cdn_document_url(store_domain, row)
+            )
+            if candidate:
+                return row
+            queue.extend(by_parent.get(cid, []))
+        return None
+
+    def _descendant_category_ids(root_category_id: str) -> list[str]:
+        queue = [root_category_id]
+        seen: set[str] = set()
+        result: list[str] = []
+        while queue:
+            current = queue.pop(0)
+            if current in seen:
+                continue
+            seen.add(current)
+            result.append(current)
+            for row in by_parent.get(current, []):
+                child_id = str(row.get("category_id") or row.get("id") or "").strip()
+                if child_id and child_id not in seen:
+                    queue.append(child_id)
+        return result
+
+    enriched_categories: list[dict] = []
+    for c in main_categories:
+        if not _category_name(c):
+            continue
+        cid = str(c.get("category_id") or c.get("id") or "").strip()
+        if not cid:
+            continue
+        row = dict(c)
+        direct_image = (
+            row.get("image_url")
+            or row.get("image")
+            or row.get("image_name")
+            or row.get("image_path")
+            or ""
+        )
+        if not direct_image and not row.get("document_id"):
+            try:
+                detail = service.get_category_detail(
+                    organization_id=str(organization_id),
+                    category_id=cid,
+                )
+                detail_row = (
+                    detail.get("category")
+                    or detail.get("data")
+                    or {}
+                )
+                if isinstance(detail_row, dict):
+                    for key in ("image_url", "image", "image_name", "image_path", "document_id", "documents"):
+                        if key in detail_row and detail_row.get(key) not in (None, "", []):
+                            row[key] = detail_row.get(key)
+            except Exception:
+                pass
+        if not _extract_image_url(row) and not build_zoho_cdn_document_url(store_domain, row):
+            descendant = _first_descendant_with_image(cid)
+            if isinstance(descendant, dict):
+                row = dict(row)
+                for key in ("image_url", "image", "image_name", "image_path", "document_id", "documents"):
+                    if descendant.get(key) not in (None, "", []):
+                        row[key] = descendant.get(key)
+        if not _extract_image_url(row) and not build_zoho_cdn_document_url(store_domain, row):
+            # Final fallback: use first product image inside this category,
+            # so image_url remains a real Zoho CDN URL.
+            try:
+                search_category_ids = _descendant_category_ids(cid)
+                for search_cid in search_category_ids:
+                    product_data = service.list_products(
+                        organization_id=str(organization_id),
+                        category_id=search_cid,
+                        page=1,
+                        per_page=50,
+                    )
+                    product_rows = product_data.get("products", []) or product_data.get("items", [])
+                    if not isinstance(product_rows, list):
+                        continue
+                    found_product_image = ""
+                    for product_row in product_rows:
+                        if not isinstance(product_row, dict):
+                            continue
+                        p_image = _extract_image_url(product_row)
+                        p_image = build_image_url(store_domain, p_image) or p_image
+                        if not p_image:
+                            p_image = build_zoho_cdn_product_document_url(store_domain, product_row)
+                        if p_image:
+                            found_product_image = p_image
+                            break
+                    if found_product_image:
+                        row = dict(row)
+                        row["image_url"] = found_product_image
+                        break
+            except Exception:
+                pass
+        enriched_categories.append(row)
+
     main_categories = [
         _category_summary(
             c,
-            fallback_image_url=request.build_absolute_uri(
-                _category_image_proxy_relative_path(
-                    account.id,
-                    str(organization_id),
-                    str(c.get("category_id") or c.get("id") or "").strip(),
-                ),
-            ) if str(c.get("category_id") or c.get("id") or "").strip() else "",
+            fallback_image_url=placeholder_url,
             store_domain=store_domain,
         )
-        for c in main_categories
-        if _category_name(c)
+        for c in enriched_categories
     ]
 
     return Response({
@@ -1432,7 +1543,13 @@ def _category_image_proxy_redirect(request, account_id, organization_id, categor
             None,
         )
         if not match:
-            return Response({"detail": "Category not found"}, status=status.HTTP_404_NOT_FOUND)
+            # Backward-compatible fallback: some clients pass product_id in this slot.
+            return _product_image_proxy_redirect(
+                request,
+                account_id=account_id,
+                organization_id=organization_id,
+                product_id=category_id,
+            )
 
         image_url = _extract_image_url(match)
         detail_row = {}
@@ -1493,6 +1610,9 @@ def _category_image_proxy_redirect(request, account_id, organization_id, categor
             image_url = build_zoho_cdn_document_url(store_domain, fallback_row)
 
         if not image_url:
+            placeholder_url = str(getattr(settings, "ZOHO_IMAGE_PLACEHOLDER_URL", "") or "").strip()
+            if placeholder_url.startswith("http://") or placeholder_url.startswith("https://"):
+                return HttpResponseRedirect(placeholder_url)
             return Response(
                 {"detail": "No image URL available for this category."},
                 status=status.HTTP_404_NOT_FOUND,
@@ -1541,3 +1661,57 @@ class MultiAccountZohoCategoryImageQueryAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return _category_image_proxy_redirect(request, account_id, organization_id, category_id)
+
+
+def _product_image_proxy_redirect(request, account_id, organization_id, product_id):
+    try:
+        account = ZohoCommerceAccount.objects.get(id=account_id, is_active=True)
+    except ZohoCommerceAccount.DoesNotExist:
+        return Response({"detail": "Zoho account not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    service = ZohoCommerceService(account)
+    try:
+        detail_data = service.get_product_detail(
+            organization_id=organization_id,
+            product_id=product_id,
+        )
+        product = (
+            detail_data.get("product")
+            or detail_data.get("item")
+            or detail_data.get("data")
+            or detail_data
+        )
+        if not isinstance(product, dict):
+            return Response(
+                {"detail": "Invalid Zoho product payload."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        image_url = _extract_image_url(product)
+        store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
+        store_domain = (getattr(store, "zoho_store_domain", "") or "").strip() if store else ""
+        image_url = build_image_url(store_domain, image_url) or image_url
+        if not image_url:
+            image_url = build_zoho_cdn_product_document_url(store_domain, product)
+        if not image_url:
+            return Response(
+                {"detail": "No image URL available for this product."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return HttpResponseRedirect(image_url)
+    except Exception as e:
+        return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class MultiAccountZohoProductImageProxyAPIView(APIView):
+    """
+    Redirects product image by account/org/product identifiers.
+    """
+
+    def get(self, request, account_id, organization_id, product_id):
+        return _product_image_proxy_redirect(
+            request,
+            account_id=account_id,
+            organization_id=organization_id,
+            product_id=product_id,
+        )

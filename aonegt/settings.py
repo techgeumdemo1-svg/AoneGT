@@ -122,6 +122,9 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.AllowAny',
     ),
+    'DEFAULT_THROTTLE_RATES': {
+        'forgot_password': os.getenv('FORGOT_PASSWORD_THROTTLE_RATE', '5/hour'),
+    },
 }
 
 SIMPLE_JWT = {

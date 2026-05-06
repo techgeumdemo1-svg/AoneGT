@@ -9,6 +9,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from shop.models import Cart, Order, UserAddress, WishlistItem
+from .throttles import ForgotPasswordRateThrottle
 
 from .models import User, PasswordResetOTP, RegistrationOTP
 from .serializers import (
@@ -184,17 +185,38 @@ class LoginAPIView(APIView):
 
 
 class ForgotPasswordAPIView(APIView):
+    throttle_classes = [ForgotPasswordRateThrottle]
+
     def post(self, request):
         serializer = ForgotPasswordRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         email = serializer.validated_data['email']
+        generic_response = {
+            'message': (
+                'If an account exists for this email, a password reset code has been sent.'
+            ),
+            'email': email,
+        }
 
         user = User.objects.filter(email__iexact=email).first()
         if user:
+            to_email = (user.email or '').strip().lower()
+            if to_email and user.email != to_email:
+                User.objects.filter(pk=user.pk).update(email=to_email)
+                user.email = to_email
             otp = PasswordResetOTP.objects.create(user=user)
+            if not to_email or '@' not in to_email:
+                otp.delete()
+                logger.error(
+                    'forgot-password: user pk=%s has invalid stored email repr=%r',
+                    user.pk,
+                    user.email,
+                )
+                return Response(generic_response, status=status.HTTP_200_OK)
+            greeting = (user.first_name or '').strip() or 'there'
             subject = 'AoneGt Password Reset OTP'
             message = (
-                f'Hello {user.first_name},\n\n'
+                f'Hello {greeting},\n\n'
                 f'Your OTP for password reset is: {otp.otp_code}\n'
                 f'This OTP will expire in 10 minutes.\n\n'
                 f'Reset URL: {settings.FRONTEND_RESET_URL}\n\n'
@@ -202,34 +224,20 @@ class ForgotPasswordAPIView(APIView):
             )
             try:
                 send_mail(
-                    subject, message, settings.DEFAULT_FROM_EMAIL, [user.email],
+                    subject, message, settings.DEFAULT_FROM_EMAIL, [to_email],
                     fail_silently=False,
                 )
-            except Exception:
+            except Exception as exc:
                 otp.delete()
                 logger.exception(
-                    'forgot-password: SMTP send failed (check EMAIL_* on Render, firewall, provider limits)',
+                    'forgot-password: SMTP failed to=%s (%s: %s)',
+                    to_email,
+                    type(exc).__name__,
+                    exc,
                 )
-                return Response(
-                    {
-                        'detail': (
-                            'We could not send the email right now. '
-                            'Please try again in a few minutes or contact support.'
-                        ),
-                        'error': 'email_send_failed',
-                    },
-                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
-                )
+                return Response(generic_response, status=status.HTTP_200_OK)
 
-        return Response(
-            {
-                'message': (
-                    'If an account exists for this email, a password reset code has been sent.'
-                ),
-                'email': email,
-            },
-            status=status.HTTP_200_OK,
-        )
+        return Response(generic_response, status=status.HTTP_200_OK)
 
 
 class ResetPasswordAPIView(APIView):
