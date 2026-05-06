@@ -928,14 +928,14 @@ class MultiAccountZohoProductSearchAPIView(APIView):
     Query params:
       - account_id (required)
       - organization_id (required)
-      - q (required): case-insensitive search text
+      - query (required, alias: q): case-insensitive search text
       - limit (optional, default=20, max=100)
     """
 
     def get(self, request):
         account_id_raw = (request.GET.get("account_id") or "").strip()
         organization_id = (request.GET.get("organization_id") or "").strip()
-        query = (request.GET.get("q") or "").strip()
+        query = (request.GET.get("query") or request.GET.get("q") or "").strip()
         limit_raw = (request.GET.get("limit") or "").strip()
 
         if not account_id_raw:
@@ -950,7 +950,7 @@ class MultiAccountZohoProductSearchAPIView(APIView):
             )
         if not query:
             return Response(
-                {"status": "error", "message": "q query parameter is required"},
+                {"status": "error", "message": "query (or q) query parameter is required"},
                 status=400,
             )
 
@@ -1035,7 +1035,7 @@ class MultiAccountZohoProductSearchAPIView(APIView):
                     "account_name": account.name,
                     "account_email": account.email,
                     "organization_id": organization_id,
-                    "q": query,
+                    "query": query,
                     "count": len(product_summaries),
                     "products": product_summaries,
                 },
@@ -1408,14 +1408,14 @@ class MultiAccountZohoCategorySearchAPIView(APIView):
     Query params:
       - account_id (required)
       - organization_id (required)
-      - q (required): case-insensitive search text
+      - query (required, alias: q): case-insensitive search text
       - limit (optional, default=20, max=100)
     """
 
     def get(self, request):
         account_id_raw = (request.GET.get("account_id") or "").strip()
         organization_id = (request.GET.get("organization_id") or "").strip()
-        query = (request.GET.get("q") or "").strip()
+        query = (request.GET.get("query") or request.GET.get("q") or "").strip()
         limit_raw = (request.GET.get("limit") or "").strip()
 
         if not account_id_raw:
@@ -1430,7 +1430,7 @@ class MultiAccountZohoCategorySearchAPIView(APIView):
             )
         if not query:
             return Response(
-                {"status": "error", "message": "q query parameter is required"},
+                {"status": "error", "message": "query (or q) query parameter is required"},
                 status=400,
             )
 
@@ -1490,9 +1490,8 @@ class MultiAccountZohoCategorySearchAPIView(APIView):
                         fallback_image_url=fallback_image_url,
                         store_domain=store_domain,
                     )
-                    if fallback_image_url:
-                        # Keep category search image behavior aligned with category list:
-                        # always return our proxy endpoint URL.
+                    if not (summary.get("image_url") or "").strip() and fallback_image_url:
+                        # Use proxy only when no direct/derived image URL is available.
                         summary["image_url"] = fallback_image_url
                     matched.append(
                         summary
@@ -1510,7 +1509,7 @@ class MultiAccountZohoCategorySearchAPIView(APIView):
                     "account_name": account.name,
                     "account_email": account.email,
                     "organization_id": organization_id,
-                    "q": query,
+                    "query": query,
                     "count": len(matched),
                     "categories": matched,
                 },

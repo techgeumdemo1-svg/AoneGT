@@ -1,6 +1,6 @@
 from decimal import Decimal
 from typing import Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from django.conf import settings
 from django.db import transaction
@@ -268,6 +268,87 @@ def _normalize_zoho_store_domain(raw: str) -> str:
     return host.strip().lower()
 
 
+def _build_zoho_cdn_image_url(store_domain: str, payload: dict) -> str:
+    domain = _normalize_zoho_store_domain(store_domain)
+    if not domain or not isinstance(payload, dict):
+        return ''
+    source = payload.get('product') if isinstance(payload.get('product'), dict) else payload
+    if not isinstance(source, dict):
+        return ''
+
+    top_document_id = str(
+        source.get('document_id')
+        or source.get('image_document_id')
+        or source.get('image_id')
+        or ''
+    ).strip()
+    if top_document_id:
+        return (
+            f'https://cdn1.zohoecommerce.com/category-images/{quote(top_document_id)}/800x800'
+            f'?storefront_domain={domain}'
+        )
+
+    rows = source.get('documents') or source.get('attachments') or source.get('images') or []
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_document_id = str(
+                row.get('document_id')
+                or row.get('image_document_id')
+                or row.get('image_id')
+                or row.get('id')
+                or ''
+            ).strip()
+            if row_document_id:
+                return (
+                    f'https://cdn1.zohoecommerce.com/category-images/{quote(row_document_id)}/800x800'
+                    f'?storefront_domain={domain}'
+                )
+    return ''
+
+
+def _resolve_cdn_image_for_store_product(store: Store, zoho_product_id: str) -> str:
+    org_id = str(getattr(store, 'zoho_org_id', '') or '').strip()
+    account = None
+    if org_id:
+        account = ZohoCommerceAccount.objects.filter(
+            is_active=True,
+            organization_id=org_id,
+        ).first()
+    if account is None:
+        client_id = str(getattr(store, 'client_id', '') or '').strip()
+        refresh_token = str(getattr(store, 'refresh_token', '') or '').strip()
+        if client_id:
+            account = ZohoCommerceAccount.objects.filter(
+                is_active=True,
+                client_id=client_id,
+            ).first()
+        if account is None and refresh_token:
+            account = ZohoCommerceAccount.objects.filter(
+                is_active=True,
+                refresh_token=refresh_token,
+            ).first()
+    if account is None:
+        account = ZohoCommerceAccount.objects.filter(is_active=True).first()
+    if account is None:
+        return ''
+    org_for_request = org_id or str(getattr(account, 'organization_id', '') or '').strip()
+    if not org_for_request:
+        return ''
+    try:
+        detail = ZohoAccountService(account).get_product_detail(
+            organization_id=org_for_request,
+            product_id=str(zoho_product_id),
+        )
+    except Exception:
+        return ''
+    return _build_zoho_cdn_image_url(
+        str(getattr(store, 'zoho_store_domain', '') or ''),
+        detail,
+    )
+
+
 def _resolve_or_create_store_for_zoho_account(
     account: ZohoCommerceAccount,
     organization_id: str,
@@ -444,7 +525,93 @@ class CartDetailAPIView(APIView):
             .prefetch_related('items__product', 'items__store')
             .first()
         )
-        return Response(CartSerializer(cart).data, status=status.HTTP_200_OK)
+        payload = CartSerializer(cart).data
+        store_cache = {}
+        product_cache = {}
+        cdn_cache = {}
+
+        def _get_store(store_id):
+            key = int(store_id) if store_id is not None else None
+            if key is None:
+                return None
+            if key not in store_cache:
+                store_cache[key] = Store.objects.filter(pk=key).first()
+            return store_cache[key]
+
+        def _get_product(product_id):
+            key = int(product_id) if product_id is not None else None
+            if key is None:
+                return None
+            if key not in product_cache:
+                product_cache[key] = Product.objects.filter(pk=key).first()
+            return product_cache[key]
+
+        def _resolve_for_product(store_obj, product_obj):
+            if store_obj is None or product_obj is None:
+                return ''
+            zoho_pid = str(getattr(product_obj, 'zoho_product_id', '') or '').strip()
+            if not zoho_pid:
+                return ''
+            cache_key = (store_obj.pk, zoho_pid)
+            if cache_key not in cdn_cache:
+                cdn_cache[cache_key] = _resolve_cdn_image_for_store_product(store_obj, zoho_pid)
+            return cdn_cache[cache_key]
+
+        item_rows = payload.get('items') if isinstance(payload, dict) else []
+        if isinstance(item_rows, list):
+            for row in item_rows:
+                if not isinstance(row, dict):
+                    continue
+                store_obj = row.get('store') or {}
+                product_obj = row.get('product') or {}
+                if not isinstance(store_obj, dict) or not isinstance(product_obj, dict):
+                    continue
+                current_image = str(product_obj.get('image_url') or '').strip()
+                if (
+                    current_image
+                    and '/api/shop/zoho-products/' not in current_image
+                ):
+                    continue
+                store = _get_store(store_obj.get('id'))
+                product_model = _get_product(product_obj.get('id'))
+                cdn_url = _resolve_for_product(store, product_model)
+                if cdn_url:
+                    product_obj['image_url'] = cdn_url
+                    row['product'] = product_obj
+
+        store_groups = payload.get('store_groups') if isinstance(payload, dict) else []
+        if isinstance(store_groups, list):
+            for grp in store_groups:
+                if not isinstance(grp, dict):
+                    continue
+                store_obj = grp.get('store') or {}
+                if not isinstance(store_obj, dict):
+                    continue
+                store = _get_store(store_obj.get('id'))
+                if store is None:
+                    continue
+                grp_items = grp.get('items') or []
+                if not isinstance(grp_items, list):
+                    continue
+                for line in grp_items:
+                    if not isinstance(line, dict):
+                        continue
+                    product_obj = line.get('product') or {}
+                    if not isinstance(product_obj, dict):
+                        continue
+                    current_image = str(product_obj.get('image_url') or '').strip()
+                    if (
+                        current_image
+                        and '/api/shop/zoho-products/' not in current_image
+                    ):
+                        continue
+                    product_model = _get_product(product_obj.get('id'))
+                    cdn_url = _resolve_for_product(store, product_model)
+                    if cdn_url:
+                        product_obj['image_url'] = cdn_url
+                        line['product'] = product_obj
+
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class CartSummaryAPIView(APIView):
@@ -636,11 +803,32 @@ class CartAddItemAPIView(APIView):
         result = dict(data)
         product_info = result.get('product') or {}
         if isinstance(product_info, dict):
-            if not (product_info.get('image_url') or '').strip():
-                proxy_url = request.build_absolute_uri(
-                    f"/api/shop/zoho-products/{zoho_product_id}/image/?store_id={store.pk}"
-                )
-                product_info['image_url'] = proxy_url
+            current_image = (product_info.get('image_url') or '').strip()
+            if (
+                not current_image
+                or current_image.startswith('/api/shop/zoho-products/')
+                or '/api/shop/zoho-products/' in current_image
+            ):
+                resolved_cdn = ''
+                try:
+                    detail = ZohoAccountService(account).get_product_detail(
+                        organization_id=organization_id,
+                        product_id=str(zoho_product_id),
+                    )
+                    resolved_cdn = _build_zoho_cdn_image_url(
+                        str(getattr(store, 'zoho_store_domain', '') or primary_domain or ''),
+                        detail,
+                    )
+                except Exception:
+                    resolved_cdn = ''
+
+                if resolved_cdn:
+                    product_info['image_url'] = resolved_cdn
+                else:
+                    proxy_url = request.build_absolute_uri(
+                        f"/api/shop/zoho-products/{zoho_product_id}/image/?store_id={store.pk}"
+                    )
+                    product_info['image_url'] = proxy_url
                 result['product'] = product_info
             result['product_name'] = product_info.get('name', '')
             result['sku'] = product_info.get('sku', '')
@@ -897,14 +1085,11 @@ class CheckoutAPIView(APIView):
         order = Order.objects.prefetch_related(
             'items', 'returns__lines__order_item',
         ).get(pk=order.pk)
-        payment_options = [
-            {
-                'code': code,
-                'label': label,
-                'selected': (code == order.payment_method),
-            }
-            for code, label in Order.PaymentMethod.choices
-        ]
+        selected_payment_method = {
+            'code': order.payment_method,
+            'label': Order.PaymentMethod(order.payment_method).label,
+            'selected': True,
+        }
         order_lines = [
             {
                 'name': item.product_name,
@@ -924,7 +1109,7 @@ class CheckoutAPIView(APIView):
                     'state': order.shipping_state,
                     'country': order.shipping_country,
                 },
-                'payment_methods': payment_options,
+                'payment_methods': [selected_payment_method],
                 'order_summary': {
                     'items': order_lines,
                     'subtotal': str(order.subtotal.quantize(Decimal('0.01'))),

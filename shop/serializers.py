@@ -1,4 +1,5 @@
 from decimal import Decimal
+from urllib.parse import quote
 
 from django.conf import settings
 from django.db import transaction
@@ -31,14 +32,141 @@ class ProductMiniSerializer(serializers.ModelSerializer):
             'id', 'name', 'slug', 'category', 'sku', 'price', 'currency', 'image_url',
         )
 
+    @staticmethod
+    def _is_usable_image_url(value: str) -> bool:
+        raw = (value or '').strip()
+        return raw.startswith('http://') or raw.startswith('https://') or raw.startswith('/')
+
+    @staticmethod
+    def _extract_image_url_from_zoho_payload(payload: dict) -> str:
+        if not isinstance(payload, dict):
+            return ''
+        source = payload.get('product') if isinstance(payload.get('product'), dict) else payload
+        if not isinstance(source, dict):
+            return ''
+        docs = source.get('documents') if isinstance(source.get('documents'), list) else []
+        first_doc = docs[0] if docs and isinstance(docs[0], dict) else {}
+        variants = source.get('variants') if isinstance(source.get('variants'), list) else []
+        first_variant = variants[0] if variants and isinstance(variants[0], dict) else {}
+        variant_docs = first_variant.get('documents') if isinstance(first_variant.get('documents'), list) else []
+        first_variant_doc = (
+            variant_docs[0] if variant_docs and isinstance(variant_docs[0], dict) else {}
+        )
+        return str(
+            source.get('image_url')
+            or source.get('image_name')
+            or source.get('image')
+            or source.get('image_path')
+            or first_doc.get('image_url')
+            or first_doc.get('url')
+            or first_doc.get('document_url')
+            or first_doc.get('download_url')
+            or first_variant_doc.get('image_url')
+            or first_variant_doc.get('url')
+            or first_variant_doc.get('document_url')
+            or first_variant_doc.get('download_url')
+            or ''
+        ).strip()
+
+    @staticmethod
+    def _build_zoho_cdn_product_document_url(store_domain: str, payload: dict) -> str:
+        domain = (store_domain or '').strip().replace('https://', '').replace('http://', '')
+        if not domain or not isinstance(payload, dict):
+            return ''
+        source = payload.get('product') if isinstance(payload.get('product'), dict) else payload
+        if not isinstance(source, dict):
+            return ''
+        top_document_id = str(
+            source.get('document_id')
+            or source.get('image_document_id')
+            or source.get('image_id')
+            or ''
+        ).strip()
+        if top_document_id:
+            return (
+                f'https://cdn1.zohoecommerce.com/category-images/{quote(top_document_id)}/800x800'
+                f'?storefront_domain={domain}'
+            )
+        rows = source.get('documents') or source.get('attachments') or source.get('images') or []
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                row_document_id = str(
+                    row.get('document_id')
+                    or row.get('image_document_id')
+                    or row.get('image_id')
+                    or row.get('id')
+                    or ''
+                ).strip()
+                if row_document_id:
+                    return (
+                        f'https://cdn1.zohoecommerce.com/category-images/{quote(row_document_id)}/800x800'
+                        f'?storefront_domain={domain}'
+                    )
+        return ''
+
     def get_image_url(self, obj):
         current = (getattr(obj, 'image_url', '') or '').strip()
-        if current:
+        # Keep existing direct URLs, but do not preserve our internal image proxy path.
+        if (
+            self._is_usable_image_url(current)
+            and not current.startswith('/api/shop/zoho-products/')
+            and '/api/shop/zoho-products/' not in current
+        ):
             return current
         zoho_pid = (getattr(obj, 'zoho_product_id', '') or '').strip()
         store_id = getattr(obj, 'store_id', None)
         if not (zoho_pid and store_id):
             return ''
+        store = getattr(obj, 'store', None) or Store.objects.filter(pk=store_id).first()
+        if store is not None:
+            try:
+                data = ZohoCommerceService.get_product_detail_storefront(
+                    zoho_pid,
+                    store=store,
+                )
+                direct = self._extract_image_url_from_zoho_payload(data)
+                if self._is_usable_image_url(direct):
+                    return direct
+                cdn_url = self._build_zoho_cdn_product_document_url(
+                    str(getattr(store, 'zoho_store_domain', '') or ''),
+                    data,
+                )
+                if self._is_usable_image_url(cdn_url):
+                    return cdn_url
+            except ZohoCommerceError:
+                pass
+            org_id = str(getattr(store, 'zoho_org_id', '') or '').strip()
+            if org_id:
+                account = ZohoCommerceAccount.objects.filter(
+                    is_active=True,
+                    organization_id=org_id,
+                ).first()
+                if account is not None:
+                    try:
+                        detail = ZohoAccountService(account).get_product_detail(
+                            organization_id=org_id,
+                            product_id=str(zoho_pid),
+                        )
+                        source = (
+                            detail.get('product')
+                            or detail.get('item')
+                            or detail.get('data')
+                            or detail
+                        )
+                        if isinstance(source, dict):
+                            direct = self._extract_image_url_from_zoho_payload(source)
+                            if self._is_usable_image_url(direct):
+                                return direct
+                            cdn_url = self._build_zoho_cdn_product_document_url(
+                                str(getattr(store, 'zoho_store_domain', '') or ''),
+                                source,
+                            )
+                            if self._is_usable_image_url(cdn_url):
+                                return cdn_url
+                    except Exception:
+                        pass
         request = self.context.get('request')
         path = f'/api/shop/zoho-products/{zoho_pid}/image/?store_id={store_id}'
         return request.build_absolute_uri(path) if request else path
