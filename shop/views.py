@@ -897,7 +897,46 @@ class CheckoutAPIView(APIView):
         order = Order.objects.prefetch_related(
             'items', 'returns__lines__order_item',
         ).get(pk=order.pk)
-        return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
+        payment_options = [
+            {
+                'code': code,
+                'label': label,
+                'selected': (code == order.payment_method),
+            }
+            for code, label in Order.PaymentMethod.choices
+        ]
+        order_lines = [
+            {
+                'name': item.product_name,
+                'quantity': item.quantity,
+                'line_total': str(item.line_total.quantize(Decimal('0.01'))),
+            }
+            for item in order.items.all()
+        ]
+        response_payload = {
+            'order': OrderSerializer(order).data,
+            'checkout_view': {
+                'delivery_address': {
+                    'name': order.shipping_name,
+                    'phone': order.shipping_phone,
+                    'address_line': order.shipping_address,
+                    'city': order.shipping_city,
+                    'state': order.shipping_state,
+                    'country': order.shipping_country,
+                },
+                'payment_methods': payment_options,
+                'order_summary': {
+                    'items': order_lines,
+                    'subtotal': str(order.subtotal.quantize(Decimal('0.01'))),
+                    'vat_percent': str(order.vat_percent.quantize(Decimal('0.01'))),
+                    'vat_amount': str(order.vat_amount.quantize(Decimal('0.01'))),
+                    'shipping_amount': str(order.shipping_amount.quantize(Decimal('0.01'))),
+                    'total': str(order.total.quantize(Decimal('0.01'))),
+                    'currency': order.currency,
+                },
+            },
+        }
+        return Response(response_payload, status=status.HTTP_201_CREATED)
 
 
 class OrderListAPIView(generics.ListAPIView):

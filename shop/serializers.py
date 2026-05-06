@@ -472,15 +472,28 @@ class CheckoutSerializer(serializers.Serializer):
             attrs['shipping_postal_code'] = attrs.get('shipping_postal_code') or ''
             attrs['shipping_country'] = attrs.get('shipping_country') or 'UAE'
         else:
-            required_ship = [
-                'shipping_name', 'shipping_phone', 'shipping_address',
-                'shipping_city', 'shipping_country',
-            ]
-            missing_ship = [f for f in required_ship if not (attrs.get(f) or '').strip()]
-            if missing_ship:
-                raise serializers.ValidationError(
-                    {f: 'This field is required unless address_id is provided.' for f in missing_ship},
-                )
+            default_address = UserAddress.objects.filter(
+                user=request.user if request else None,
+                is_default=True,
+            ).first()
+            if default_address:
+                attrs['shipping_name'] = default_address.full_name
+                attrs['shipping_phone'] = default_address.phone_number
+                attrs['shipping_address'] = default_address.address
+                attrs['shipping_city'] = default_address.city
+                attrs['shipping_state'] = default_address.state
+                attrs['shipping_postal_code'] = attrs.get('shipping_postal_code') or ''
+                attrs['shipping_country'] = attrs.get('shipping_country') or 'UAE'
+            else:
+                required_ship = [
+                    'shipping_name', 'shipping_phone', 'shipping_address',
+                    'shipping_city', 'shipping_country',
+                ]
+                missing_ship = [f for f in required_ship if not (attrs.get(f) or '').strip()]
+                if missing_ship:
+                    raise serializers.ValidationError(
+                        {f: 'This field is required unless address_id is provided.' for f in missing_ship},
+                    )
 
         if not attrs.get('billing_same_as_shipping'):
             required = [

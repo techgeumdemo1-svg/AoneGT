@@ -146,6 +146,11 @@ EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
 EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
 EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True') == 'True'
+# Avoid hanging workers for minutes when SMTP is unreachable (common on Render if misconfigured).
+try:
+    EMAIL_TIMEOUT = int(os.getenv('EMAIL_TIMEOUT', '20'))
+except ValueError:
+    EMAIL_TIMEOUT = 20
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'webmaster@localhost')
 FRONTEND_RESET_URL = os.getenv('FRONTEND_RESET_URL', 'aonegt://reset-password')
 

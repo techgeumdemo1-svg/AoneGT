@@ -9,6 +9,7 @@ from .views import (
     MultiAccountZohoCategoryListQueryAPIView,
     MultiAccountZohoCategorySearchAPIView,
     MultiAccountZohoCategoryImageProxyAPIView,
+    MultiAccountZohoCategoryImageQueryAPIView,
 )
 
 urlpatterns = [
@@ -19,6 +20,11 @@ urlpatterns = [
     path("multi/product-detail/", MultiAccountZohoProductDetailQueryAPIView.as_view()),
     path("multi/categories/", MultiAccountZohoCategoryListQueryAPIView.as_view()),
     path("multi/categories/search/", MultiAccountZohoCategorySearchAPIView.as_view()),
+    path(
+        "multi/categories/image/",
+        MultiAccountZohoCategoryImageQueryAPIView.as_view(),
+        name="zoho-multi-category-image-query",
+    ),
     path("multi/accounts/<int:account_id>/products/<str:organization_id>/", MultiAccountZohoProductListAPIView.as_view()),
     path(
         "multi/accounts/<int:account_id>/categories/<str:organization_id>/<str:category_id>/image/",

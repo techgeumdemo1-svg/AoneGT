@@ -3,7 +3,7 @@ from django.conf import settings
 import re
 import requests
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -11,6 +11,20 @@ from rest_framework import status
 from .models import ZohoCommerceAccount
 from .services import ZohoCommerceService
 from catalog.models import Store
+
+
+def _category_image_proxy_relative_path(account_id: int, organization_id: str, category_id: str) -> str:
+    cid = (category_id or "").strip()
+    if not cid:
+        return ""
+    qs = urlencode(
+        {
+            "account_id": account_id,
+            "organization_id": str(organization_id),
+            "category_id": cid,
+        },
+    )
+    return f"/zoho/multi/categories/image/?{qs}"
 
 
 def _is_top_level_category(category: dict) -> bool:
@@ -1198,7 +1212,11 @@ def _multi_account_category_list_response(request, account, organization_id: str
         _category_summary(
             c,
             fallback_image_url=request.build_absolute_uri(
-                f"/zoho/multi/accounts/{account.id}/categories/{organization_id}/{str(c.get('category_id') or c.get('id') or '').strip()}/image/"
+                _category_image_proxy_relative_path(
+                    account.id,
+                    str(organization_id),
+                    str(c.get("category_id") or c.get("id") or "").strip(),
+                ),
             ) if str(c.get("category_id") or c.get("id") or "").strip() else "",
             store_domain=store_domain,
         )
@@ -1348,14 +1366,25 @@ class MultiAccountZohoCategorySearchAPIView(APIView):
                 if not name:
                     continue
                 if needle in name.lower():
+                    category_id = str(c.get("category_id") or c.get("id") or "").strip()
+                    fallback_image_url = (
+                        request.build_absolute_uri(
+                            _category_image_proxy_relative_path(
+                                account.id, str(organization_id), category_id,
+                            ),
+                        ) if category_id else ""
+                    )
+                    summary = _category_summary(
+                        c,
+                        fallback_image_url=fallback_image_url,
+                        store_domain=store_domain,
+                    )
+                    if fallback_image_url:
+                        # Keep category search image behavior aligned with category list:
+                        # always return our proxy endpoint URL.
+                        summary["image_url"] = fallback_image_url
                     matched.append(
-                        _category_summary(
-                            c,
-                            fallback_image_url=request.build_absolute_uri(
-                                f"/zoho/multi/accounts/{account.id}/categories/{organization_id}/{str(c.get('category_id') or c.get('id') or '').strip()}/image/"
-                            ) if str(c.get("category_id") or c.get("id") or "").strip() else "",
-                            store_domain=store_domain,
-                        )
+                        summary
                     )
 
             matched = sorted(
@@ -1383,93 +1412,132 @@ class MultiAccountZohoCategorySearchAPIView(APIView):
             )
 
 
+def _category_image_proxy_redirect(request, account_id, organization_id, category_id):
+    try:
+        account = ZohoCommerceAccount.objects.get(id=account_id, is_active=True)
+    except ZohoCommerceAccount.DoesNotExist:
+        return Response({"detail": "Zoho account not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    service = ZohoCommerceService(account)
+
+    try:
+        data = service.list_categories(organization_id=organization_id)
+        categories = data.get("categories", []) or data.get("category", [])
+        categories = [c for c in categories if isinstance(c, dict)]
+        match = next(
+            (
+                c for c in categories
+                if str(c.get("category_id") or c.get("id") or "").strip() == str(category_id).strip()
+            ),
+            None,
+        )
+        if not match:
+            return Response({"detail": "Category not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        image_url = _extract_image_url(match)
+        detail_row = {}
+        fallback_row = None
+        if not image_url:
+            try:
+                detail = service.get_category_detail(
+                    organization_id=organization_id,
+                    category_id=category_id,
+                )
+            except Exception:
+                detail = {}
+            detail_row = (
+                detail.get("category")
+                or detail.get("data")
+                or {}
+            )
+            if isinstance(detail_row, dict):
+                image_url = _extract_image_url(detail_row)
+
+        # Fallback: if this category has no own image in Zoho payload,
+        # try descendants (children/grandchildren) and use the first image found.
+        if not image_url:
+            wanted_parent = str(category_id).strip()
+            by_parent = {}
+            for row in categories:
+                parent_id = str(
+                    row.get("parent_category_id")
+                    or row.get("parent_id")
+                    or row.get("parent")
+                    or ""
+                ).strip()
+                by_parent.setdefault(parent_id, []).append(row)
+
+            queue = list(by_parent.get(wanted_parent, []))
+            seen = set()
+            while queue and not image_url:
+                row = queue.pop(0)
+                row_id = str(row.get("category_id") or row.get("id") or "").strip()
+                if not row_id or row_id in seen:
+                    continue
+                seen.add(row_id)
+                if fallback_row is None:
+                    fallback_row = row
+                image_url = _extract_image_url(row)
+                if image_url:
+                    break
+                queue.extend(by_parent.get(row_id, []))
+
+        store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
+        store_domain = (getattr(store, "zoho_store_domain", "") or "").strip() if store else ""
+        image_url = build_image_url(store_domain, image_url) or image_url
+        if not image_url:
+            image_url = build_zoho_cdn_document_url(store_domain, match)
+        if not image_url and isinstance(detail_row, dict):
+            image_url = build_zoho_cdn_document_url(store_domain, detail_row)
+        if not image_url and isinstance(fallback_row, dict):
+            image_url = build_zoho_cdn_document_url(store_domain, fallback_row)
+
+        if not image_url:
+            return Response(
+                {"detail": "No image URL available for this category."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return HttpResponseRedirect(image_url)
+    except Exception as e:
+        return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
 class MultiAccountZohoCategoryImageProxyAPIView(APIView):
     def get(self, request, account_id, organization_id, category_id):
-        try:
-            account = ZohoCommerceAccount.objects.get(id=account_id, is_active=True)
-        except ZohoCommerceAccount.DoesNotExist:
-            return Response({"detail": "Zoho account not found"}, status=status.HTTP_404_NOT_FOUND)
+        return _category_image_proxy_redirect(request, account_id, organization_id, category_id)
 
-        service = ZohoCommerceService(account)
 
-        try:
-            data = service.list_categories(organization_id=organization_id)
-            categories = data.get("categories", []) or data.get("category", [])
-            categories = [c for c in categories if isinstance(c, dict)]
-            match = next(
-                (
-                    c for c in categories
-                    if str(c.get("category_id") or c.get("id") or "").strip() == str(category_id).strip()
-                ),
-                None,
+class MultiAccountZohoCategoryImageQueryAPIView(APIView):
+    """
+    Same as path-based category image proxy, but IDs are query params:
+    ?account_id=&organization_id=&category_id=
+    """
+
+    def get(self, request):
+        account_id_raw = (request.GET.get("account_id") or "").strip()
+        organization_id = (request.GET.get("organization_id") or "").strip()
+        category_id = (request.GET.get("category_id") or "").strip()
+        if not account_id_raw:
+            return Response(
+                {"detail": "account_id query parameter is required."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
-            if not match:
-                return Response({"detail": "Category not found"}, status=status.HTTP_404_NOT_FOUND)
-
-            image_url = _extract_image_url(match)
-            detail_row = {}
-            fallback_row = None
-            if not image_url:
-                try:
-                    detail = service.get_category_detail(
-                        organization_id=organization_id,
-                        category_id=category_id,
-                    )
-                except Exception:
-                    detail = {}
-                detail_row = (
-                    detail.get("category")
-                    or detail.get("data")
-                    or {}
-                )
-                if isinstance(detail_row, dict):
-                    image_url = _extract_image_url(detail_row)
-
-            # Fallback: if this category has no own image in Zoho payload,
-            # try descendants (children/grandchildren) and use the first image found.
-            if not image_url:
-                wanted_parent = str(category_id).strip()
-                by_parent = {}
-                for row in categories:
-                    parent_id = str(
-                        row.get("parent_category_id")
-                        or row.get("parent_id")
-                        or row.get("parent")
-                        or ""
-                    ).strip()
-                    by_parent.setdefault(parent_id, []).append(row)
-
-                queue = list(by_parent.get(wanted_parent, []))
-                seen = set()
-                while queue and not image_url:
-                    row = queue.pop(0)
-                    row_id = str(row.get("category_id") or row.get("id") or "").strip()
-                    if not row_id or row_id in seen:
-                        continue
-                    seen.add(row_id)
-                    if fallback_row is None:
-                        fallback_row = row
-                    image_url = _extract_image_url(row)
-                    if image_url:
-                        break
-                    queue.extend(by_parent.get(row_id, []))
-
-            store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
-            store_domain = (getattr(store, "zoho_store_domain", "") or "").strip() if store else ""
-            image_url = build_image_url(store_domain, image_url) or image_url
-            if not image_url:
-                image_url = build_zoho_cdn_document_url(store_domain, match)
-            if not image_url and isinstance(detail_row, dict):
-                image_url = build_zoho_cdn_document_url(store_domain, detail_row)
-            if not image_url and isinstance(fallback_row, dict):
-                image_url = build_zoho_cdn_document_url(store_domain, fallback_row)
-
-            if not image_url:
-                return Response(
-                    {"detail": "No image URL available for this category."},
-                    status=status.HTTP_404_NOT_FOUND,
-                )
-
-            return HttpResponseRedirect(image_url)
-        except Exception as e:
-            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        if not organization_id:
+            return Response(
+                {"detail": "organization_id query parameter is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not category_id:
+            return Response(
+                {"detail": "category_id query parameter is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            account_id = int(account_id_raw)
+        except (TypeError, ValueError):
+            return Response(
+                {"detail": "account_id must be an integer."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return _category_image_proxy_redirect(request, account_id, organization_id, category_id)

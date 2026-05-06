@@ -1,3 +1,4 @@
+import logging
 import uuid
 
 from django.conf import settings
@@ -28,6 +29,8 @@ from .services.zoho_registration_gate import (
     registration_email_exists_in_zoho,
     resolved_register_zoho_email_source,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class RegisterAPIView(APIView):
@@ -197,9 +200,26 @@ class ForgotPasswordAPIView(APIView):
                 f'Reset URL: {settings.FRONTEND_RESET_URL}\n\n'
                 f'If you did not request this, please ignore this email.'
             )
-            send_mail(
-                subject, message, settings.DEFAULT_FROM_EMAIL, [user.email], fail_silently=False,
-            )
+            try:
+                send_mail(
+                    subject, message, settings.DEFAULT_FROM_EMAIL, [user.email],
+                    fail_silently=False,
+                )
+            except Exception:
+                otp.delete()
+                logger.exception(
+                    'forgot-password: SMTP send failed (check EMAIL_* on Render, firewall, provider limits)',
+                )
+                return Response(
+                    {
+                        'detail': (
+                            'We could not send the email right now. '
+                            'Please try again in a few minutes or contact support.'
+                        ),
+                        'error': 'email_send_failed',
+                    },
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
 
         return Response(
             {
