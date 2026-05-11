@@ -1,5 +1,7 @@
 from django.conf import settings
 from django.contrib.auth import authenticate
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 from rest_framework_simplejwt.tokens import RefreshToken
 from .models import User, PasswordResetOTP, RegistrationOTP
@@ -12,7 +14,7 @@ from .services.zoho_registration_gate import (
 
 
 class RegisterSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True, min_length=8)
+    password = serializers.CharField(write_only=True)
     phone = serializers.CharField(max_length=32, required=True)
     registration_otp = serializers.CharField(
         write_only=True,
@@ -97,6 +99,16 @@ class RegisterSerializer(serializers.ModelSerializer):
             )
         return attrs
 
+    def validate_password(self, value):
+        password = (value or '')
+        if any(ch.isspace() for ch in password):
+            raise serializers.ValidationError('Password cannot contain spaces.')
+        try:
+            validate_password(password)
+        except DjangoValidationError as e:
+            raise serializers.ValidationError(list(e.messages))
+        return password
+
     def create(self, validated_data):
         password = validated_data.pop('password')
         user = User.objects.create_user(password=password, **validated_data)
@@ -177,10 +189,17 @@ class VerifyResetOTPSerializer(serializers.Serializer):
 class ResetPasswordSerializer(serializers.Serializer):
     email = serializers.EmailField()
     otp = serializers.CharField(max_length=6)
-    new_password = serializers.CharField(write_only=True, min_length=8)
-    confirm_password = serializers.CharField(write_only=True, min_length=8)
+    new_password = serializers.CharField(write_only=True)
+    confirm_password = serializers.CharField(write_only=True)
 
     def validate(self, attrs):
+        password = attrs['new_password']
+        if any(ch.isspace() for ch in password):
+            raise serializers.ValidationError({'new_password': 'Password cannot contain spaces.'})
+        try:
+            validate_password(password)
+        except DjangoValidationError as e:
+            raise serializers.ValidationError({'new_password': list(e.messages)})
         if attrs['new_password'] != attrs['confirm_password']:
             raise serializers.ValidationError({'confirm_password': 'Passwords do not match.'})
         return attrs

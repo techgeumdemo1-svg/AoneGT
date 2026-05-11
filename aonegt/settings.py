@@ -157,6 +157,12 @@ except ValueError:
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'webmaster@localhost')
 FRONTEND_RESET_URL = os.getenv('FRONTEND_RESET_URL', 'aonegt://reset-password')
 
+# --- Loyalty (AED): earn 1 point per LOYALTY_AED_PER_POINT_EARNED spent; 1 point = LOYALTY_POINT_VALUE_AED off.
+LOYALTY_AED_PER_POINT_EARNED = int(os.getenv('LOYALTY_AED_PER_POINT_EARNED', '100'))
+LOYALTY_POINT_VALUE_AED = Decimal(os.getenv('LOYALTY_POINT_VALUE_AED', '1'))
+LOYALTY_MIN_POINTS_TO_REDEEM = int(os.getenv('LOYALTY_MIN_POINTS_TO_REDEEM', '100'))
+LOYALTY_COUPON_EXPIRY_DAYS = int(os.getenv('LOYALTY_COUPON_EXPIRY_DAYS', '90'))
+
 # --- Checkout: do not trust client shipping by default (set true only for dev / custom quotes). ---
 CHECKOUT_TRUST_CLIENT_SHIPPING = os.getenv(
     'CHECKOUT_TRUST_CLIENT_SHIPPING', 'False',

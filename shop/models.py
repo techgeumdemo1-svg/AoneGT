@@ -10,8 +10,9 @@ from catalog.models import Product, Store
 class UserAddress(models.Model):
     class AddressType(models.TextChoices):
         HOME = 'home', 'Home'
-        WORK = 'work', 'Work'
-        OTHER = 'other', 'Other'
+        FLAT = 'flat', 'Flat'
+        OFFICE = 'office', 'Office'
+        APARTMENTS = 'apartments', 'Apartments'
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -82,7 +83,10 @@ class WishlistItem(models.Model):
     class Meta:
         ordering = ['-created_at']
         constraints = [
-            models.UniqueConstraint(fields=['user', 'product'], name='shop_wishlist_user_product_uniq'),
+            models.UniqueConstraint(
+                fields=['user', 'store', 'product'],
+                name='shop_wishlist_user_store_product_uniq',
+            ),
         ]
 
     def __str__(self):
@@ -144,6 +148,17 @@ class Order(models.Model):
     zoho_sync_error = models.TextField(blank=True)
     zoho_synced_at = models.DateTimeField(null=True, blank=True)
 
+    loyalty_points_redeemed = models.PositiveIntegerField(
+        default=0,
+        help_text='Points spent at checkout or via issued coupon for this order.',
+    )
+    loyalty_discount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0'),
+        help_text='Amount subtracted from total using loyalty (1 point = 1 AED by default).',
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -152,6 +167,35 @@ class Order(models.Model):
 
     def __str__(self):
         return f'Order {self.pk} ({self.status})'
+
+
+class LoyaltyIssuedCoupon(models.Model):
+    """Store-credit style coupon: user exchanges wallet points for a one-time code."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='loyalty_issued_coupons',
+    )
+    code = models.CharField(max_length=32, unique=True, db_index=True)
+    points_spent = models.PositiveIntegerField()
+    amount_aed = models.DecimalField(max_digits=12, decimal_places=2)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+    order = models.OneToOneField(
+        Order,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='loyalty_coupon_use',
+    )
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.code} ({self.amount_aed} AED)'
 
 
 class OrderItem(models.Model):
@@ -226,3 +270,25 @@ class OrderReturnLine(models.Model):
 
     def __str__(self):
         return f'{self.quantity}× item {self.order_item_id}'
+
+
+class PurchasePointsLedger(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='purchase_points_ledger',
+    )
+    order = models.OneToOneField(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='points_ledger_entry',
+    )
+    points_awarded = models.PositiveIntegerField(default=0)
+    note = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'Points {self.points_awarded} for order {self.order_id}'

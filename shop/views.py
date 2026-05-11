@@ -1,19 +1,43 @@
+import secrets
+import string
 from decimal import Decimal
 from typing import Optional, Tuple
 from urllib.parse import quote, urlparse
 
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.db import transaction
+from django.db.models import Sum
+from django.utils import timezone
 from django.shortcuts import get_object_or_404, redirect
 from django.utils.text import slugify
 from catalog.models import Store, Product
 from zoho_integration.models import ZohoCommerceAccount
 from zoho_integration.services import ZohoCommerceService as ZohoAccountService
 from rest_framework import generics, status
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import Cart, CartItem, Order, OrderItem, OrderReturn, UserAddress, WishlistItem
+from .loyalty import (
+    aed_per_point_earned,
+    default_coupon_expires_at,
+    max_points_redeemable_for_total,
+    min_points_to_redeem,
+    point_value_aed,
+    points_earned_for_purchase,
+)
+from .models import (
+    Cart,
+    CartItem,
+    LoyaltyIssuedCoupon,
+    Order,
+    OrderItem,
+    OrderReturn,
+    PurchasePointsLedger,
+    UserAddress,
+    WishlistItem,
+)
 from .services.zoho_commerce import ZohoCommerceError, ZohoCommerceService
 from .serializers import (
     CartSerializer,
@@ -22,16 +46,29 @@ from .serializers import (
     CartItemUpdateSerializer,
     CartItemDeltaSerializer,
     CheckoutSerializer,
+    LoyaltyIssueCouponSerializer,
     OrderSerializer,
     OrderReturnCreateSerializer,
     OrderReturnReadSerializer,
+    PurchasePointsLedgerSerializer,
     UserAddressSerializer,
     WishlistItemSerializer,
     WishlistMoveToCartSerializer,
 )
 from .services.zoho_returns import enqueue_push_return_to_zoho
 
-WISHLIST_MAX_ITEMS_PER_USER = 100
+User = get_user_model()
+
+WISHLIST_MAX_ITEMS_PER_STORE = 100
+
+
+def _generate_loyalty_coupon_code() -> str:
+    alphabet = string.ascii_uppercase + string.digits
+
+    def chunk(n: int) -> str:
+        return ''.join(secrets.choice(alphabet) for _ in range(n))
+
+    return f'{chunk(4)}-{chunk(4)}'
 
 
 def _optional_store_for_zoho(request):
@@ -50,6 +87,29 @@ def _optional_store_for_zoho(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
     store = Store.objects.filter(pk=pk).first()
+    if not store:
+        return None, Response(
+            {'detail': 'Store not found.'},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    return store, None
+
+
+def _required_store_for_user_scope(request):
+    raw = (request.query_params.get('store_id') or '').strip()
+    if not raw:
+        return None, Response(
+            {'detail': 'store_id query parameter is required.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    try:
+        pk = int(raw)
+    except (TypeError, ValueError):
+        return None, Response(
+            {'detail': 'store_id must be an integer.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    store = Store.objects.filter(pk=pk, is_active=True).first()
     if not store:
         return None, Response(
             {'detail': 'Store not found.'},
@@ -519,13 +579,34 @@ class CartDetailAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        store, err = _required_store_for_user_scope(request)
+        if err:
+            return err
         cart, _ = Cart.objects.get_or_create(user=request.user)
         cart = (
             Cart.objects.filter(pk=cart.pk)
             .prefetch_related('items__product', 'items__store')
             .first()
         )
-        payload = CartSerializer(cart).data
+        payload = CartSerializer(cart).data if cart else {
+            'cart_id': None, 'items': [], 'subtotal': '0.00', 'updated_at': None,
+        }
+        if isinstance(payload, dict):
+            items = payload.get('items') or []
+            if isinstance(items, list):
+                payload['items'] = [
+                    row for row in items
+                    if isinstance(row, dict)
+                    and isinstance(row.get('store'), dict)
+                    and row['store'].get('id') == store.pk
+                ]
+            subtotal = Decimal('0')
+            for row in payload.get('items') or []:
+                try:
+                    subtotal += Decimal(str(row.get('line_subtotal') or '0'))
+                except Exception:
+                    pass
+            payload['subtotal'] = str(subtotal.quantize(Decimal('0.01')))
         store_cache = {}
         product_cache = {}
         cdn_cache = {}
@@ -625,13 +706,16 @@ class CartSummaryAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        store, err = _required_store_for_user_scope(request)
+        if err:
+            return err
         cart, _ = Cart.objects.get_or_create(user=request.user)
         cart = (
             Cart.objects.filter(pk=cart.pk)
             .prefetch_related('items__product')
             .first()
         )
-        items = list(cart.items.all()) if cart else []
+        items = list(cart.items.filter(store_id=store.pk)) if cart else []
         items_count = int(sum((int(i.quantity or 0) for i in items), 0))
         products_count = int(len(items))
         subtotal = sum((i.line_subtotal for i in items), Decimal('0')).quantize(Decimal('0.01'))
@@ -650,8 +734,11 @@ class CartClearAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def delete(self, request):
+        store, err = _required_store_for_user_scope(request)
+        if err:
+            return err
         cart, _ = Cart.objects.get_or_create(user=request.user)
-        deleted_count, _details = cart.items.all().delete()
+        deleted_count, _details = cart.items.filter(store_id=store.pk).delete()
         return Response(
             {
                 'status': 'success',
@@ -695,6 +782,9 @@ class CartAddItemAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def _get_item_from_query(self, request):
+        store, err = _required_store_for_user_scope(request)
+        if err:
+            return None, err
         item_id_raw = (request.query_params.get('item_id') or '').strip()
         if not item_id_raw:
             return None, Response(
@@ -711,6 +801,7 @@ class CartAddItemAPIView(APIView):
         item = CartItem.objects.filter(
             pk=item_id,
             cart__user=request.user,
+            store=store,
         ).select_related('product', 'store').first()
         if item is None:
             return None, Response(
@@ -778,14 +869,17 @@ class CartAddItemAPIView(APIView):
         if resolve_err:
             return Response({'detail': resolve_err}, status=status.HTTP_400_BAD_REQUEST)
 
-        existing_qs = WishlistItem.objects.filter(user=request.user)
+        existing_qs = WishlistItem.objects.filter(user=request.user, store=store)
         existing_count = existing_qs.count()
         existing_item = existing_qs.filter(product__zoho_product_id=zoho_product_id).first()
-        if existing_count >= WISHLIST_MAX_ITEMS_PER_USER and not existing_item:
+        if existing_count >= WISHLIST_MAX_ITEMS_PER_STORE and not existing_item:
             return Response(
                 {
-                    'detail': f'Wishlist limit reached. Maximum {WISHLIST_MAX_ITEMS_PER_USER} items allowed.',
-                    'max_items': WISHLIST_MAX_ITEMS_PER_USER,
+                    'detail': (
+                        f'Wishlist limit reached for this store. '
+                        f'Maximum {WISHLIST_MAX_ITEMS_PER_STORE} items allowed.'
+                    ),
+                    'max_items': WISHLIST_MAX_ITEMS_PER_STORE,
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -843,7 +937,10 @@ class WishlistListCreateAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        qs = WishlistItem.objects.filter(user=request.user).select_related('product', 'store')
+        store, err = _required_store_for_user_scope(request)
+        if err:
+            return err
+        qs = WishlistItem.objects.filter(user=request.user, store=store).select_related('product', 'store')
         return Response(WishlistItemSerializer(qs, many=True, context={'request': request}).data)
 
     def post(self, request):
@@ -891,12 +988,9 @@ class WishlistListCreateAPIView(APIView):
 
         item, created = WishlistItem.objects.get_or_create(
             user=request.user,
+            store=store,
             product=product,
-            defaults={'store': store},
         )
-        if item.store_id != store.pk:
-            item.store = store
-            item.save(update_fields=['store'])
 
         payload = WishlistItemSerializer(item, context={'request': request}).data
         payload['already_exists'] = not created
@@ -920,9 +1014,13 @@ class WishlistItemDetailAPIView(APIView):
                 {'detail': 'wishlist_item_id must be an integer.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        store, err = _required_store_for_user_scope(request)
+        if err:
+            return None, err
         item = WishlistItem.objects.filter(
             pk=wid,
             user=request.user,
+            store=store,
         ).select_related('product', 'store').first()
         if item is None:
             return None, Response(
@@ -960,6 +1058,9 @@ class WishlistMoveToCartAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        store, err = _required_store_for_user_scope(request)
+        if err:
+            return err
         raw = (request.query_params.get('wishlist_item_id') or '').strip()
         if not raw:
             return Response(
@@ -977,6 +1078,7 @@ class WishlistMoveToCartAPIView(APIView):
             WishlistItem.objects.select_related('product', 'store'),
             pk=wid,
             user=request.user,
+            store=store,
         )
         ser = WishlistMoveToCartSerializer(data=request.data or {})
         ser.is_valid(raise_exception=True)
@@ -1018,6 +1120,9 @@ class CheckoutAPIView(APIView):
         cart = ser.validated_data['cart']
         store = ser.validated_data['store']
         items = list(ser.validated_data['checkout_items'])
+        points_to_redeem_req = int(ser.validated_data.get('points_to_redeem') or 0)
+        coupon_code_in = (ser.validated_data.get('loyalty_coupon_code') or '').strip()
+
         if getattr(settings, 'CHECKOUT_TRUST_CLIENT_SHIPPING', False):
             shipping_amount = ser.validated_data.get('shipping_amount') or Decimal('0')
             shipping_amount = Decimal(shipping_amount).quantize(Decimal('0.01'))
@@ -1027,7 +1132,7 @@ class CheckoutAPIView(APIView):
         subtotal = subtotal.quantize(Decimal('0.01'))
         vat_percent = Decimal(ser.validated_data.get('vat_percent') or '0').quantize(Decimal('0.01'))
         vat_amount = ((subtotal * vat_percent) / Decimal('100')).quantize(Decimal('0.01'))
-        total = (subtotal + vat_amount + shipping_amount).quantize(Decimal('0.01'))
+        gross_total = (subtotal + vat_amount + shipping_amount).quantize(Decimal('0.01'))
 
         billing_same = ser.validated_data['billing_same_as_shipping']
         ship = {k: ser.validated_data[k] for k in (
@@ -1051,8 +1156,66 @@ class CheckoutAPIView(APIView):
             )}
 
         currency = items[0].product.currency if items else 'AED'
+        pv = point_value_aed()
+        loyalty_discount = Decimal('0')
+        loyalty_points_redeemed = 0
+        coupon_row = None
+        points_awarded = 0
 
         with transaction.atomic():
+            locked_user = User.objects.select_for_update().get(pk=request.user.pk)
+
+            if coupon_code_in:
+                coupon_row = (
+                    LoyaltyIssuedCoupon.objects.select_for_update()
+                    .filter(
+                        user_id=locked_user.pk,
+                        code__iexact=coupon_code_in,
+                        used_at__isnull=True,
+                    )
+                    .first()
+                )
+                if not coupon_row:
+                    return Response(
+                        {'detail': 'Invalid or already used loyalty coupon code.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if coupon_row.expires_at < timezone.now():
+                    return Response(
+                        {'detail': 'This loyalty coupon has expired.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                loyalty_discount = min(Decimal(coupon_row.amount_aed), gross_total).quantize(Decimal('0.01'))
+
+            elif points_to_redeem_req > 0:
+                bal = int(locked_user.points_balance or 0)
+                min_w = min_points_to_redeem()
+                if bal < min_w:
+                    return Response(
+                        {
+                            'detail': (
+                                f'You need at least {min_w} points in your wallet before redeeming.'
+                            ),
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                max_pts = max_points_redeemable_for_total(gross_total, pv)
+                actual_pts = min(points_to_redeem_req, bal, max_pts)
+                if actual_pts <= 0:
+                    return Response(
+                        {'detail': 'No loyalty points can be applied to this order total.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                discount_calc = (Decimal(actual_pts) * pv).quantize(Decimal('0.01'))
+                loyalty_discount = min(discount_calc, gross_total).quantize(Decimal('0.01'))
+                loyalty_points_redeemed = actual_pts
+                locked_user.points_balance = bal - actual_pts
+                locked_user.save(update_fields=['points_balance'])
+
+            final_total = (gross_total - loyalty_discount).quantize(Decimal('0.01'))
+            if final_total < 0:
+                final_total = Decimal('0')
+
             order = Order.objects.create(
                 user=request.user,
                 store=store,
@@ -1063,7 +1226,9 @@ class CheckoutAPIView(APIView):
                 vat_percent=vat_percent,
                 vat_amount=vat_amount,
                 shipping_amount=shipping_amount,
-                total=total,
+                total=final_total,
+                loyalty_points_redeemed=loyalty_points_redeemed,
+                loyalty_discount=loyalty_discount,
                 billing_same_as_shipping=billing_same,
                 **ship,
                 **bill,
@@ -1081,6 +1246,27 @@ class CheckoutAPIView(APIView):
                     line_total=line,
                 )
             CartItem.objects.filter(pk__in=[i.pk for i in items]).delete()
+
+            if coupon_row:
+                coupon_row.used_at = timezone.now()
+                coupon_row.order = order
+                coupon_row.save(update_fields=['used_at', 'order'])
+
+            points_awarded = points_earned_for_purchase(final_total, currency)
+            if points_awarded > 0:
+                step = aed_per_point_earned()
+                PurchasePointsLedger.objects.create(
+                    user=request.user,
+                    order=order,
+                    points_awarded=points_awarded,
+                    note=(
+                        f'Earned {points_awarded} pt(s): 1 pt per {step} AED of paid total '
+                        f'(after loyalty discount).'
+                    ),
+                )
+                uearn = User.objects.select_for_update().get(pk=request.user.pk)
+                uearn.points_balance = int(uearn.points_balance or 0) + points_awarded
+                uearn.save(update_fields=['points_balance'])
 
         order = Order.objects.prefetch_related(
             'items', 'returns__lines__order_item',
@@ -1116,6 +1302,10 @@ class CheckoutAPIView(APIView):
                     'vat_percent': str(order.vat_percent.quantize(Decimal('0.01'))),
                     'vat_amount': str(order.vat_amount.quantize(Decimal('0.01'))),
                     'shipping_amount': str(order.shipping_amount.quantize(Decimal('0.01'))),
+                    'gross_total': str(gross_total.quantize(Decimal('0.01'))),
+                    'loyalty_discount': str(order.loyalty_discount.quantize(Decimal('0.01'))),
+                    'points_redeemed': order.loyalty_points_redeemed,
+                    'points_earned': points_awarded,
                     'total': str(order.total.quantize(Decimal('0.01'))),
                     'currency': order.currency,
                 },
@@ -1124,13 +1314,113 @@ class CheckoutAPIView(APIView):
         return Response(response_payload, status=status.HTTP_201_CREATED)
 
 
+class RewardPointsAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        store, err = _required_store_for_user_scope(request)
+        if err:
+            return err
+        qs = PurchasePointsLedger.objects.filter(
+            user=request.user,
+            order__store=store,
+        ).select_related('order')
+        ledger_sum = int(sum((int(e.points_awarded or 0) for e in qs), 0))
+        entries = qs[:20]
+        ledger_awarded_all_stores = (
+            PurchasePointsLedger.objects.filter(user=request.user).aggregate(s=Sum('points_awarded'))[
+                's'
+            ]
+            or 0
+        )
+        ledger_awarded_all_stores = int(ledger_awarded_all_stores)
+        request.user.refresh_from_db(fields=['points_balance'])
+        wallet = int(request.user.points_balance or 0)
+        return Response(
+            {
+                # Redeemable balance for checkout / issue-coupon — one wallet for the whole account.
+                'wallet_balance': wallet,
+                # Backwards compatibility (same value as wallet_balance).
+                'points_balance': wallet,
+                'wallet_scope': 'account_wide',
+                'store_id': store.pk,
+                # Sum of ledger rows for orders placed at this store only (subset of lifetime earn).
+                'store_points_earned_from_orders': ledger_sum,
+                # Sum of all earn entries in PurchasePointsLedger (all stores); wallet is lower if points were redeemed.
+                'ledger_points_awarded_total_all_stores': ledger_awarded_all_stores,
+                'history': PurchasePointsLedgerSerializer(entries, many=True).data,
+                'loyalty': {
+                    'aed_spend_per_point_earned': aed_per_point_earned(),
+                    'point_value_aed': str(point_value_aed()),
+                    'min_points_to_redeem': min_points_to_redeem(),
+                    'earn_currency': 'AED',
+                    'points_balance_is_account_wide': True,
+                    'store_fields_are_for_requested_store_only': True,
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class LoyaltyIssueCouponAPIView(APIView):
+    """Exchange wallet points for a one-time code usable at checkout (same discount rules)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        ser = LoyaltyIssueCouponSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        points = ser.validated_data['points']
+        with transaction.atomic():
+            user = User.objects.select_for_update().get(pk=request.user.pk)
+            bal = int(user.points_balance or 0)
+            if points > bal:
+                return Response({'detail': 'Insufficient points in wallet.'}, status=status.HTTP_400_BAD_REQUEST)
+            amount_aed = (Decimal(points) * point_value_aed()).quantize(Decimal('0.01'))
+            user.points_balance = bal - points
+            user.save(update_fields=['points_balance'])
+            code = _generate_loyalty_coupon_code()
+            tries = 0
+            while LoyaltyIssuedCoupon.objects.filter(code__iexact=code).exists():
+                code = _generate_loyalty_coupon_code()
+                tries += 1
+                if tries > 12:
+                    raise RuntimeError('Could not allocate unique loyalty coupon code.')
+            coupon = LoyaltyIssuedCoupon.objects.create(
+                user=user,
+                code=code,
+                points_spent=points,
+                amount_aed=amount_aed,
+                expires_at=default_coupon_expires_at(),
+            )
+        return Response(
+            {
+                'code': coupon.code,
+                'amount_aed': str(coupon.amount_aed),
+                'points_spent': coupon.points_spent,
+                'expires_at': coupon.expires_at.isoformat(),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
 class OrderListAPIView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = OrderSerializer
 
     def get_queryset(self):
+        raw = (self.request.query_params.get('store_id') or '').strip()
+        if not raw:
+            raise ValidationError({'detail': 'store_id query parameter is required.'})
+        try:
+            store_id = int(raw)
+        except (TypeError, ValueError):
+            raise ValidationError({'detail': 'store_id must be an integer.'})
+        store = Store.objects.filter(pk=store_id, is_active=True).first()
+        if not store:
+            raise ValidationError({'detail': 'Store not found.'})
         return (
-            Order.objects.filter(user=self.request.user)
+            Order.objects.filter(user=self.request.user, store=store)
             .select_related('store')
             .prefetch_related('items', 'returns__lines__order_item')
         )
@@ -1141,8 +1431,18 @@ class OrderDetailAPIView(generics.RetrieveAPIView):
     serializer_class = OrderSerializer
 
     def get_queryset(self):
+        raw = (self.request.query_params.get('store_id') or '').strip()
+        if not raw:
+            raise ValidationError({'detail': 'store_id query parameter is required.'})
+        try:
+            store_id = int(raw)
+        except (TypeError, ValueError):
+            raise ValidationError({'detail': 'store_id must be an integer.'})
+        store = Store.objects.filter(pk=store_id, is_active=True).first()
+        if not store:
+            raise ValidationError({'detail': 'Store not found.'})
         return (
-            Order.objects.filter(user=self.request.user)
+            Order.objects.filter(user=self.request.user, store=store)
             .select_related('store')
             .prefetch_related('items', 'returns__lines__order_item')
         )

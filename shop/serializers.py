@@ -11,6 +11,7 @@ from shop.services.zoho_commerce import ZohoCommerceError, ZohoCommerceService
 from zoho_integration.models import ZohoCommerceAccount
 from zoho_integration.services import ZohoCommerceService as ZohoAccountService
 
+from .loyalty import min_points_to_redeem
 from .models import (
     Cart,
     CartItem,
@@ -18,6 +19,7 @@ from .models import (
     OrderItem,
     OrderReturn,
     OrderReturnLine,
+    PurchasePointsLedger,
     UserAddress,
     WishlistItem,
 )
@@ -215,42 +217,15 @@ class CartItemInGroupSerializer(serializers.ModelSerializer):
 class CartSerializer(serializers.ModelSerializer):
     cart_id = serializers.IntegerField(source='id', read_only=True)
     items = CartItemSerializer(many=True, read_only=True)
-    store_groups = serializers.SerializerMethodField()
     subtotal = serializers.SerializerMethodField()
 
     class Meta:
         model = Cart
-        fields = ('cart_id', 'items', 'store_groups', 'subtotal', 'updated_at')
+        fields = ('cart_id', 'items', 'subtotal', 'updated_at')
 
     def get_subtotal(self, obj):
         total = sum((item.line_subtotal for item in obj.items.all()), Decimal('0'))
         return str(total.quantize(Decimal('0.01')))
-
-    def get_store_groups(self, obj):
-        items = list(obj.items.all())
-        if not items:
-            return []
-        by_store = {}
-        for it in items:
-            by_store.setdefault(it.store_id, []).append(it)
-        for lines in by_store.values():
-            lines.sort(key=lambda x: x.pk)
-        def sort_key(sid):
-            st = by_store[sid][0].store
-            return (st.name.lower(), st.pk)
-
-        groups = []
-        for sid in sorted(by_store.keys(), key=sort_key):
-            lines = by_store[sid]
-            store = lines[0].store
-            sub = sum((i.line_subtotal for i in lines), Decimal('0'))
-            groups.append({
-                'store': StoreTinySerializer(store).data,
-                'items': CartItemInGroupSerializer(lines, many=True).data,
-                'subtotal': str(sub.quantize(Decimal('0.01'))),
-            })
-        return groups
-
 
 class CartAddFromZohoAccountSerializer(serializers.Serializer):
     """
@@ -431,7 +406,21 @@ class WishlistMoveToCartSerializer(serializers.Serializer):
     remove_from_wishlist = serializers.BooleanField(required=False, default=True)
 
 
+class PurchasePointsLedgerSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PurchasePointsLedger
+        fields = ('order_id', 'points_awarded', 'note', 'created_at')
+        read_only_fields = fields
+
+
 class UserAddressSerializer(serializers.ModelSerializer):
+    _address_type_aliases = {
+        'home': 'home',
+        'flat': 'flat',
+        'office': 'office',
+        'apartments': 'apartments',
+    }
+
     class Meta:
         model = UserAddress
         fields = (
@@ -474,6 +463,10 @@ class UserAddressSerializer(serializers.ModelSerializer):
 
     def validate_state(self, value):
         return (value or '').strip()
+
+    def validate_address_type(self, value):
+        normalized = (value or '').strip().lower()
+        return self._address_type_aliases.get(normalized, normalized)
 
     def create(self, validated_data):
         user = self.context['request'].user
@@ -542,6 +535,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'zoho_checkout_id', 'zoho_salesorder_id',
             'zoho_sync_error', 'zoho_synced_at',
             'returned_total', 'balance_remaining', 'refunded_amount', 'net_paid',
+            'loyalty_points_redeemed', 'loyalty_discount',
             'items', 'created_at', 'updated_at',
         )
         read_only_fields = (
@@ -551,6 +545,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'order_code', 'display_status', 'items_count',
             'can_reorder', 'can_return', 'return_status', 'order_date',
             'returned_total', 'balance_remaining', 'refunded_amount', 'net_paid',
+            'loyalty_points_redeemed', 'loyalty_discount',
             'created_at', 'updated_at',
         )
 
@@ -625,6 +620,16 @@ class OrderSerializer(serializers.ModelSerializer):
         return self.get_balance_remaining(obj)
 
 
+class LoyaltyIssueCouponSerializer(serializers.Serializer):
+    points = serializers.IntegerField(min_value=1)
+
+    def validate_points(self, value):
+        m = min_points_to_redeem()
+        if value < m:
+            raise serializers.ValidationError(f'At least {m} points are required to issue a coupon.')
+        return value
+
+
 class CheckoutSerializer(serializers.Serializer):
     store_id = serializers.IntegerField()
     address_id = serializers.IntegerField(required=False, min_value=1)
@@ -664,6 +669,14 @@ class CheckoutSerializer(serializers.Serializer):
     billing_state = serializers.CharField(max_length=120, required=False, allow_blank=True)
     billing_postal_code = serializers.CharField(max_length=32, required=False, allow_blank=True)
     billing_country = serializers.CharField(max_length=120, required=False, allow_blank=True)
+
+    points_to_redeem = serializers.IntegerField(required=False, default=0, min_value=0)
+    loyalty_coupon_code = serializers.CharField(
+        max_length=32,
+        required=False,
+        allow_blank=True,
+        trim_whitespace=True,
+    )
 
     def validate(self, attrs):
         store = get_object_or_404(Store, pk=attrs['store_id'], is_active=True)
@@ -733,6 +746,14 @@ class CheckoutSerializer(serializers.Serializer):
                 raise serializers.ValidationError(
                     {f: 'Required when billing is not same as shipping.' for f in missing},
                 )
+
+        code = (attrs.get('loyalty_coupon_code') or '').strip()
+        pts = int(attrs.get('points_to_redeem') or 0)
+        attrs['loyalty_coupon_code'] = code
+        if code and pts > 0:
+            raise serializers.ValidationError(
+                {'loyalty_coupon_code': 'Use either loyalty coupon code or points_to_redeem, not both.'},
+            )
         return attrs
 
 

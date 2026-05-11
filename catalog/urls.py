@@ -65,9 +65,9 @@ urlpatterns = [
         name='catalog-store-product-detail',
     ),
     path(
-        'stores/<int:store_id>/products/<int:pk>/related/',
+        'products/related/',
         RelatedProductSuggestionListAPIView.as_view(),
-        name='catalog-related-product-suggestions',
+        name='catalog-related-product-suggestions-query',
     ),
     
 ]

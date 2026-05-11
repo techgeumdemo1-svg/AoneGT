@@ -1,6 +1,7 @@
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
+from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny, IsAdminUser
 from rest_framework.response import Response
@@ -265,11 +266,35 @@ class RelatedProductSuggestionListAPIView(generics.ListAPIView):
 
     serializer_class = ProductListSerializer
 
+    def _resolve_ids(self):
+        store_id = self.kwargs.get('store_id')
+        product_id = self.kwargs.get('pk')
+        if store_id is None:
+            store_id = self.request.query_params.get('store_id')
+        if product_id is None:
+            product_id = self.request.query_params.get('product_id')
+
+        if store_id in (None, ''):
+            raise ValidationError({'store_id': 'This query parameter is required.'})
+        if product_id in (None, ''):
+            raise ValidationError({'product_id': 'This query parameter is required.'})
+
+        try:
+            store_id = int(store_id)
+        except (TypeError, ValueError):
+            raise ValidationError({'store_id': 'Must be an integer.'})
+        try:
+            product_id = int(product_id)
+        except (TypeError, ValueError):
+            raise ValidationError({'product_id': 'Must be an integer.'})
+        return store_id, product_id
+
     def get_queryset(self):
-        store = get_object_or_404(Store, pk=self.kwargs['store_id'], is_active=True)
+        store_id, product_id = self._resolve_ids()
+        store = get_object_or_404(Store, pk=store_id, is_active=True)
         product = get_object_or_404(
             Product,
-            pk=self.kwargs['pk'],
+            pk=product_id,
             store=store,
             is_active=True,
         )
@@ -281,7 +306,10 @@ class RelatedProductSuggestionListAPIView(generics.ListAPIView):
             limit = 10
         limit = max(1, min(limit, 20))
 
-        base_qs = Product.objects.filter(store=store, is_active=True).exclude(pk=product.pk)
+        base_qs = Product.objects.filter(
+            store=store,
+            is_active=True,
+        ).select_related('store').exclude(pk=product.pk)
 
         if product.category:
             related_qs = list(base_qs.filter(category__iexact=product.category).order_by('name')[:limit])
