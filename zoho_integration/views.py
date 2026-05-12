@@ -11,6 +11,7 @@ from rest_framework import status
 from .models import ZohoCommerceAccount
 from .services import ZohoCommerceService
 from catalog.models import Store
+from catalog.text_utils import html_to_plain_text
 
 
 def _category_image_proxy_relative_path(account_id: int, organization_id: str, category_id: str) -> str:
@@ -326,14 +327,28 @@ def _product_summary(product: dict, store_domain: str = "") -> dict:
 
 
 def _extract_description(payload: dict) -> str:
-    return str(
-        payload.get("description")
-        or payload.get("product_description")
-        or payload.get("short_description")
-        or payload.get("long_description")
-        or payload.get("description_html")
-        or ""
-    ).strip()
+    for key in (
+        "description",
+        "product_description",
+        "product_short_description",
+        "short_description",
+        "long_description",
+        "description_html",
+        "purchase_description",
+        "seo_description",
+    ):
+        clean = html_to_plain_text(payload.get(key))
+        if clean:
+            return clean
+
+    variants = payload.get("variants") or payload.get("variant_list") or []
+    if isinstance(variants, list):
+        for variant in variants:
+            if isinstance(variant, dict):
+                clean = _extract_description(variant)
+                if clean:
+                    return clean
+    return ""
 
 
 def _as_bool(value: Optional[str], default: bool = False) -> bool:
@@ -1401,6 +1416,120 @@ class MultiAccountZohoCategoryListQueryAPIView(APIView):
                 "status": "error",
                 "message": str(e),
             }, status=400)
+
+
+class MultiAccountZohoSubCategoryListQueryAPIView(APIView):
+    """
+    Query params:
+      - account_id (required)
+      - organization_id (required)
+      - category_id (required): parent category id
+    """
+
+    def get(self, request):
+        account_id_raw = (request.GET.get("account_id") or "").strip()
+        organization_id = (request.GET.get("organization_id") or "").strip()
+        parent_category_id = (request.GET.get("category_id") or "").strip()
+
+        if not account_id_raw:
+            return Response(
+                {"status": "error", "message": "account_id query parameter is required"},
+                status=400,
+            )
+        if not organization_id:
+            return Response(
+                {"status": "error", "message": "organization_id query parameter is required"},
+                status=400,
+            )
+        if not parent_category_id:
+            return Response(
+                {"status": "error", "message": "category_id query parameter is required"},
+                status=400,
+            )
+
+        try:
+            account_id = int(account_id_raw)
+        except ValueError:
+            return Response(
+                {"status": "error", "message": "account_id must be an integer"},
+                status=400,
+            )
+
+        try:
+            account = ZohoCommerceAccount.objects.get(id=account_id, is_active=True)
+        except ZohoCommerceAccount.DoesNotExist:
+            return Response(
+                {"status": "error", "message": "Zoho account not found"},
+                status=404,
+            )
+
+        try:
+            service = ZohoCommerceService(account)
+            data = service.list_categories(organization_id=organization_id)
+            categories = data.get("categories", []) or data.get("category", [])
+            categories = [c for c in categories if isinstance(c, dict)]
+
+            parent_category = None
+            children = []
+            for category in categories:
+                category_id = str(category.get("category_id") or category.get("id") or "").strip()
+                if category_id == parent_category_id:
+                    parent_category = category
+                parent_id = str(
+                    category.get("parent_category_id")
+                    or category.get("parent_id")
+                    or ""
+                ).strip()
+                if parent_id == parent_category_id and category.get("visibility") is not False:
+                    children.append(category)
+
+            store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
+            store_domain = (getattr(store, "zoho_store_domain", "") or "").strip() if store else ""
+            subcategories = []
+            for child in sorted(
+                children,
+                key=lambda x: (x.get("sibling_order", 0), _category_name(x).lower()),
+            ):
+                child_id = str(child.get("category_id") or child.get("id") or "").strip()
+                fallback_image_url = (
+                    request.build_absolute_uri(
+                        _category_image_proxy_relative_path(
+                            account.id, str(organization_id), child_id,
+                        ),
+                    ) if child_id else ""
+                )
+                summary = _category_summary(
+                    child,
+                    fallback_image_url=fallback_image_url,
+                    store_domain=store_domain,
+                )
+                if not (summary.get("image_url") or "").strip() and fallback_image_url:
+                    summary["image_url"] = fallback_image_url
+                subcategories.append(summary)
+
+            return Response(
+                {
+                    "status": "success",
+                    "account_id": account.id,
+                    "account_name": account.name,
+                    "account_email": account.email,
+                    "organization_id": organization_id,
+                    "parent_category": (
+                        _category_summary(parent_category, store_domain=store_domain)
+                        if isinstance(parent_category, dict)
+                        else None
+                    ),
+                    "category_id": parent_category_id,
+                    "count": len(subcategories),
+                    "subcategories": subcategories,
+                },
+                status=200,
+            )
+        except Exception as e:
+            return Response(
+                {"status": "error", "message": str(e)},
+                status=400,
+            )
 
 
 class MultiAccountZohoCategorySearchAPIView(APIView):

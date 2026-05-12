@@ -5,6 +5,7 @@ from rest_framework import serializers
 from zoho_integration.models import ZohoCommerceAccount
 from zoho_integration.services import ZohoCommerceService as ZohoAccountService
 from .models import Store, Product, Banner
+from .text_utils import html_to_plain_text
 
 
 class StoreListSerializer(serializers.ModelSerializer):
@@ -88,6 +89,7 @@ class ProductListSerializer(serializers.ModelSerializer):
 
 class ProductDetailSerializer(serializers.ModelSerializer):
     store = StoreListSerializer(read_only=True)
+    description = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
@@ -96,6 +98,9 @@ class ProductDetailSerializer(serializers.ModelSerializer):
             'price', 'compare_at_price', 'currency', 'image_url',
             'created_at', 'updated_at',
         )
+
+    def get_description(self, obj):
+        return html_to_plain_text(obj.description)
 
 
 class StoreAdminSerializer(serializers.ModelSerializer):

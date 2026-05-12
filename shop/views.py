@@ -12,6 +12,7 @@ from django.utils import timezone
 from django.shortcuts import get_object_or_404, redirect
 from django.utils.text import slugify
 from catalog.models import Store, Product
+from catalog.text_utils import html_to_plain_text
 from zoho_integration.models import ZohoCommerceAccount
 from zoho_integration.services import ZohoCommerceService as ZohoAccountService
 from rest_framework import generics, status
@@ -1586,6 +1587,22 @@ class ZohoProductDetailAPIView(APIView):
 
     permission_classes = [AllowAny]
 
+    @staticmethod
+    def _with_plain_description(data):
+        if not isinstance(data, dict):
+            return data
+        payload = data.copy()
+        source = payload.get('product') if isinstance(payload.get('product'), dict) else payload
+        clean = html_to_plain_text(source.get('description'))
+        if clean:
+            source = source.copy()
+            source['description'] = clean
+            if isinstance(payload.get('product'), dict):
+                payload['product'] = source
+            else:
+                payload['description'] = clean
+        return payload
+
     def get(self, request, product_id):
         store, err = _optional_store_for_zoho(request)
         if err:
@@ -1594,7 +1611,7 @@ class ZohoProductDetailAPIView(APIView):
             data = ZohoCommerceService.get_product_detail_storefront(
                 product_id, store=store,
             )
-            return Response(data, status=status.HTTP_200_OK)
+            return Response(self._with_plain_description(data), status=status.HTTP_200_OK)
         except ZohoCommerceError as e:
             msg = str(e)
             if 'required' in msg.lower():
