@@ -677,6 +677,18 @@ class CheckoutSerializer(serializers.Serializer):
         allow_blank=True,
         trim_whitespace=True,
     )
+    coupon_code = serializers.CharField(
+        max_length=120,
+        required=False,
+        allow_blank=True,
+        trim_whitespace=True,
+    )
+    coupon_discount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        required=False,
+        min_value=Decimal('0'),
+    )
 
     def validate(self, attrs):
         store = get_object_or_404(Store, pk=attrs['store_id'], is_active=True)
@@ -750,6 +762,10 @@ class CheckoutSerializer(serializers.Serializer):
         code = (attrs.get('loyalty_coupon_code') or '').strip()
         pts = int(attrs.get('points_to_redeem') or 0)
         attrs['loyalty_coupon_code'] = code
+        attrs['coupon_code'] = (attrs.get('coupon_code') or '').strip()
+        coupon_discount = attrs.get('coupon_discount')
+        if coupon_discount is not None:
+            attrs['coupon_discount'] = Decimal(coupon_discount).quantize(Decimal('0.01'))
         if code and pts > 0:
             raise serializers.ValidationError(
                 {'loyalty_coupon_code': 'Use either loyalty coupon code or points_to_redeem, not both.'},

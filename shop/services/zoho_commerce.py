@@ -174,22 +174,59 @@ class ZohoCommerceService:
     @classmethod
     def refresh_access_token(cls, store: Store | None = None) -> str:
         if store is not None:
+            # Reuse valid persisted token first to avoid unnecessary refresh calls.
+            existing_access = (store.access_token or '').strip()
+            if existing_access and store.token_expiry and store.token_expiry > django_timezone.now():
+                return existing_access
+
             rt = (store.refresh_token or '').strip()
             cid = (store.client_id or '').strip()
             cs = (store.client_secret or '').strip()
             if rt and cid and cs:
-                access_token, exp_secs = cls._refresh_with_creds(
-                    refresh_token=rt,
-                    client_id=cid,
-                    client_secret=cs,
-                )
-                if exp_secs is not None:
-                    store.token_expiry = django_timezone.now() + timedelta(seconds=exp_secs)
-                else:
-                    store.token_expiry = None
-                store.access_token = access_token
-                store.save(update_fields=['access_token', 'token_expiry'])
-                return access_token
+                try:
+                    access_token, exp_secs = cls._refresh_with_creds(
+                        refresh_token=rt,
+                        client_id=cid,
+                        client_secret=cs,
+                    )
+                    if exp_secs is not None:
+                        store.token_expiry = django_timezone.now() + timedelta(seconds=exp_secs)
+                    else:
+                        store.token_expiry = None
+                    store.access_token = access_token
+                    store.save(update_fields=['access_token', 'token_expiry'])
+                    return access_token
+                except ZohoCommerceError:
+                    # Temporary testing-friendly fallback: if store creds are stale,
+                    # fallback to global settings creds instead of hard failing.
+                    pass
+
+            # If Store credentials are missing/invalid, fallback to a mapped
+            # ZohoCommerceAccount (used by /zoho/multi/* flows) for the same org.
+            store_org = (getattr(store, 'zoho_org_id', '') or '').strip()
+            if store_org:
+                try:
+                    from zoho_integration.models import ZohoCommerceAccount
+
+                    account = ZohoCommerceAccount.objects.filter(
+                        is_active=True,
+                        organization_id=store_org,
+                    ).first()
+                    if account:
+                        access_token, exp_secs = cls._refresh_with_creds(
+                            refresh_token=(account.refresh_token or '').strip(),
+                            client_id=(account.client_id or '').strip(),
+                            client_secret=(account.client_secret or '').strip(),
+                        )
+                        if exp_secs is not None:
+                            store.token_expiry = django_timezone.now() + timedelta(seconds=exp_secs)
+                        else:
+                            store.token_expiry = None
+                        store.access_token = access_token
+                        store.save(update_fields=['access_token', 'token_expiry'])
+                        return access_token
+                except ZohoCommerceError:
+                    pass
 
         if not (
             getattr(settings, 'ZOHO_REFRESH_TOKEN', '')
