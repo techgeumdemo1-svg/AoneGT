@@ -14,6 +14,10 @@ from django.db import transaction
 from django.utils.text import slugify
 
 from catalog.models import Product, Store
+from catalog.services.zoho_product_ids import (
+    extract_zoho_category_id_from_detail,
+    extract_zoho_collection_id_from_detail,
+)
 from catalog.services.zoho_commerce_products import (
     ZohoCommerceProductError,
     build_products_list_url,
@@ -85,6 +89,8 @@ def expand_zoho_list_product(raw: dict[str, Any]) -> list[dict[str, Any]]:
     product_id = str(raw.get('product_id') or '').strip()
     url_hint = (raw.get('url') or '').strip()
     category = (raw.get('category_name') or raw.get('category') or '').strip()
+    zoho_category_id = (extract_zoho_category_id_from_detail(raw) or '')[:120]
+    zoho_collection_id = (extract_zoho_collection_id_from_detail(raw) or '')[:120]
     desc = _description_from_zoho_product(raw)
     variants = raw.get('variants')
 
@@ -106,6 +112,8 @@ def expand_zoho_list_product(raw: dict[str, Any]) -> list[dict[str, Any]]:
             'compare_at_price': compare,
             'description': desc,
             'category': category[:255] if category else '',
+            'zoho_category_id': zoho_category_id,
+            'zoho_collection_id': zoho_collection_id,
             'is_active': _row_active(raw, None),
         })
         return rows
@@ -129,6 +137,8 @@ def expand_zoho_list_product(raw: dict[str, Any]) -> list[dict[str, Any]]:
             'compare_at_price': compare,
             'description': desc,
             'category': category[:255] if category else '',
+            'zoho_category_id': zoho_category_id,
+            'zoho_collection_id': zoho_collection_id,
             'is_active': _row_active(raw, v),
         })
     if not rows and product_id:
@@ -148,6 +158,8 @@ def expand_zoho_list_product(raw: dict[str, Any]) -> list[dict[str, Any]]:
             'compare_at_price': compare,
             'description': desc,
             'category': category[:255] if category else '',
+            'zoho_category_id': zoho_category_id,
+            'zoho_collection_id': zoho_collection_id,
             'is_active': _row_active(raw, None),
         })
     return rows
@@ -178,6 +190,8 @@ def _upsert_product(store: Store, row: dict[str, Any]) -> tuple[str, Product]:
         'price': row['price'],
         'compare_at_price': row['compare_at_price'],
         'category': row['category'],
+        'zoho_category_id': (row.get('zoho_category_id') or '')[:120],
+        'zoho_collection_id': (row.get('zoho_collection_id') or '')[:120],
         'is_active': row['is_active'],
     }
     if product is None:
