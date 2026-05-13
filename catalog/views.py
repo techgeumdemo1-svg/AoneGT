@@ -1,12 +1,14 @@
+from typing import Optional
+
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
 from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
-from rest_framework.permissions import AllowAny, IsAdminUser
+from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import Banner, Store, Product
+from .models import Banner, Store, Product, ProductReview
 from .services.zoho_commerce_products import (
     ZohoCommerceProductError,
     build_product_editpage_url,
@@ -18,10 +20,20 @@ from .services.zoho_sites import (
     fetch_zoho_shops_from_accounts,
 )
 from shop.services.zoho_commerce import ZohoCommerceError
+from zoho_integration.models import ZohoCommerceAccount
+from zoho_integration.services import ZohoCommerceService
+from zoho_integration.views import (
+    _extract_image_url,
+    _extract_price,
+    _product_summary,
+    build_image_url,
+)
 from .serializers import (
     StoreListSerializer,
     ProductListSerializer,
     ProductDetailSerializer,
+    ProductReviewCreateSerializer,
+    ProductReviewReadSerializer,
     StoreAdminSerializer,
     ProductAdminSerializer,
     BannerSerializer,
@@ -256,48 +268,645 @@ class StoreProductDetailAPIView(APIView):
         return Response(ProductDetailSerializer(product).data, status=status.HTTP_200_OK)
 
 
+class StoreProductReviewListCreateAPIView(generics.ListCreateAPIView):
+    """
+    GET — list reviews for a product (public).
+    POST — add a review (authenticated). Allowed only if the user bought this product on a
+    delivered order (``Order.status == synced``). One review per user per product.
+    """
+
+    def get_permissions(self):
+        if self.request.method == 'GET':
+            return [AllowAny()]
+        return [IsAuthenticated()]
+
+    def get_serializer_class(self):
+        if self.request.method == 'POST':
+            return ProductReviewCreateSerializer
+        return ProductReviewReadSerializer
+
+    def get_queryset(self):
+        store = get_object_or_404(Store, pk=self.kwargs['store_id'], is_active=True)
+        get_object_or_404(Product, pk=self.kwargs['pk'], store=store, is_active=True)
+        return ProductReview.objects.filter(
+            product_id=self.kwargs['pk'],
+            product__store_id=store.pk,
+        ).select_related('user')
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        store = Store.objects.filter(pk=self.kwargs.get('store_id'), is_active=True).first()
+        product = None
+        if store:
+            product = Product.objects.filter(
+                pk=self.kwargs.get('pk'),
+                store=store,
+                is_active=True,
+            ).first()
+        ctx['product'] = product
+        return ctx
+
+    def perform_create(self, serializer):
+        serializer.save()
+
+
+def _related_as_bool(value, default: bool = False) -> bool:
+    raw = (value or '').strip().lower()
+    if not raw:
+        return default
+    return raw in {'1', 'true', 'yes', 'y', 'on'}
+
+
+def _related_collect_category_descendant_ids(categories: list, root_category_id: str) -> list:
+    """Same tree walk as zoho multi-product category filter (visible rows only)."""
+    root_id = str(root_category_id or '').strip()
+    if not root_id:
+        return []
+    children_map: dict[str, list[str]] = {}
+    for c in categories:
+        if not isinstance(c, dict):
+            continue
+        cid = str(c.get('category_id') or c.get('id') or '').strip()
+        parent_id = str(c.get('parent_category_id') or c.get('parent_id') or '').strip()
+        if not cid:
+            continue
+        children_map.setdefault(parent_id, []).append(cid)
+    result: list[str] = []
+    seen: set[str] = set()
+    stack = [root_id]
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        result.append(current)
+        for child in children_map.get(current, []):
+            if child not in seen:
+                stack.append(child)
+    return result
+
+
+def _related_extract_zoho_category_id_from_detail(detail: dict) -> str:
+    """Best-effort category id from Zoho Commerce product detail JSON."""
+    if not isinstance(detail, dict):
+        return ''
+    blob = detail.get('product') or detail.get('item') or detail.get('data') or detail
+    if not isinstance(blob, dict):
+        return ''
+
+    def _from_category_obj(obj) -> str:
+        if not isinstance(obj, dict):
+            return ''
+        for key in ('category_id', 'id', 'product_category_id'):
+            v = obj.get(key)
+            if v not in (None, '', [], {}):
+                return str(v).strip()
+        return ''
+
+    for key in ('category_id', 'product_category_id', 'primary_category_id'):
+        v = blob.get(key)
+        if v not in (None, '', [], {}):
+            return str(v).strip()
+
+    cat = blob.get('category')
+    if cat is not None:
+        if isinstance(cat, dict):
+            out = _from_category_obj(cat)
+            if out:
+                return out
+        elif isinstance(cat, str) and cat.strip().isdigit():
+            return cat.strip()
+
+    for list_key in ('categories', 'product_categories', 'category_list'):
+        rows = blob.get(list_key)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if isinstance(row, dict):
+                out = _from_category_obj(row)
+                if out:
+                    return out
+            elif isinstance(row, str) and row.strip():
+                return row.strip()
+    return ''
+
+
 class RelatedProductSuggestionListAPIView(generics.ListAPIView):
     """
     GET — related product suggestions for one product in a store.
 
     Query:
-    - limit (optional, default 10, max 20)
+    - store_id OR organization_id (one required) — organization_id matches Store.zoho_org_id
+    - product_id (required unless zoho_product_id is used) — catalog Product.pk
+    - zoho_product_id (optional alternative to product_id) — Product.zoho_product_id for this store
+    - zoho_category_id (optional) — Zoho category; peers from Zoho then mapped to local Product rows
+    - same_zoho_category (optional, default false) — if true and zoho_category_id omitted, infer
+      category from Zoho product detail for the anchor, then list peers (needs zoho_product_id on anchor)
+    - response_source=zoho (alias: source=zoho) — return Zoho-shaped product list (like /zoho/multi/products/),
+      not catalog Product rows. Requires zoho_category_id or same_zoho_category=true.
+    - account_id (optional) — use this ZohoCommerceAccount; organization_id must match that account.
+    - category_id — alias for zoho_category_id (Zoho category id string).
+    - Standalone Zoho related (no catalog Product row): response_source=zoho + account_id +
+      organization_id + category_id (or zoho_category_id) + exclude_product_id (or exclude_zoho_product_id);
+      omit product_id and zoho_product_id. limit max 200 for this mode.
     """
 
     serializer_class = ProductListSerializer
 
-    def _resolve_ids(self):
-        store_id = self.kwargs.get('store_id')
-        product_id = self.kwargs.get('pk')
-        if store_id is None:
-            store_id = self.request.query_params.get('store_id')
-        if product_id is None:
-            product_id = self.request.query_params.get('product_id')
+    def _resolve_store(self) -> Store:
+        store_id = self.kwargs.get('store_id') or self.request.query_params.get('store_id')
+        org_id = (self.request.query_params.get('organization_id') or '').strip()
+
+        if store_id not in (None, '') and org_id:
+            try:
+                sid = int(store_id)
+            except (TypeError, ValueError):
+                raise ValidationError({'store_id': 'Must be an integer.'})
+            store = Store.objects.filter(pk=sid, is_active=True).first()
+            if store is None:
+                raise ValidationError({'store_id': 'Store not found.'})
+            if (store.zoho_org_id or '').strip() != org_id:
+                raise ValidationError(
+                    {
+                        'organization_id': (
+                            'organization_id does not match this store\'s zoho_org_id.'
+                        ),
+                    },
+                )
+            return store
+
+        if org_id:
+            store = Store.objects.filter(zoho_org_id=org_id, is_active=True).first()
+            if store is None:
+                raise ValidationError(
+                    {
+                        'organization_id': (
+                            'No active store with this organization_id (matches Store.zoho_org_id).'
+                        ),
+                    },
+                )
+            return store
 
         if store_id in (None, ''):
-            raise ValidationError({'store_id': 'This query parameter is required.'})
-        if product_id in (None, ''):
-            raise ValidationError({'product_id': 'This query parameter is required.'})
+            raise ValidationError(
+                {
+                    'store_id': 'Provide store_id or organization_id.',
+                    'organization_id': 'Provide store_id or organization_id.',
+                },
+            )
 
         try:
-            store_id = int(store_id)
+            sid = int(store_id)
         except (TypeError, ValueError):
             raise ValidationError({'store_id': 'Must be an integer.'})
+
+        return get_object_or_404(Store, pk=sid, is_active=True)
+
+    def _resolve_store_and_product(self):
+        store = self._resolve_store()
+        product_id_raw = self.kwargs.get('pk')
+        if product_id_raw is None:
+            product_id_raw = self.request.query_params.get('product_id')
+        zoho_product_id = (self.request.query_params.get('zoho_product_id') or '').strip()
+
+        if zoho_product_id:
+            if product_id_raw not in (None, ''):
+                raise ValidationError(
+                    {'product_id': 'Use either product_id or zoho_product_id, not both.'},
+                )
+            product = (
+                Product.objects.filter(
+                    store=store,
+                    zoho_product_id=zoho_product_id,
+                    is_active=True,
+                )
+                .select_related('store')
+                .first()
+            )
+            if product is None:
+                raise ValidationError(
+                    {'zoho_product_id': 'No active product with this Zoho id for this store.'},
+                )
+            return store, product
+
+        if product_id_raw in (None, ''):
+            raise ValidationError(
+                {
+                    'product_id': (
+                        'This query parameter is required unless zoho_product_id is provided.'
+                    ),
+                },
+            )
+
         try:
-            product_id = int(product_id)
+            product_pk = int(product_id_raw)
         except (TypeError, ValueError):
             raise ValidationError({'product_id': 'Must be an integer.'})
-        return store_id, product_id
 
-    def get_queryset(self):
-        store_id, product_id = self._resolve_ids()
-        store = get_object_or_404(Store, pk=store_id, is_active=True)
         product = get_object_or_404(
-            Product,
-            pk=product_id,
+            Product.objects.select_related('store'),
+            pk=product_pk,
             store=store,
             is_active=True,
         )
+        return store, product
+
+    def _zoho_org_account_service(
+        self,
+        store: Optional[Store] = None,
+        *,
+        organization_id: Optional[str] = None,
+    ) -> tuple[str, ZohoCommerceAccount, ZohoCommerceService]:
+        account_id_raw = (self.request.query_params.get('account_id') or '').strip()
+        org_from_store = (getattr(store, 'zoho_org_id', None) or '').strip() if store is not None else ''
+        if organization_id is not None:
+            org = organization_id.strip()
+        elif org_from_store:
+            org = org_from_store
+        else:
+            raise ValidationError(
+                {
+                    'organization_id': (
+                        'Provide organization_id or a store with zoho_org_id for Zoho category requests.'
+                    ),
+                },
+            )
+        if not org:
+            raise ValidationError(
+                {'organization_id': 'organization_id cannot be empty.'},
+            )
+        if store is not None and org_from_store and org_from_store != org:
+            raise ValidationError(
+                {'organization_id': 'organization_id does not match this store\'s zoho_org_id.'},
+            )
+
+        if account_id_raw:
+            try:
+                aid = int(account_id_raw)
+            except (TypeError, ValueError):
+                raise ValidationError({'account_id': 'Must be an integer.'})
+            account = ZohoCommerceAccount.objects.filter(id=aid, is_active=True).first()
+            if account is None:
+                raise ValidationError(
+                    {'account_id': 'Zoho account not found or inactive.'},
+                )
+            acc_org = (account.organization_id or '').strip()
+            if acc_org != org:
+                raise ValidationError(
+                    {
+                        'organization_id': (
+                            'Must match the selected account\'s Zoho organization_id.'
+                        ),
+                    },
+                )
+        else:
+            account = ZohoCommerceAccount.objects.filter(is_active=True, organization_id=org).first()
+            if account is None:
+                raise ValidationError(
+                    {
+                        'zoho_category_id': (
+                            'No active ZohoCommerceAccount for this organization_id. '
+                            'Pass account_id or sync accounts.'
+                        ),
+                    },
+                )
+        return org, account, ZohoCommerceService(account)
+
+    def _zoho_category_id_list(
+        self,
+        service: ZohoCommerceService,
+        org: str,
+        zoho_category_id: str,
+        include_descendants: bool,
+    ) -> list[str]:
+        if include_descendants:
+            cat_data = service.list_categories(organization_id=org)
+            raw_cats = cat_data.get('categories', []) or cat_data.get('category', []) or []
+            cat_rows = [c for c in raw_cats if isinstance(c, dict)]
+            visible = [c for c in cat_rows if c.get('visibility') is not False]
+            category_ids = _related_collect_category_descendant_ids(visible, zoho_category_id)
+            if not category_ids:
+                category_ids = [str(zoho_category_id).strip()]
+        else:
+            category_ids = [str(zoho_category_id).strip()]
+        return category_ids
+
+    def _zoho_peer_raw_rows(
+        self,
+        service: ZohoCommerceService,
+        org: str,
+        category_ids: list[str],
+        anchor_zoho: str,
+    ) -> list[dict]:
+        rows_out: list[dict] = []
+        seen: set[str] = set()
+        anchor_zoho = (anchor_zoho or '').strip()
+        try:
+            for cid in category_ids:
+                pdata = service.list_products(organization_id=org, category_id=cid, page=1, per_page=200)
+                prows = pdata.get('products', []) or pdata.get('items', []) or []
+                for row in prows:
+                    if not isinstance(row, dict):
+                        continue
+                    pid = str(row.get('product_id') or row.get('item_id') or row.get('id') or '').strip()
+                    if not pid or pid == anchor_zoho or pid in seen:
+                        continue
+                    seen.add(pid)
+                    rows_out.append(row)
+        except Exception as e:
+            raise ValidationError({'zoho_category_id': f'Zoho request failed: {e}'}) from e
+        return rows_out
+
+    def _enrich_zoho_peer_rows(self, service: ZohoCommerceService, org: str, rows: list[dict]) -> None:
+        for product in rows:
+            if _extract_price(product) not in ('0', '0.00'):
+                continue
+            pid = str(product.get('product_id') or product.get('item_id') or product.get('id') or '').strip()
+            if not pid:
+                continue
+            try:
+                detail_data = service.get_product_detail(organization_id=org, product_id=pid)
+            except Exception:
+                continue
+            detail_product = (
+                detail_data.get('product')
+                or detail_data.get('item')
+                or detail_data.get('data')
+                or {}
+            )
+            if not isinstance(detail_product, dict):
+                continue
+            detail_price = _extract_price(detail_product)
+            if detail_price not in ('0', '0.00'):
+                product['rate'] = detail_price
+            if not (product.get('sku') or product.get('product_sku')):
+                detail_sku = detail_product.get('sku') or detail_product.get('product_sku')
+                if detail_sku:
+                    product['sku'] = detail_sku
+            if not (product.get('image_url') or product.get('image_name')):
+                detail_image = _extract_image_url(detail_product)
+                if detail_image:
+                    product['image_url'] = detail_image
+
+    def _queryset_by_zoho_category(self, store: Store, anchor: Product, zoho_category_id: str, limit: int):
+        """Match Zoho category listing; return local Product rows only (excludes anchor)."""
+        include_descendants = _related_as_bool(
+            self.request.query_params.get('include_descendants'),
+            default=True,
+        )
+        try:
+            org, _account, service = self._zoho_org_account_service(store)
+            category_ids = self._zoho_category_id_list(
+                service, org, zoho_category_id, include_descendants,
+            )
+            rows = self._zoho_peer_raw_rows(service, org, category_ids, (anchor.zoho_product_id or '').strip())
+        except ValidationError:
+            raise
+        except Exception as e:
+            raise ValidationError({'zoho_category_id': f'Zoho request failed: {e}'}) from e
+
+        zoho_ids = {
+            str(r.get('product_id') or r.get('item_id') or r.get('id') or '').strip()
+            for r in rows
+        }
+        zoho_ids.discard('')
+        if not zoho_ids:
+            return []
+
+        qs = (
+            Product.objects.filter(
+                store=store,
+                is_active=True,
+                zoho_product_id__in=zoho_ids,
+            )
+            .select_related('store')
+            .exclude(pk=anchor.pk)
+            .order_by('name')[:limit]
+        )
+        return list(qs)
+
+    def _infer_zoho_category_for_anchor(self, store: Store, product: Product) -> str:
+        """Resolve primary Zoho category id for the anchor product (detail API)."""
+        zoho_pid = (product.zoho_product_id or '').strip()
+        if not zoho_pid:
+            return ''
+        try:
+            org, _account, service = self._zoho_org_account_service(store)
+        except ValidationError:
+            return ''
+        try:
+            detail = service.get_product_detail(
+                organization_id=org,
+                product_id=zoho_pid,
+            )
+        except Exception:
+            return ''
+        return _related_extract_zoho_category_id_from_detail(detail)
+
+    def _resolve_zoho_category_id_for_request(self, store: Store, product: Product) -> str:
+        zoho_category_id = (
+            self.request.query_params.get('zoho_category_id')
+            or self.request.query_params.get('category_id')
+            or ''
+        ).strip()
+        if not zoho_category_id and _related_as_bool(
+            self.request.query_params.get('same_zoho_category'),
+            default=False,
+        ):
+            zoho_category_id = self._infer_zoho_category_for_anchor(store, product)
+        return zoho_category_id
+
+    def _related_wants_zoho_direct_response(self) -> bool:
+        src = (
+            self.request.query_params.get('response_source')
+            or self.request.query_params.get('source')
+            or ''
+        ).strip().lower()
+        return src in ('zoho', 'zoho_api', 'direct')
+
+    def _finalize_zoho_related_products(
+        self,
+        request,
+        *,
+        org: str,
+        account: ZohoCommerceAccount,
+        service: ZohoCommerceService,
+        rows: list,
+        zoho_category_id: str,
+        include_descendants: bool,
+        store: Optional[Store],
+        limit: int,
+        extra: Optional[dict] = None,
+    ) -> Response:
+        rows = rows[:limit]
+        self._enrich_zoho_peer_rows(service, org, rows)
+
+        store_domain = (getattr(store, 'zoho_store_domain', '') or '').strip() if store else ''
+        summaries = [_product_summary(p, store_domain=store_domain) for p in rows]
+        for row in summaries:
+            current_image = (row.get('image_url') or '').strip()
+            normalized_image = build_image_url(store_domain, current_image)
+            if normalized_image:
+                row['image_url'] = normalized_image
+                continue
+            if current_image and (
+                current_image.startswith('http://')
+                or current_image.startswith('https://')
+                or current_image.startswith('/')
+            ):
+                continue
+            pid = (row.get('product_id') or '').strip()
+            if not pid:
+                continue
+            if store is not None:
+                row['image_url'] = request.build_absolute_uri(
+                    f'/api/shop/zoho-products/{pid}/image/?store_id={store.pk}',
+                )
+
+        body = {
+            'status': 'success',
+            'response_source': 'zoho',
+            'account_id': account.pk,
+            'account_name': account.name,
+            'account_email': account.email,
+            'organization_id': org,
+            'zoho_category_id': zoho_category_id,
+            'include_descendants': include_descendants,
+            'count': len(summaries),
+            'products': summaries,
+        }
+        if extra:
+            body.update(extra)
+        return Response(body)
+
+    def _list_zoho_related_standalone(self, request, *, zoho_category_id: str) -> Response:
+        org_param = (request.query_params.get('organization_id') or '').strip()
+        if not org_param:
+            raise ValidationError(
+                {'organization_id': 'Required for account-based related without product_id.'},
+            )
+        raw_limit = request.query_params.get('limit', 10)
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            limit = 10
+        limit = max(1, min(limit, 200))
+
+        exclude = (
+            (request.query_params.get('exclude_product_id') or request.query_params.get('exclude_zoho_product_id') or '')
+            .strip()
+        )
+        if not exclude:
+            raise ValidationError(
+                {
+                    'exclude_product_id': (
+                        'Required for standalone related: Zoho product id to omit from results.'
+                    ),
+                },
+            )
+
+        include_descendants = _related_as_bool(
+            request.query_params.get('include_descendants'),
+            default=True,
+        )
+        try:
+            org, account, service = self._zoho_org_account_service(
+                None,
+                organization_id=org_param,
+            )
+            category_ids = self._zoho_category_id_list(
+                service, org, zoho_category_id, include_descendants,
+            )
+            rows = self._zoho_peer_raw_rows(service, org, category_ids, exclude)
+        except ValidationError:
+            raise
+        except Exception as e:
+            raise ValidationError({'zoho_category_id': f'Zoho request failed: {e}'}) from e
+
+        store = Store.objects.filter(zoho_org_id=org, is_active=True).first()
+        return self._finalize_zoho_related_products(
+            request,
+            org=org,
+            account=account,
+            service=service,
+            rows=rows,
+            zoho_category_id=zoho_category_id,
+            include_descendants=include_descendants,
+            store=store,
+            limit=limit,
+            extra={'exclude_product_id': exclude},
+        )
+
+    def list(self, request, *args, **kwargs):
+        if not self._related_wants_zoho_direct_response():
+            return super().list(request, *args, **kwargs)
+
+        qp = request.query_params
+        has_anchor = bool((qp.get('product_id') or '').strip() or (qp.get('zoho_product_id') or '').strip())
+        if (qp.get('account_id') or '').strip() and (qp.get('organization_id') or '').strip():
+            cat = (qp.get('category_id') or qp.get('zoho_category_id') or '').strip()
+            if cat and not has_anchor:
+                return self._list_zoho_related_standalone(request, zoho_category_id=cat)
+
+        store, product = self._resolve_store_and_product()
+        raw_limit = request.query_params.get('limit', 10)
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            limit = 10
+        limit = max(1, min(limit, 20))
+
+        zoho_category_id = self._resolve_zoho_category_id_for_request(store, product)
+        if not zoho_category_id:
+            raise ValidationError(
+                {
+                    'response_source': (
+                        'When response_source=zoho, provide zoho_category_id or category_id, or '
+                        'same_zoho_category=true with a zoho_product_id on the anchor so category can be inferred; '
+                        'or use account_id + organization_id + category_id + exclude_product_id without product_id.'
+                    ),
+                    'zoho_category_id': (
+                        'Required for Zoho-direct related unless same_zoho_category can infer it, '
+                        'or use standalone account mode (see docs on RelatedProductSuggestionListAPIView).'
+                    ),
+                },
+            )
+
+        include_descendants = _related_as_bool(
+            request.query_params.get('include_descendants'),
+            default=True,
+        )
+        try:
+            org, account, service = self._zoho_org_account_service(store)
+            category_ids = self._zoho_category_id_list(
+                service, org, zoho_category_id, include_descendants,
+            )
+            rows = self._zoho_peer_raw_rows(
+                service,
+                org,
+                category_ids,
+                (product.zoho_product_id or '').strip(),
+            )
+        except ValidationError:
+            raise
+        except Exception as e:
+            raise ValidationError({'zoho_category_id': f'Zoho request failed: {e}'}) from e
+
+        return self._finalize_zoho_related_products(
+            request,
+            org=org,
+            account=account,
+            service=service,
+            rows=rows,
+            zoho_category_id=zoho_category_id,
+            include_descendants=include_descendants,
+            store=store,
+            limit=limit,
+            extra=None,
+        )
+
+    def get_queryset(self):
+        store, product = self._resolve_store_and_product()
 
         raw_limit = self.request.query_params.get('limit', 10)
         try:
@@ -306,8 +915,13 @@ class RelatedProductSuggestionListAPIView(generics.ListAPIView):
             limit = 10
         limit = max(1, min(limit, 20))
 
+        zoho_category_id = self._resolve_zoho_category_id_for_request(store, product)
+
+        if zoho_category_id:
+            return self._queryset_by_zoho_category(store, product, zoho_category_id, limit)
+
         base_qs = Product.objects.filter(
-            store=store,
+            store=product.store,
             is_active=True,
         ).select_related('store').exclude(pk=product.pk)
 

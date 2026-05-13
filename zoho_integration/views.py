@@ -800,6 +800,28 @@ def _multi_account_product_list_response(request, account, organization_id: str)
         products = data.get("products", []) or data.get("items", [])
     products = [p for p in products if isinstance(p, dict)]
 
+    exclude_pid = (
+        (request.GET.get("exclude_product_id") or request.GET.get("exclude_zoho_product_id") or "")
+        .strip()
+    )
+    if exclude_pid:
+        products = [
+            p
+            for p in products
+            if str(p.get("product_id") or p.get("item_id") or p.get("id") or "").strip() != exclude_pid
+        ]
+
+    limit_raw = (request.GET.get("limit") or "").strip()
+    limit_applied = None
+    if limit_raw:
+        try:
+            lim = int(limit_raw)
+        except ValueError:
+            lim = 0
+        if lim > 0:
+            limit_applied = min(lim, 200)
+            products = products[:limit_applied]
+
     # Enrich missing prices from product detail endpoint.
     for product in products:
         if _extract_price(product) not in ("0", "0.00"):
@@ -859,7 +881,7 @@ def _multi_account_product_list_response(request, account, organization_id: str)
                 f"/api/shop/zoho-products/{pid}/image/?store_id={store.pk}"
             )
 
-    return Response({
+    payload = {
         "status": "success",
         "account_name": account.name,
         "account_email": account.email,
@@ -868,7 +890,12 @@ def _multi_account_product_list_response(request, account, organization_id: str)
         "include_descendants": include_descendants,
         "count": len(product_summaries),
         "products": product_summaries,
-    })
+    }
+    if exclude_pid:
+        payload["exclude_product_id"] = exclude_pid
+    if limit_applied is not None:
+        payload["limit"] = limit_applied
+    return Response(payload)
 
 
 class MultiAccountZohoProductListAPIView(APIView):

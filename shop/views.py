@@ -17,6 +17,7 @@ from zoho_integration.models import ZohoCommerceAccount
 from zoho_integration.services import ZohoCommerceService as ZohoAccountService
 from rest_framework import generics, status
 from rest_framework.exceptions import ValidationError
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -37,6 +38,7 @@ from .models import (
     OrderReturn,
     PurchasePointsLedger,
     UserAddress,
+    UserNotification,
     WishlistItem,
 )
 from .services.zoho_commerce import ZohoCommerceError, ZohoCommerceService
@@ -51,11 +53,16 @@ from .serializers import (
     OrderSerializer,
     OrderReturnCreateSerializer,
     OrderReturnReadSerializer,
+    order_code_for_order,
+    return_flow_ui_payload,
+    return_reason_options_payload,
     PurchasePointsLedgerSerializer,
     UserAddressSerializer,
+    UserNotificationSerializer,
     WishlistItemSerializer,
     WishlistMoveToCartSerializer,
 )
+from .services.notifications import create_user_notification
 from .services.zoho_returns import enqueue_push_return_to_zoho
 
 User = get_user_model()
@@ -1272,6 +1279,46 @@ class CheckoutAPIView(APIView):
         order = Order.objects.prefetch_related(
             'items', 'returns__lines__order_item',
         ).get(pk=order.pk)
+        code = order_code_for_order(order)
+        create_user_notification(
+            request.user,
+            UserNotification.Kind.ORDER,
+            title=f'Order #{code} placed',
+            body=(
+                f'We received your order ({order.currency} {order.total}). '
+                'We will update you when it ships.'
+            ),
+            payload={
+                'event': 'order_placed',
+                'order_id': order.pk,
+                'store_id': order.store_id,
+                'order_code': code,
+            },
+        )
+        if points_awarded > 0:
+            create_user_notification(
+                request.user,
+                UserNotification.Kind.POINTS_REWARD,
+                title=f'You earned {points_awarded} points',
+                body='Points were added to your wallet from this purchase.',
+                payload={
+                    'event': 'points_earned',
+                    'points': points_awarded,
+                    'order_id': order.pk,
+                },
+            )
+        if loyalty_points_redeemed > 0:
+            create_user_notification(
+                request.user,
+                UserNotification.Kind.POINTS_DEDUCTED,
+                title=f'{loyalty_points_redeemed} points applied',
+                body='Loyalty points were redeemed on this order.',
+                payload={
+                    'event': 'points_redeemed_checkout',
+                    'points': loyalty_points_redeemed,
+                    'order_id': order.pk,
+                },
+            )
         selected_payment_method = {
             'code': order.payment_method,
             'label': Order.PaymentMethod(order.payment_method).label,
@@ -1394,6 +1441,21 @@ class LoyaltyIssueCouponAPIView(APIView):
                 amount_aed=amount_aed,
                 expires_at=default_coupon_expires_at(),
             )
+        create_user_notification(
+            user,
+            UserNotification.Kind.POINTS_DEDUCTED,
+            title=f'{points} points exchanged',
+            body=(
+                f'Store credit coupon {coupon.code} '
+                f'({coupon.amount_aed} AED) is ready to use at checkout.'
+            ),
+            payload={
+                'event': 'coupon_issued',
+                'points': points,
+                'coupon_code': coupon.code,
+                'amount_aed': str(coupon.amount_aed),
+            },
+        )
         return Response(
             {
                 'code': coupon.code,
@@ -1449,12 +1511,37 @@ class OrderDetailAPIView(generics.RetrieveAPIView):
         )
 
 
+class OrderReturnFlowMetaAPIView(APIView):
+    """
+    Return-flow metadata: reason codes/labels, cancel vs confirm wiring, and where prices live.
+
+    Item selection: GET order detail → ``return_eligible_lines`` (``unit_price_display`` per line).
+    Confirm return: POST ``/api/shop/orders/<order_id>/returns/`` after reason step.
+    Cancel: client-only (close modal); no server endpoint.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(
+            {
+                'return_reasons': return_reason_options_payload(),
+                'return_flow': return_flow_ui_payload(),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class OrderReturnListCreateAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk):
         order = get_object_or_404(Order, pk=pk, user=request.user)
-        qs = order.returns.prefetch_related('lines').order_by('-created_at')
+        qs = (
+            order.returns.prefetch_related('lines__order_item')
+            .select_related('order')
+            .order_by('-created_at')
+        )
         return Response(OrderReturnReadSerializer(qs, many=True).data)
 
     def post(self, request, pk):
@@ -1466,7 +1553,23 @@ class OrderReturnListCreateAPIView(APIView):
         ser.is_valid(raise_exception=True)
         ret = ser.save()
         enqueue_push_return_to_zoho(ret.pk)
-        ret = OrderReturn.objects.prefetch_related('lines').get(pk=ret.pk)
+        ret = (
+            OrderReturn.objects.select_related('order')
+            .prefetch_related('lines__order_item')
+            .get(pk=ret.pk)
+        )
+        create_user_notification(
+            request.user,
+            UserNotification.Kind.ORDER,
+            title='Return request submitted',
+            body='We are processing your return.',
+            payload={
+                'event': 'return_submitted',
+                'return_id': ret.pk,
+                'order_id': order.pk,
+                'order_code': order_code_for_order(order),
+            },
+        )
         return Response(OrderReturnReadSerializer(ret).data, status=status.HTTP_201_CREATED)
 
 
@@ -1710,3 +1813,59 @@ class ZohoProductImageProxyAPIView(APIView):
                 else status.HTTP_502_BAD_GATEWAY
             )
             return Response({'detail': msg}, status=st)
+
+
+class NotificationPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 50
+
+
+class NotificationListAPIView(generics.ListAPIView):
+    """GET — paginated in-app notifications for the current user."""
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = UserNotificationSerializer
+    pagination_class = NotificationPagination
+
+    def get_queryset(self):
+        qs = UserNotification.objects.filter(user=self.request.user)
+        raw = (self.request.query_params.get('unread') or '').strip().lower()
+        if raw in ('1', 'true', 'yes'):
+            qs = qs.filter(read_at__isnull=True)
+        kind = (self.request.query_params.get('kind') or '').strip()
+        if kind:
+            qs = qs.filter(kind=kind)
+        return qs
+
+
+class NotificationUnreadCountAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        c = UserNotification.objects.filter(user=request.user, read_at__isnull=True).count()
+        return Response({'unread_count': c})
+
+
+class NotificationMarkAllReadAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        now = timezone.now()
+        n = UserNotification.objects.filter(user=request.user, read_at__isnull=True).update(
+            read_at=now,
+        )
+        return Response({'marked': n})
+
+
+class NotificationDetailAPIView(APIView):
+    """PATCH — mark one notification read (idempotent)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+        n = get_object_or_404(UserNotification, pk=pk, user=request.user)
+        if n.read_at is None:
+            n.read_at = timezone.now()
+            n.save(update_fields=['read_at'])
+        return Response(UserNotificationSerializer(n).data)

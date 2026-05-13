@@ -237,6 +237,14 @@ class OrderReturn(models.Model):
         REJECTED = 'rejected', 'Rejected'
         FAILED = 'failed', 'Zoho sync failed'
 
+    class ReturnReason(models.TextChoices):
+        DAMAGED_PRODUCT = 'damaged_product', 'Damaged product'
+        WRONG_ITEM = 'wrong_item', 'Wrong item received'
+        POOR_QUALITY = 'poor_quality', 'Poor quality'
+        NOT_AS_DESCRIBED = 'not_as_described', 'Not as described'
+        CHANGED_MIND = 'changed_mind', 'Changed my mind'
+        OTHER = 'other', 'Other'
+
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='returns')
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -249,6 +257,15 @@ class OrderReturn(models.Model):
         default=Status.PENDING_ZOHO,
     )
     zoho_salesreturn_id = models.CharField(max_length=120, blank=True)
+    return_reason = models.CharField(
+        max_length=32,
+        choices=ReturnReason.choices,
+        blank=True,
+    )
+    return_reason_detail = models.TextField(
+        blank=True,
+        help_text='Required when return_reason is "other"; optional extra context otherwise.',
+    )
     note = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -292,3 +309,36 @@ class PurchasePointsLedger(models.Model):
 
     def __str__(self):
         return f'Points {self.points_awarded} for order {self.order_id}'
+
+
+class UserNotification(models.Model):
+    """In-app notification feed (offers, orders, wallet points, welcome offers)."""
+
+    class Kind(models.TextChoices):
+        OFFER = 'offer', 'Offer'
+        ORDER = 'order', 'Order'
+        POINTS_REWARD = 'points_reward', 'Points reward'
+        POINTS_DEDUCTED = 'points_deducted', 'Points deducted'
+        MEMBER_OFFER = 'member_offer', 'New member offer'
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='shop_notifications',
+    )
+    kind = models.CharField(max_length=32, choices=Kind.choices, db_index=True)
+    title = models.CharField(max_length=255)
+    body = models.TextField(blank=True)
+    payload = models.JSONField(default=dict, blank=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'created_at']),
+            models.Index(fields=['user', 'read_at']),
+        ]
+
+    def __str__(self):
+        return f'{self.kind} → user {self.user_id}: {self.title[:40]}'

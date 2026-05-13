@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Cart, CartItem, Order, OrderItem, OrderReturn, OrderReturnLine
+from .models import Cart, CartItem, Order, OrderItem, OrderReturn, OrderReturnLine, UserNotification
 
 
 class CartItemInline(admin.TabularInline):
@@ -27,11 +27,19 @@ class OrderReturnLineInline(admin.TabularInline):
 
 @admin.register(OrderReturn)
 class OrderReturnAdmin(admin.ModelAdmin):
-    list_display = ('id', 'order', 'user', 'status', 'created_at')
+    list_display = ('id', 'order', 'user', 'status', 'return_reason', 'created_at')
     list_filter = ('status',)
     search_fields = ('order__id', 'user__email', 'zoho_salesreturn_id')
     inlines = [OrderReturnLineInline]
     readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(UserNotification)
+class UserNotificationAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'kind', 'title', 'read_at', 'created_at')
+    list_filter = ('kind', 'read_at')
+    search_fields = ('user__email', 'title')
+    readonly_fields = ('created_at',)
 
 
 @admin.register(Order)

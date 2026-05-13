@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 
 
@@ -96,3 +97,35 @@ class Product(models.Model):
 
     def __str__(self):
         return f'{self.name} ({self.store.name})'
+
+
+class ProductReview(models.Model):
+    """One review per user per product; only after a delivered (synced) order containing the product."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='product_reviews',
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name='reviews',
+    )
+    rating = models.PositiveSmallIntegerField()
+    title = models.CharField(max_length=200, blank=True)
+    body = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'product'],
+                name='catalog_productreview_user_product_uniq',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.rating}★ by user {self.user_id} on product {self.product_id}'

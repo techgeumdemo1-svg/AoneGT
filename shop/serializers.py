@@ -21,8 +21,81 @@ from .models import (
     OrderReturnLine,
     PurchasePointsLedger,
     UserAddress,
+    UserNotification,
     WishlistItem,
 )
+
+
+def order_code_for_order(obj: Order) -> str:
+    """Stable 6-char code for UI (same logic as OrderSerializer.get_order_code)."""
+    if obj.zoho_salesorder_id:
+        raw = ''.join(ch for ch in str(obj.zoho_salesorder_id).upper() if ch.isalnum())
+        if raw:
+            return raw[-6:].rjust(6, '0')
+    chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+    num = int(obj.pk or 0)
+    if num <= 0:
+        return '0'.rjust(6, '0')
+    out = ''
+    n = num
+    while n:
+        n, rem = divmod(n, 36)
+        out = chars[rem] + out
+    return out.rjust(6, '0')
+
+
+def return_reason_options_payload():
+    """Labels for mobile return flow (screenshots: reason picker)."""
+    return [
+        {'code': code, 'label': label}
+        for code, label in OrderReturn.ReturnReason.choices
+    ]
+
+
+def return_flow_ui_payload():
+    """
+    How the app wires the return modal (select → reason → POST).
+    Cancel is UI-only; confirm is POST when the user finishes the flow.
+    """
+    return {
+        'cancel': {
+            'type': 'client_only',
+            'description': 'Dismiss return screens; no API request.',
+        },
+        'confirm_return': {
+            'type': 'http',
+            'method': 'POST',
+            'path_template': '/api/shop/orders/{order_id}/returns/',
+            'description': (
+                'Call after user selects lines and reason. JSON body: return_reason, '
+                'lines[{order_item_id, quantity}], optional note / return_reason_detail.'
+            ),
+        },
+        'item_selection': {
+            'method': 'GET',
+            'path_template': '/api/shop/orders/{order_id}/',
+            'lines_field': 'return_eligible_lines',
+            'price_fields': ('unit_price', 'unit_price_display', 'currency', 'line_total_display'),
+        },
+    }
+
+
+def _returns_refund_total(order: Order) -> Decimal:
+    """
+    Sum refund value for submitted returns (pending sync counts for UX until rejected).
+    """
+    total = Decimal('0')
+    active_statuses = (
+        OrderReturn.Status.PENDING_ZOHO,
+        OrderReturn.Status.SYNCED,
+        OrderReturn.Status.COMPLETED,
+    )
+    for ret in order.returns.filter(status__in=active_statuses).prefetch_related(
+        'lines__order_item',
+    ):
+        for line in ret.lines.all():
+            total += line.order_item.unit_price * line.quantity
+    return total.quantize(Decimal('0.01'))
 
 
 class ProductMiniSerializer(serializers.ModelSerializer):
@@ -495,16 +568,6 @@ class OrderItemSerializer(serializers.ModelSerializer):
         )
 
 
-def _completed_returns_total(order: Order) -> Decimal:
-    total = Decimal('0')
-    for ret in order.returns.filter(status=OrderReturn.Status.COMPLETED).prefetch_related(
-        'lines__order_item',
-    ):
-        for line in ret.lines.all():
-            total += line.order_item.unit_price * line.quantity
-    return total.quantize(Decimal('0.01'))
-
-
 class OrderSerializer(serializers.ModelSerializer):
     order_id = serializers.IntegerField(source='id', read_only=True)
     items = OrderItemSerializer(many=True, read_only=True)
@@ -519,6 +582,7 @@ class OrderSerializer(serializers.ModelSerializer):
     order_date = serializers.SerializerMethodField()
     refunded_amount = serializers.SerializerMethodField()
     net_paid = serializers.SerializerMethodField()
+    return_eligible_lines = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
@@ -527,6 +591,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'subtotal', 'vat_percent', 'vat_amount', 'shipping_amount', 'total',
             'order_code', 'display_status', 'items_count',
             'can_reorder', 'can_return', 'return_status', 'order_date',
+            'return_eligible_lines',
             'shipping_name', 'shipping_phone', 'shipping_address', 'shipping_city',
             'shipping_state', 'shipping_postal_code', 'shipping_country',
             'billing_same_as_shipping',
@@ -544,30 +609,41 @@ class OrderSerializer(serializers.ModelSerializer):
             'zoho_sync_error', 'zoho_synced_at',
             'order_code', 'display_status', 'items_count',
             'can_reorder', 'can_return', 'return_status', 'order_date',
+            'return_eligible_lines',
             'returned_total', 'balance_remaining', 'refunded_amount', 'net_paid',
             'loyalty_points_redeemed', 'loyalty_discount',
             'created_at', 'updated_at',
         )
 
-    @staticmethod
-    def _to_base36(num: int) -> str:
-        chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
-        if num <= 0:
-            return '0'
-        out = ''
-        n = num
-        while n:
-            n, rem = divmod(n, 36)
-            out = chars[rem] + out
-        return out
-
     def get_order_code(self, obj):
-        # Stable 6-char code for UI cards, e.g. A1B2C3.
-        if obj.zoho_salesorder_id:
-            raw = ''.join(ch for ch in str(obj.zoho_salesorder_id).upper() if ch.isalnum())
-            if raw:
-                return raw[-6:].rjust(6, '0')
-        return self._to_base36(int(obj.pk or 0)).rjust(6, '0')
+        return order_code_for_order(obj)
+
+    def get_return_eligible_lines(self, obj):
+        """Lines still returnable (for select-items-to-return modal). Empty if order not eligible."""
+        if obj.status != Order.Status.SYNCED:
+            return []
+        currency = ((obj.currency or '') or 'AED').strip() or 'AED'
+        result = []
+        for oi in obj.items.all():
+            remaining = oi.quantity - oi.quantity_in_active_returns()
+            if remaining <= 0:
+                continue
+            unit = Decimal(str(oi.unit_price)).quantize(Decimal('0.01'))
+            lt = Decimal(str(oi.line_total)).quantize(Decimal('0.01'))
+            result.append({
+                'order_item_id': oi.pk,
+                'product_id': oi.product_id,
+                'product_name': oi.product_name,
+                'sku': oi.sku,
+                'currency': currency,
+                'unit_price': str(unit),
+                'unit_price_display': f'{currency} {unit}',
+                'quantity_ordered': oi.quantity,
+                'quantity_returnable': remaining,
+                'line_total': str(lt),
+                'line_total_display': f'{currency} {lt}',
+            })
+        return result
 
     def get_display_status(self, obj):
         mapping = {
@@ -591,7 +667,7 @@ class OrderSerializer(serializers.ModelSerializer):
 
     def _order_return_status(self, obj):
         total = Decimal(str(obj.total or '0'))
-        refunded = _completed_returns_total(obj)
+        refunded = _returns_refund_total(obj)
         if refunded <= Decimal('0'):
             return 'none'
         if refunded >= total and total > Decimal('0'):
@@ -605,10 +681,10 @@ class OrderSerializer(serializers.ModelSerializer):
         return obj.created_at.strftime('%d %b %Y')
 
     def get_returned_total(self, obj):
-        return str(_completed_returns_total(obj))
+        return str(_returns_refund_total(obj))
 
     def get_balance_remaining(self, obj):
-        br = (obj.total - _completed_returns_total(obj)).quantize(Decimal('0.01'))
+        br = (obj.total - _returns_refund_total(obj)).quantize(Decimal('0.01'))
         if br < Decimal('0'):
             br = Decimal('0')
         return str(br)
@@ -763,6 +839,15 @@ class OrderReturnLineInputSerializer(serializers.Serializer):
 
 
 class OrderReturnCreateSerializer(serializers.Serializer):
+    """Confirm-return step: lines + standardized reason (screenshots 4–6)."""
+
+    return_reason = serializers.ChoiceField(choices=OrderReturn.ReturnReason.choices)
+    return_reason_detail = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        default='',
+        trim_whitespace=True,
+    )
     note = serializers.CharField(required=False, allow_blank=True, default='')
     lines = OrderReturnLineInputSerializer(many=True)
 
@@ -779,6 +864,16 @@ class OrderReturnCreateSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         order: Order = self.context['order']
+        if order.status != Order.Status.SYNCED:
+            raise serializers.ValidationError(
+                {'detail': 'Returns are only allowed after the order is delivered (synced).'},
+            )
+        detail = (attrs.get('return_reason_detail') or '').strip()
+        if attrs['return_reason'] == OrderReturn.ReturnReason.OTHER and not detail:
+            raise serializers.ValidationError(
+                {'return_reason_detail': 'This field is required when return_reason is "other".'},
+            )
+        attrs['return_reason_detail'] = detail
         for row in attrs['lines']:
             oi = OrderItem.objects.filter(pk=row['order_item_id'], order=order).first()
             if not oi:
@@ -797,8 +892,16 @@ class OrderReturnCreateSerializer(serializers.Serializer):
         user = self.context['request'].user
         lines_data = validated_data['lines']
         note = validated_data.get('note') or ''
+        reason = validated_data['return_reason']
+        reason_detail = validated_data.get('return_reason_detail') or ''
         with transaction.atomic():
-            ret = OrderReturn.objects.create(order=order, user=user, note=note)
+            ret = OrderReturn.objects.create(
+                order=order,
+                user=user,
+                note=note,
+                return_reason=reason,
+                return_reason_detail=reason_detail,
+            )
             for row in lines_data:
                 oi = OrderItem.objects.get(pk=row['order_item_id'], order=order)
                 OrderReturnLine.objects.create(
@@ -810,16 +913,102 @@ class OrderReturnCreateSerializer(serializers.Serializer):
 
 
 class OrderReturnLineReadSerializer(serializers.ModelSerializer):
+    order_item = OrderItemSerializer(read_only=True)
+    line_subtotal = serializers.SerializerMethodField()
+    line_subtotal_display = serializers.SerializerMethodField()
+
     class Meta:
         model = OrderReturnLine
-        fields = ('id', 'order_item', 'quantity')
+        fields = (
+            'id',
+            'order_item',
+            'quantity',
+            'line_subtotal',
+            'line_subtotal_display',
+        )
+        read_only_fields = (
+            'id',
+            'order_item',
+            'quantity',
+            'line_subtotal',
+            'line_subtotal_display',
+        )
+
+    def get_line_subtotal(self, obj):
+        total = Decimal(str(obj.order_item.unit_price)) * int(obj.quantity)
+        return str(total.quantize(Decimal('0.01')))
+
+    def get_line_subtotal_display(self, obj):
+        order = obj.order_item.order
+        cur = ((order.currency or '') or 'AED').strip() or 'AED'
+        total = Decimal(str(obj.order_item.unit_price)) * int(obj.quantity)
+        amt = total.quantize(Decimal('0.01'))
+        return f'{cur} {amt}'
 
 
 class OrderReturnReadSerializer(serializers.ModelSerializer):
     lines = OrderReturnLineReadSerializer(many=True, read_only=True)
+    order_code = serializers.SerializerMethodField()
+    currency = serializers.SerializerMethodField()
+    refund_amount = serializers.SerializerMethodField()
+    return_reason_label = serializers.SerializerMethodField()
 
     class Meta:
         model = OrderReturn
         fields = (
-            'id', 'status', 'zoho_salesreturn_id', 'note', 'lines', 'created_at', 'updated_at',
+            'id',
+            'status',
+            'zoho_salesreturn_id',
+            'return_reason',
+            'return_reason_label',
+            'return_reason_detail',
+            'note',
+            'order_code',
+            'currency',
+            'refund_amount',
+            'lines',
+            'created_at',
+            'updated_at',
         )
+
+    def get_order_code(self, obj):
+        return order_code_for_order(obj.order)
+
+    def get_currency(self, obj):
+        return obj.order.currency or 'AED'
+
+    def get_refund_amount(self, obj):
+        total = Decimal('0')
+        for line in obj.lines.all():
+            total += line.order_item.unit_price * line.quantity
+        return str(total.quantize(Decimal('0.01')))
+
+    def get_return_reason_label(self, obj):
+        raw = (obj.return_reason or '').strip()
+        if not raw:
+            return ''
+        try:
+            return OrderReturn.ReturnReason(raw).label
+        except ValueError:
+            return raw
+
+
+class UserNotificationSerializer(serializers.ModelSerializer):
+    is_read = serializers.SerializerMethodField()
+
+    class Meta:
+        model = UserNotification
+        fields = (
+            'id',
+            'kind',
+            'title',
+            'body',
+            'payload',
+            'is_read',
+            'read_at',
+            'created_at',
+        )
+        read_only_fields = fields
+
+    def get_is_read(self, obj):
+        return obj.read_at is not None

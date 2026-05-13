@@ -1,5 +1,12 @@
 from django.contrib import admin
-from .models import Banner, Store, Product
+from .models import Banner, Store, Product, ProductReview
+
+
+class ProductReviewInline(admin.TabularInline):
+    model = ProductReview
+    extra = 0
+    readonly_fields = ('user', 'rating', 'title', 'created_at')
+    can_delete = True
 
 
 @admin.register(Store)
@@ -53,6 +60,15 @@ class BannerAdmin(admin.ModelAdmin):
     autocomplete_fields = ('store',)
 
 
+@admin.register(ProductReview)
+class ProductReviewAdmin(admin.ModelAdmin):
+    list_display = ('id', 'product', 'user', 'rating', 'title', 'created_at')
+    list_filter = ('rating', 'created_at')
+    search_fields = ('title', 'body', 'product__name', 'user__email')
+    readonly_fields = ('created_at', 'updated_at')
+    autocomplete_fields = ('product', 'user')
+
+
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
     list_display = ('name', 'store', 'category', 'sku', 'price', 'currency', 'is_active')
@@ -60,3 +76,4 @@ class ProductAdmin(admin.ModelAdmin):
     search_fields = ('name', 'slug', 'category', 'sku', 'zoho_product_id')
     prepopulated_fields = {'slug': ('name',)}
     autocomplete_fields = ('store',)
+    inlines = [ProductReviewInline]
