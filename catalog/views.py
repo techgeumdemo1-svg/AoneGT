@@ -15,6 +15,7 @@ from .services.zoho_commerce_products import (
     build_products_list_url,
     zoho_commerce_proxy_get,
 )
+from .services.zoho_product_ids import extract_zoho_category_id_from_detail as _extract_zoho_category_id
 from .services.zoho_sites import (
     fetch_zoho_shop_products,
     fetch_zoho_shops_from_accounts,
@@ -348,47 +349,7 @@ def _related_collect_category_descendant_ids(categories: list, root_category_id:
 
 def _related_extract_zoho_category_id_from_detail(detail: dict) -> str:
     """Best-effort category id from Zoho Commerce product detail JSON."""
-    if not isinstance(detail, dict):
-        return ''
-    blob = detail.get('product') or detail.get('item') or detail.get('data') or detail
-    if not isinstance(blob, dict):
-        return ''
-
-    def _from_category_obj(obj) -> str:
-        if not isinstance(obj, dict):
-            return ''
-        for key in ('category_id', 'id', 'product_category_id'):
-            v = obj.get(key)
-            if v not in (None, '', [], {}):
-                return str(v).strip()
-        return ''
-
-    for key in ('category_id', 'product_category_id', 'primary_category_id'):
-        v = blob.get(key)
-        if v not in (None, '', [], {}):
-            return str(v).strip()
-
-    cat = blob.get('category')
-    if cat is not None:
-        if isinstance(cat, dict):
-            out = _from_category_obj(cat)
-            if out:
-                return out
-        elif isinstance(cat, str) and cat.strip().isdigit():
-            return cat.strip()
-
-    for list_key in ('categories', 'product_categories', 'category_list'):
-        rows = blob.get(list_key)
-        if not isinstance(rows, list):
-            continue
-        for row in rows:
-            if isinstance(row, dict):
-                out = _from_category_obj(row)
-                if out:
-                    return out
-            elif isinstance(row, str) and row.strip():
-                return row.strip()
-    return ''
+    return _extract_zoho_category_id(detail)
 
 
 class RelatedProductSuggestionListAPIView(generics.ListAPIView):

@@ -83,6 +83,16 @@ class Product(models.Model):
     image_url = models.URLField(max_length=500, blank=True)
     is_active = models.BooleanField(default=True)
     zoho_product_id = models.CharField(max_length=120, blank=True)
+    zoho_category_id = models.CharField(
+        max_length=120,
+        blank=True,
+        help_text='Zoho Commerce category id when known (from product sync/detail).',
+    )
+    zoho_collection_id = models.CharField(
+        max_length=120,
+        blank=True,
+        help_text='Zoho Commerce collection id when present on product payload.',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

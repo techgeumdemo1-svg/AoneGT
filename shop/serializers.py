@@ -100,11 +100,23 @@ def _returns_refund_total(order: Order) -> Decimal:
 
 class ProductMiniSerializer(serializers.ModelSerializer):
     image_url = serializers.SerializerMethodField()
+    category_id = serializers.CharField(source='zoho_category_id', read_only=True)
+    collection_id = serializers.CharField(source='zoho_collection_id', read_only=True)
 
     class Meta:
         model = Product
         fields = (
-            'id', 'name', 'slug', 'category', 'sku', 'price', 'currency', 'image_url',
+            'id',
+            'name',
+            'slug',
+            'category',
+            'category_id',
+            'collection_id',
+            'sku',
+            'zoho_product_id',
+            'price',
+            'currency',
+            'image_url',
         )
 
     @staticmethod

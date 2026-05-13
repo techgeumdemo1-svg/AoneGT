@@ -12,6 +12,10 @@ from django.utils import timezone
 from django.shortcuts import get_object_or_404, redirect
 from django.utils.text import slugify
 from catalog.models import Store, Product
+from catalog.services.zoho_product_ids import (
+    extract_zoho_category_id_from_detail,
+    extract_zoho_collection_id_from_detail,
+)
 from catalog.text_utils import html_to_plain_text
 from zoho_integration.models import ZohoCommerceAccount
 from zoho_integration.services import ZohoCommerceService as ZohoAccountService
@@ -253,6 +257,15 @@ def _upsert_local_product_from_zoho(store: Store, zoho_product_id: str, payload:
     resolved_currency = currency[:8] if currency else (product.currency or 'AED')
     resolved_image_url = image_url[:500] if image_url else (product.image_url or '')
 
+    z_cat = (extract_zoho_category_id_from_detail(payload) or '').strip()[:120]
+    z_col = (extract_zoho_collection_id_from_detail(payload) or '').strip()[:120]
+    resolved_zoho_category_id = (
+        z_cat if z_cat else ((product.zoho_category_id or '')[:120] if product.pk else '')
+    )
+    resolved_zoho_collection_id = (
+        z_col if z_col else ((product.zoho_collection_id or '')[:120] if product.pk else '')
+    )
+
     # Keep existing non-zero price when payload only has fallback 0.
     resolved_price = price
     if product.pk:
@@ -286,6 +299,8 @@ def _upsert_local_product_from_zoho(store: Store, zoho_product_id: str, payload:
     product.compare_at_price = resolved_compare_at_price
     product.currency = resolved_currency
     product.image_url = resolved_image_url
+    product.zoho_category_id = resolved_zoho_category_id
+    product.zoho_collection_id = resolved_zoho_collection_id
     product.is_active = True
     product.save()
     return product
@@ -910,8 +925,11 @@ class CartAddItemAPIView(APIView):
         if err:
             return Response({'detail': err}, status=st)
         result = dict(data)
+        result['zoho_product_id'] = str(zoho_product_id)
         product_info = result.get('product') or {}
         if isinstance(product_info, dict):
+            result['category_id'] = (product_info.get('category_id') or '').strip()
+            result['collection_id'] = (product_info.get('collection_id') or '').strip()
             current_image = (product_info.get('image_url') or '').strip()
             if (
                 not current_image
