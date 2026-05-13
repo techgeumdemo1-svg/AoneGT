@@ -29,7 +29,8 @@ INSTALLED_APPS = [
     'catalog',
     'shop',
     'zoho_integration',
-    'offers',
+    'offer',
+    # 'offers',
     'superuser',
     
 ]

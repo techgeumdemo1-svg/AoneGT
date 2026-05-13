@@ -42,6 +42,13 @@ from .models import (
     WishlistItem,
 )
 from .services.zoho_commerce import ZohoCommerceError, ZohoCommerceService
+from offer.services import (
+    calculate_coupon_discount,
+    coupon_is_applicable,
+    get_cart_context,
+    get_coupon_for_checkout,
+    increment_coupon_usage,
+)
 from .serializers import (
     CartSerializer,
     CartAddFromZohoAccountSerializer,
@@ -1130,6 +1137,8 @@ class CheckoutAPIView(APIView):
         items = list(ser.validated_data['checkout_items'])
         points_to_redeem_req = int(ser.validated_data.get('points_to_redeem') or 0)
         coupon_code_in = (ser.validated_data.get('loyalty_coupon_code') or '').strip()
+        offer_coupon_code = (ser.validated_data.get('coupon_code') or '').strip()
+        offer_coupon_discount = ser.validated_data.get('coupon_discount')
 
         if getattr(settings, 'CHECKOUT_TRUST_CLIENT_SHIPPING', False):
             shipping_amount = ser.validated_data.get('shipping_amount') or Decimal('0')
@@ -1169,6 +1178,9 @@ class CheckoutAPIView(APIView):
         loyalty_points_redeemed = 0
         coupon_row = None
         points_awarded = 0
+        offer_coupon = None
+        live_redemption = 0
+        offer_coupon_discount_value = Decimal('0')
 
         with transaction.atomic():
             locked_user = User.objects.select_for_update().get(pk=request.user.pk)
@@ -1220,7 +1232,23 @@ class CheckoutAPIView(APIView):
                 locked_user.points_balance = bal - actual_pts
                 locked_user.save(update_fields=['points_balance'])
 
+            if offer_coupon_code:
+                offer_coupon = get_coupon_for_checkout(store, offer_coupon_code)
+                if offer_coupon is None:
+                    return Response({'error': 'Coupon not found'}, status=status.HTTP_400_BAD_REQUEST)
+                local_redemption = int(offer_coupon.redemption_count or 0)
+                local_max = int(offer_coupon.max_redemption_count or 0)
+                if local_max > 0 and local_redemption >= local_max:
+                    return Response(
+                        {'error': 'Sorry, this coupon is no longer available. Please place your order without it.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if offer_coupon_discount is not None:
+                    offer_coupon_discount_value = Decimal(str(offer_coupon_discount)).quantize(Decimal('0.01'))
+
             final_total = (gross_total - loyalty_discount).quantize(Decimal('0.01'))
+            if offer_coupon is not None:
+                final_total = (final_total - offer_coupon_discount_value).quantize(Decimal('0.01'))
             if final_total < 0:
                 final_total = Decimal('0')
 
@@ -1254,6 +1282,17 @@ class CheckoutAPIView(APIView):
                     line_total=line,
                 )
             CartItem.objects.filter(pk__in=[i.pk for i in items]).delete()
+
+            if offer_coupon is not None:
+                try:
+                    increment_coupon_usage(
+                        offer_coupon,
+                        order_id=order.pk,
+                        user_id=request.user.pk,
+                        discount_amount=offer_coupon_discount_value,
+                    )
+                except Exception:
+                    pass
 
             if coupon_row:
                 coupon_row.used_at = timezone.now()
