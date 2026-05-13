@@ -181,6 +181,8 @@ def coupon_is_applicable(coupon: Coupon, user, cart_items: list[dict[str, Any]],
             or _json_list(eligible_products.get('collections'))
         ):
             return True, ''
+        if not cart_items:
+            return True, ''
         if _matched_line_total(
             cart_items,
             product_ids=_json_list(eligible_products.get('products')),
@@ -343,7 +345,7 @@ def sync_coupon_from_payload(store: Store, payload: dict[str, Any]) -> Coupon | 
     if not bool(payload.get('is_active')):
         Coupon.objects.filter(coupon_id=coupon_id, org_id=org_id).delete()
         return None
-    coupon, _ = Coupon.objects.get_or_create(coupon_id=coupon_id, org_id=org_id)
+    coupon, created = Coupon.objects.get_or_create(coupon_id=coupon_id, org_id=org_id)
     coupon.couponset_id = str(payload.get('couponset_id') or payload.get('coupon_set_id') or '').strip()
     coupon.coupon_name = str(payload.get('coupon_name') or payload.get('name') or '').strip()
     coupon.coupon_code = str(payload.get('coupon_code') or payload.get('code') or '').strip()
@@ -367,7 +369,8 @@ def sync_coupon_from_payload(store: Store, payload: dict[str, Any]) -> Coupon | 
     coupon.max_discount_amount = str(payload.get('max_discount_amount') or '').strip()
     coupon.max_redemption = int(payload.get('max_redemption') or 0)
     coupon.max_redemption_count = int(payload.get('max_redemption_count') or 0)
-    coupon.redemption_count = int(payload.get('redemption_count') or 0)
+    if created:
+        coupon.redemption_count = int(payload.get('redemption_count') or 0)
     coupon.max_redemption_count_per_user = int(payload.get('max_redemption_count_per_user') or 0)
     coupon.max_usage_per_transaction = int(payload.get('max_usage_per_transaction') or 0)
     coupon.max_discounted_product_count_per_cart = str(payload.get('max_discounted_product_count_per_cart') or '').strip()

@@ -44,9 +44,7 @@ from offer.services import (
     coupon_is_applicable,
     get_cart_context,
     get_coupon_for_checkout,
-    get_live_coupon_for_checkout,
     increment_coupon_usage,
-    patch_coupon_redemption_count,
 )
 from .serializers import (
     CartSerializer,
@@ -1230,10 +1228,9 @@ class CheckoutAPIView(APIView):
                 offer_coupon = get_coupon_for_checkout(store, offer_coupon_code)
                 if offer_coupon is None:
                     return Response({'error': 'Coupon not found'}, status=status.HTTP_400_BAD_REQUEST)
-                live_payload = get_live_coupon_for_checkout(store, offer_coupon)
-                live_redemption = int(live_payload.get('redemption_count') or 0)
-                live_max = int(live_payload.get('max_redemption_count') or 0)
-                if live_max > 0 and live_redemption >= live_max:
+                local_redemption = int(offer_coupon.redemption_count or 0)
+                local_max = int(offer_coupon.max_redemption_count or 0)
+                if local_max > 0 and local_redemption >= local_max:
                     return Response(
                         {'error': 'Sorry, this coupon is no longer available. Please place your order without it.'},
                         status=status.HTTP_400_BAD_REQUEST,
@@ -1279,10 +1276,6 @@ class CheckoutAPIView(APIView):
             CartItem.objects.filter(pk__in=[i.pk for i in items]).delete()
 
             if offer_coupon is not None:
-                try:
-                    patch_coupon_redemption_count(store, offer_coupon, live_redemption + 1)
-                except Exception:
-                    pass
                 try:
                     increment_coupon_usage(
                         offer_coupon,
