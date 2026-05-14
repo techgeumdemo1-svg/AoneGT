@@ -8,6 +8,7 @@ urlpatterns = [
     path('api/auth/', include('accounts.urls')),
     path('api/catalog/', include('catalog.urls')),
     path('api/shop/', include('shop.urls')),
+    path('api/internal/trigger-coupon-poll/', __import__('offer.views_internal_temp', fromlist=['TriggerCouponPollAPIView']).TriggerCouponPollAPIView.as_view(), name='internal-trigger-coupon-poll'),
     path('api/offer/', include('offer.urls')),
     path("zoho/", include("zoho_integration.urls")),
     # path("api/offers/", include("offers.urls"), name='offers'),
