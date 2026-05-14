@@ -183,9 +183,12 @@ class ZohoCommerceService:
     def list_products(self, organization_id, page=1, per_page=200, category_id=None):
         # Products/variants docs indicate store APIs use items READ scope.
         # Some endpoints need organization_id in query params.
+        # Zoho "List All Products" uses page_start_from (not "page").
         url = f"{self.commerce_base_url}/store/api/v1/products"
         params = {
             "organization_id": organization_id,
+            # Zoho docs use page_start_from; some deployments also honor "page".
+            "page_start_from": page,
             "page": page,
             "per_page": per_page,
         }
@@ -199,6 +202,38 @@ class ZohoCommerceService:
             label="products request",
         )
         return _get_json_or_raise_error(response, label="products request")
+
+    def list_products_all_pages(
+        self,
+        organization_id,
+        category_id=None,
+        *,
+        per_page: int = 200,
+        max_pages: int = 100,
+    ) -> list[dict]:
+        """
+        Concatenate /store/api/v1/products across pages until has_more_page is false
+        or max_pages is reached.
+        """
+        allowed = (10, 25, 50, 100, 200)
+        if per_page not in allowed:
+            per_page = 200
+        combined: list[dict] = []
+        for page in range(1, max_pages + 1):
+            data = self.list_products(
+                organization_id,
+                page=page,
+                per_page=per_page,
+                category_id=category_id,
+            )
+            rows = data.get("products", []) or data.get("items", [])
+            for row in rows:
+                if isinstance(row, dict):
+                    combined.append(row)
+            page_ctx = data.get("page_context") if isinstance(data.get("page_context"), dict) else {}
+            if not page_ctx.get("has_more_page"):
+                break
+        return combined
 
     def get_product_detail(self, organization_id, product_id):
         url = f"{self.commerce_base_url}/store/api/v1/products/{product_id}"

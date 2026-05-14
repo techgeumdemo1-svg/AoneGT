@@ -203,6 +203,12 @@ ZOHO_IMAGE_PLACEHOLDER_URL = os.getenv(
     'ZOHO_IMAGE_PLACEHOLDER_URL',
     'https://placehold.co/600x600?text=No+Image',
 ).strip()
+# Comma-separated Zoho storefront collection ids to probe when saving a product
+# (Storefront Get Collection API). See zoho_integration.storefront_collections.
+ZOHO_COLLECTION_PROBE_IDS = os.getenv('ZOHO_COLLECTION_PROBE_IDS', '').strip()
+# Optional default Zoho storefront collection id for GET /zoho/multi/best-deals/
+# when the client omits collection_id (same Storefront Get Collection API).
+ZOHO_BEST_DEALS_COLLECTION_ID = os.getenv('ZOHO_BEST_DEALS_COLLECTION_ID', '').strip()
 
 
 ZOHO_REDIRECT_URI = os.getenv("ZOHO_REDIRECT_URI")

@@ -10,6 +10,11 @@ from rest_framework import status
 
 from .models import ZohoCommerceAccount
 from .services import ZohoCommerceService
+from .storefront_collections import (
+    extract_storefront_collection_name,
+    extract_storefront_collection_products,
+    fetch_storefront_collection_json,
+)
 from catalog.models import Store
 from catalog.text_utils import html_to_plain_text
 
@@ -759,25 +764,32 @@ class MultiAccountZohoStoreListAPIView(APIView):
         }, status=status.HTTP_200_OK)
 
 
-def _multi_account_product_list_response(request, account, organization_id: str):
-    service = ZohoCommerceService(account)
-    category_id = (request.GET.get("category_id") or "").strip() or None
-    include_descendants = _as_bool(request.GET.get("include_descendants"), default=True)
+def _zoho_product_rows_for_org(
+    service: ZohoCommerceService,
+    organization_id: str,
+    *,
+    category_id: Optional[str],
+    include_descendants: bool,
+    max_pages: int = 100,
+) -> list[dict]:
+    """Load raw product dicts from Zoho (same rules as GET /zoho/multi/products/)."""
+    cat = (category_id or "").strip() or None
 
-    if category_id and include_descendants:
+    if cat and include_descendants:
         category_data = service.list_categories(organization_id=organization_id)
         category_rows = category_data.get("categories", []) or category_data.get("category", [])
         category_rows = [c for c in category_rows if isinstance(c, dict)]
-        category_ids = _collect_category_and_descendants(category_rows, category_id)
+        category_ids = _collect_category_and_descendants(category_rows, cat)
 
-        products = []
+        products: list[dict] = []
         seen_product_ids: set[str] = set()
         for current_category_id in category_ids:
-            data = service.list_products(
-                organization_id=organization_id,
+            rows = service.list_products_all_pages(
+                organization_id,
                 category_id=current_category_id,
+                per_page=200,
+                max_pages=max_pages,
             )
-            rows = data.get("products", []) or data.get("items", [])
             for row in rows:
                 if not isinstance(row, dict):
                     continue
@@ -792,37 +804,22 @@ def _multi_account_product_list_response(request, account, organization_id: str)
                 if pid:
                     seen_product_ids.add(pid)
                 products.append(row)
-    else:
-        data = service.list_products(
-            organization_id=organization_id,
-            category_id=category_id,
-        )
-        products = data.get("products", []) or data.get("items", [])
-    products = [p for p in products if isinstance(p, dict)]
+        return products
 
-    exclude_pid = (
-        (request.GET.get("exclude_product_id") or request.GET.get("exclude_zoho_product_id") or "")
-        .strip()
+    return service.list_products_all_pages(
+        organization_id,
+        category_id=cat,
+        per_page=200,
+        max_pages=max_pages,
     )
-    if exclude_pid:
-        products = [
-            p
-            for p in products
-            if str(p.get("product_id") or p.get("item_id") or p.get("id") or "").strip() != exclude_pid
-        ]
 
-    limit_raw = (request.GET.get("limit") or "").strip()
-    limit_applied = None
-    if limit_raw:
-        try:
-            lim = int(limit_raw)
-        except ValueError:
-            lim = 0
-        if lim > 0:
-            limit_applied = min(lim, 200)
-            products = products[:limit_applied]
 
-    # Enrich missing prices from product detail endpoint.
+def _enrich_zoho_list_product_rows_from_detail(
+    service: ZohoCommerceService,
+    organization_id: str,
+    products: list[dict],
+) -> None:
+    """Fill missing rate/sku/image on list rows using product detail (in place)."""
     for product in products:
         if _extract_price(product) not in ("0", "0.00"):
             continue
@@ -855,6 +852,43 @@ def _multi_account_product_list_response(request, account, organization_id: str)
                 detail_image = _extract_image_url(detail_product)
                 if detail_image:
                     product["image_url"] = detail_image
+
+
+def _multi_account_product_list_response(request, account, organization_id: str):
+    service = ZohoCommerceService(account)
+    category_id = (request.GET.get("category_id") or "").strip() or None
+    include_descendants = _as_bool(request.GET.get("include_descendants"), default=True)
+
+    products = _zoho_product_rows_for_org(
+        service,
+        organization_id,
+        category_id=category_id,
+        include_descendants=include_descendants,
+    )
+
+    exclude_pid = (
+        (request.GET.get("exclude_product_id") or request.GET.get("exclude_zoho_product_id") or "")
+        .strip()
+    )
+    if exclude_pid:
+        products = [
+            p
+            for p in products
+            if str(p.get("product_id") or p.get("item_id") or p.get("id") or "").strip() != exclude_pid
+        ]
+
+    limit_raw = (request.GET.get("limit") or "").strip()
+    limit_applied = None
+    if limit_raw:
+        try:
+            lim = int(limit_raw)
+        except ValueError:
+            lim = 0
+        if lim > 0:
+            limit_applied = min(lim, 200)
+            products = products[:limit_applied]
+
+    _enrich_zoho_list_product_rows_from_detail(service, organization_id, products)
 
     store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
     store_domain = (getattr(store, "zoho_store_domain", "") or "").strip() if store else ""
@@ -965,13 +999,71 @@ class MultiAccountZohoProductListQueryAPIView(APIView):
             }, status=400)
 
 
+def _product_row_search_haystack(row: dict) -> str:
+    """
+    Lowercased text blob for substring search against Zoho list-product rows.
+    Includes variant-level names/SKUs (parent name is often generic when has_variant is true).
+    """
+    parts: list[str] = []
+
+    def _add(value) -> None:
+        s = str(value or "").strip()
+        if s:
+            parts.append(s)
+
+    _add(row.get("name") or row.get("product_name") or row.get("item_name"))
+    _add(row.get("sku") or row.get("product_sku"))
+    _add(row.get("product_id") or row.get("item_id") or row.get("id"))
+    _add(row.get("url"))
+    _add(row.get("seo_keyword"))
+    _add(row.get("brand"))
+    _add(row.get("manufacturer"))
+    _add(row.get("part_number"))
+    _add(row.get("category_name"))
+    cat = row.get("category")
+    if isinstance(cat, dict):
+        _add(cat.get("category_name") or cat.get("name"))
+    elif isinstance(cat, str):
+        _add(cat)
+
+    for key in ("description", "product_description", "product_short_description"):
+        raw = row.get(key)
+        if raw:
+            _add(str(raw)[:500])
+
+    tags = row.get("tags")
+    if isinstance(tags, list):
+        for t in tags:
+            if isinstance(t, dict):
+                _add(t.get("tag_name") or t.get("name"))
+            elif isinstance(t, str):
+                _add(t)
+
+    variants = row.get("variants")
+    if isinstance(variants, list):
+        for v in variants:
+            if not isinstance(v, dict):
+                continue
+            _add(v.get("name") or v.get("product_name"))
+            _add(v.get("sku") or v.get("product_sku"))
+            _add(v.get("variant_id") or v.get("id"))
+            _add(v.get("ean") or v.get("upc") or v.get("isbn"))
+
+    return " ".join(parts).lower()
+
+
 class MultiAccountZohoProductSearchAPIView(APIView):
     """
+    Same style as GET /zoho/multi/categories/search/ — text match on the product pool.
+
     Query params:
       - account_id (required)
       - organization_id (required)
-      - query (required, alias: q): case-insensitive search text
+      - query (required, alias: q): case-insensitive substring on names, SKUs, ids, url, seo,
+        descriptions, tags, and variant rows
       - limit (optional, default=20, max=100)
+      - category_id (optional): limit search to this Zoho category (same as /zoho/multi/products/)
+      - include_descendants (optional, default true): with category_id, include child categories
     """
 
     def get(self, request):
@@ -979,6 +1071,8 @@ class MultiAccountZohoProductSearchAPIView(APIView):
         organization_id = (request.GET.get("organization_id") or "").strip()
         query = (request.GET.get("query") or request.GET.get("q") or "").strip()
         limit_raw = (request.GET.get("limit") or "").strip()
+        category_id = (request.GET.get("category_id") or "").strip() or None
+        include_descendants = _as_bool(request.GET.get("include_descendants"), default=True)
 
         if not account_id_raw:
             return Response(
@@ -1026,25 +1120,22 @@ class MultiAccountZohoProductSearchAPIView(APIView):
 
         service = ZohoCommerceService(account)
         try:
-            data = service.list_products(organization_id=organization_id, page=1, per_page=200)
-            products = data.get("products", []) or data.get("items", [])
-            products = [p for p in products if isinstance(p, dict)]
+            products = _zoho_product_rows_for_org(
+                service,
+                organization_id,
+                category_id=category_id,
+                include_descendants=include_descendants,
+            )
             needle = query.lower()
 
-            matched_rows = []
+            matched_rows: list[dict] = []
             for row in products:
-                product_name = str(
-                    row.get("name")
-                    or row.get("product_name")
-                    or row.get("item_name")
-                    or ""
-                ).strip()
-                sku = str(row.get("sku") or row.get("product_sku") or "").strip()
-                product_id = str(row.get("product_id") or row.get("item_id") or row.get("id") or "").strip()
-
-                haystack = " ".join([product_name, sku, product_id]).lower()
+                haystack = _product_row_search_haystack(row)
                 if needle in haystack:
                     matched_rows.append(row)
+
+            matched_rows = matched_rows[:limit]
+            _enrich_zoho_list_product_rows_from_detail(service, organization_id, matched_rows)
 
             store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
             store_domain = (getattr(store, "zoho_store_domain", "") or "").strip() if store else ""
@@ -1069,7 +1160,6 @@ class MultiAccountZohoProductSearchAPIView(APIView):
                         f"/api/shop/zoho-products/{pid}/image/?store_id={store.pk}"
                     )
 
-            product_summaries = product_summaries[:limit]
             return Response(
                 {
                     "status": "success",
@@ -1077,7 +1167,10 @@ class MultiAccountZohoProductSearchAPIView(APIView):
                     "account_name": account.name,
                     "account_email": account.email,
                     "organization_id": organization_id,
+                    "category_id": category_id,
+                    "include_descendants": include_descendants,
                     "query": query,
+                    "scanned": len(products),
                     "count": len(product_summaries),
                     "products": product_summaries,
                 },
@@ -1088,6 +1181,150 @@ class MultiAccountZohoProductSearchAPIView(APIView):
                 {"status": "error", "message": str(e)},
                 status=400,
             )
+
+
+class MultiAccountZohoBestDealsAPIView(APIView):
+    """
+    Products in a Zoho Storefront collection (e.g. a curated "Best deals" collection).
+
+    Uses the public Storefront Get Collection API (same collection ids as admin / probes).
+
+    Query params:
+      - account_id (required)
+      - organization_id (required)
+      - collection_id (optional): defaults to ZOHO_BEST_DEALS_COLLECTION_ID in settings
+      - limit (optional, default 50, max 200)
+
+    Requires a catalog Store with zoho_org_id matching organization_id and zoho_store_domain set.
+    """
+
+    def get(self, request):
+        account_id_raw = (request.GET.get("account_id") or "").strip()
+        organization_id = (request.GET.get("organization_id") or "").strip()
+        collection_id = (request.GET.get("collection_id") or "").strip()
+        if not collection_id:
+            collection_id = str(getattr(settings, "ZOHO_BEST_DEALS_COLLECTION_ID", "") or "").strip()
+        limit_raw = (request.GET.get("limit") or "").strip()
+
+        if not account_id_raw:
+            return Response(
+                {"status": "error", "message": "account_id query parameter is required"},
+                status=400,
+            )
+        if not organization_id:
+            return Response(
+                {"status": "error", "message": "organization_id query parameter is required"},
+                status=400,
+            )
+        if not collection_id:
+            return Response(
+                {
+                    "status": "error",
+                    "message": (
+                        "collection_id query parameter is required "
+                        "(or set ZOHO_BEST_DEALS_COLLECTION_ID)"
+                    ),
+                },
+                status=400,
+            )
+
+        try:
+            account_id = int(account_id_raw)
+        except ValueError:
+            return Response(
+                {"status": "error", "message": "account_id must be an integer"},
+                status=400,
+            )
+
+        try:
+            limit = int(limit_raw) if limit_raw else 50
+        except ValueError:
+            return Response(
+                {"status": "error", "message": "limit must be an integer"},
+                status=400,
+            )
+        if limit < 1:
+            limit = 1
+        if limit > 200:
+            limit = 200
+
+        try:
+            account = ZohoCommerceAccount.objects.get(id=account_id, is_active=True)
+        except ZohoCommerceAccount.DoesNotExist:
+            return Response(
+                {"status": "error", "message": "Zoho account not found"},
+                status=404,
+            )
+
+        store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
+        if not store:
+            return Response(
+                {
+                    "status": "error",
+                    "message": "No catalog store found for this organization_id",
+                },
+                status=404,
+            )
+        store_domain = (getattr(store, "zoho_store_domain", "") or "").strip()
+        host = store_domain.replace("https://", "").replace("http://", "").split("/")[0].lower()
+        if not host:
+            return Response(
+                {
+                    "status": "error",
+                    "message": "Store zoho_store_domain must be set for storefront collection fetch",
+                },
+                status=400,
+            )
+
+        commerce_url = (getattr(account, "commerce_base_url", "") or "").strip() or "https://commerce.zoho.com"
+        payload = fetch_storefront_collection_json(commerce_url, host, collection_id)
+        if not payload:
+            return Response(
+                {
+                    "status": "error",
+                    "message": "Storefront collection response empty or unavailable",
+                },
+                status=502,
+            )
+
+        raw_products = extract_storefront_collection_products(payload)
+        collection_name = extract_storefront_collection_name(payload)
+        raw_products = raw_products[:limit]
+
+        product_summaries = [_product_summary(p, store_domain=store_domain) for p in raw_products]
+        for row in product_summaries:
+            current_image = (row.get("image_url") or "").strip()
+            normalized_image = build_image_url(store_domain, current_image)
+            if normalized_image:
+                row["image_url"] = normalized_image
+                continue
+            if current_image and (
+                current_image.startswith("http://")
+                or current_image.startswith("https://")
+                or current_image.startswith("/")
+            ):
+                continue
+            pid = (row.get("product_id") or "").strip()
+            if not pid:
+                continue
+            row["image_url"] = request.build_absolute_uri(
+                f"/api/shop/zoho-products/{pid}/image/?store_id={store.pk}"
+            )
+
+        return Response(
+            {
+                "status": "success",
+                "account_id": account.id,
+                "account_name": account.name,
+                "account_email": account.email,
+                "organization_id": organization_id,
+                "collection_id": collection_id,
+                "collection_name": collection_name,
+                "count": len(product_summaries),
+                "products": product_summaries,
+            },
+            status=200,
+        )
 
 
 class MultiAccountZohoProductDetailQueryAPIView(APIView):

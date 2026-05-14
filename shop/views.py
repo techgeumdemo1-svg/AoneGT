@@ -17,6 +17,10 @@ from catalog.services.zoho_product_ids import (
     extract_zoho_collection_id_from_detail,
 )
 from catalog.text_utils import html_to_plain_text
+from zoho_integration.storefront_collections import (
+    backfill_product_collection_id_if_empty,
+    resolve_zoho_collection_id_via_storefront,
+)
 from zoho_integration.models import ZohoCommerceAccount
 from zoho_integration.services import ZohoCommerceService as ZohoAccountService
 from rest_framework import generics, status
@@ -259,6 +263,8 @@ def _upsert_local_product_from_zoho(store: Store, zoho_product_id: str, payload:
 
     z_cat = (extract_zoho_category_id_from_detail(payload) or '').strip()[:120]
     z_col = (extract_zoho_collection_id_from_detail(payload) or '').strip()[:120]
+    if not z_col:
+        z_col = (resolve_zoho_collection_id_via_storefront(store, zoho_product_id) or '').strip()[:120]
     resolved_zoho_category_id = (
         z_cat if z_cat else ((product.zoho_category_id or '')[:120] if product.pk else '')
     )
@@ -588,6 +594,9 @@ def _perform_cart_add_zoho_product(
                 'Unable to fetch complete product name/price from Zoho for this item.',
                 status.HTTP_502_BAD_GATEWAY,
             )
+
+    if product is not None:
+        backfill_product_collection_id_if_empty(store, product, zoho_product_id)
 
     with transaction.atomic():
         cart, _ = Cart.objects.select_for_update().get_or_create(user=user)

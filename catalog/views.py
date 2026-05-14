@@ -370,6 +370,9 @@ class RelatedProductSuggestionListAPIView(generics.ListAPIView):
     - Standalone Zoho related (no catalog Product row): response_source=zoho + account_id +
       organization_id + category_id (or zoho_category_id) + exclude_product_id (or exclude_zoho_product_id);
       omit product_id and zoho_product_id. limit max 200 for this mode.
+    - Zoho-only anchor (no local Product): response_source=zoho + organization_id or store_id +
+      zoho_product_id (omit product_id). Category from Zoho product detail unless category_id /
+      zoho_category_id is passed. Peers from Zoho; anchor excluded by Zoho id. limit max 20.
     """
 
     serializer_class = ProductListSerializer
@@ -798,6 +801,93 @@ class RelatedProductSuggestionListAPIView(generics.ListAPIView):
             extra={'exclude_product_id': exclude},
         )
 
+    def _list_zoho_related_anchor_without_local_catalog_row(
+        self,
+        request,
+        *,
+        store: Store,
+        zoho_product_id: str,
+    ) -> Response:
+        """
+        response_source=zoho: anchor identified only by Zoho id (no catalog Product row).
+        Resolve category from Zoho detail or from category_id / zoho_category_id query params.
+        """
+        anchor = (zoho_product_id or '').strip()
+        if not anchor:
+            raise ValidationError({'zoho_product_id': 'Required.'})
+
+        raw_limit = request.query_params.get('limit', 10)
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            limit = 10
+        limit = max(1, min(limit, 20))
+
+        zoho_category_id = (
+            (request.query_params.get('zoho_category_id') or '').strip()
+            or (request.query_params.get('category_id') or '').strip()
+        )
+        org, account, service = self._zoho_org_account_service(store)
+
+        if not zoho_category_id:
+            try:
+                detail_data = service.get_product_detail(
+                    organization_id=org,
+                    product_id=anchor,
+                )
+            except Exception as e:
+                raise ValidationError(
+                    {'zoho_product_id': f'Zoho product detail failed: {e}'},
+                ) from e
+            detail_product = (
+                detail_data.get('product')
+                or detail_data.get('item')
+                or detail_data.get('data')
+                or {}
+            )
+            if not isinstance(detail_product, dict):
+                raise ValidationError(
+                    {'zoho_product_id': 'Invalid Zoho product detail payload for this id.'},
+                )
+            zoho_category_id = _related_extract_zoho_category_id_from_detail(detail_product)
+
+        if not zoho_category_id:
+            raise ValidationError(
+                {
+                    'zoho_category_id': (
+                        'Could not infer Zoho category from product detail; pass category_id '
+                        '(or zoho_category_id).'
+                    ),
+                },
+            )
+
+        include_descendants = _related_as_bool(
+            request.query_params.get('include_descendants'),
+            default=True,
+        )
+        try:
+            category_ids = self._zoho_category_id_list(
+                service, org, zoho_category_id, include_descendants,
+            )
+            rows = self._zoho_peer_raw_rows(service, org, category_ids, anchor)
+        except ValidationError:
+            raise
+        except Exception as e:
+            raise ValidationError({'zoho_category_id': f'Zoho request failed: {e}'}) from e
+
+        return self._finalize_zoho_related_products(
+            request,
+            org=org,
+            account=account,
+            service=service,
+            rows=rows,
+            zoho_category_id=zoho_category_id,
+            include_descendants=include_descendants,
+            store=store,
+            limit=limit,
+            extra={'anchor_source': 'zoho_id_only'},
+        )
+
     def list(self, request, *args, **kwargs):
         if not self._related_wants_zoho_direct_response():
             return super().list(request, *args, **kwargs)
@@ -808,6 +898,22 @@ class RelatedProductSuggestionListAPIView(generics.ListAPIView):
             cat = (qp.get('category_id') or qp.get('zoho_category_id') or '').strip()
             if cat and not has_anchor:
                 return self._list_zoho_related_standalone(request, zoho_category_id=cat)
+
+        zoho_pid_only = (qp.get('zoho_product_id') or '').strip()
+        product_id_only = (qp.get('product_id') or '').strip()
+        if zoho_pid_only and not product_id_only:
+            store_for_anchor = self._resolve_store()
+            has_local = Product.objects.filter(
+                store=store_for_anchor,
+                zoho_product_id=zoho_pid_only,
+                is_active=True,
+            ).exists()
+            if not has_local:
+                return self._list_zoho_related_anchor_without_local_catalog_row(
+                    request,
+                    store=store_for_anchor,
+                    zoho_product_id=zoho_pid_only,
+                )
 
         store, product = self._resolve_store_and_product()
         raw_limit = request.query_params.get('limit', 10)
