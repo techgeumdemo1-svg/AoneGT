@@ -7,6 +7,7 @@ from .views import (
     MultiAccountZohoProductSearchAPIView,
     MultiAccountZohoProductDetailQueryAPIView,
     MultiAccountZohoCategoryListQueryAPIView,
+    MultiAccountZohoCategoryListAonegtGroceryQueryAPIView,
     MultiAccountZohoSubCategoryListQueryAPIView,
     MultiAccountZohoCategorySearchAPIView,
     MultiAccountZohoCategoryImageProxyAPIView,
@@ -21,6 +22,10 @@ urlpatterns = [
     path("multi/products/search/", MultiAccountZohoProductSearchAPIView.as_view()),
     path("multi/best-deals/", MultiAccountZohoBestDealsAPIView.as_view()),
     path("multi/product-detail/", MultiAccountZohoProductDetailQueryAPIView.as_view()),
+    path(
+        "multi/categories/aonegt-grocery/",
+        MultiAccountZohoCategoryListAonegtGroceryQueryAPIView.as_view(),
+    ),
     path("multi/categories/", MultiAccountZohoCategoryListQueryAPIView.as_view()),
     path("multi/subcategories/", MultiAccountZohoSubCategoryListQueryAPIView.as_view()),
     path("multi/categories/search/", MultiAccountZohoCategorySearchAPIView.as_view()),

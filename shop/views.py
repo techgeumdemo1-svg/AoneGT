@@ -1981,7 +1981,7 @@ class NotificationPagination(PageNumberPagination):
 
 
 class NotificationListAPIView(generics.ListAPIView):
-    """GET — paginated in-app notifications for the current user."""
+    """GET — paginated in-app notifications. PATCH — mark one read via ?id=<pk>."""
 
     permission_classes = [IsAuthenticated]
     serializer_class = UserNotificationSerializer
@@ -1996,6 +1996,23 @@ class NotificationListAPIView(generics.ListAPIView):
         if kind:
             qs = qs.filter(kind=kind)
         return qs
+
+    def patch(self, request):
+        raw_id = (request.query_params.get('id') or '').strip()
+        if not raw_id:
+            return Response(
+                {'detail': 'Query parameter "id" is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            pk = int(raw_id)
+        except ValueError:
+            return Response({'detail': 'Invalid id.'}, status=status.HTTP_400_BAD_REQUEST)
+        n = get_object_or_404(UserNotification, pk=pk, user=request.user)
+        if n.read_at is None:
+            n.read_at = timezone.now()
+            n.save(update_fields=['read_at'])
+        return Response(UserNotificationSerializer(n).data)
 
 
 class NotificationUnreadCountAPIView(APIView):
@@ -2016,15 +2033,3 @@ class NotificationMarkAllReadAPIView(APIView):
         )
         return Response({'marked': n})
 
-
-class NotificationDetailAPIView(APIView):
-    """PATCH — mark one notification read (idempotent)."""
-
-    permission_classes = [IsAuthenticated]
-
-    def patch(self, request, pk):
-        n = get_object_or_404(UserNotification, pk=pk, user=request.user)
-        if n.read_at is None:
-            n.read_at = timezone.now()
-            n.save(update_fields=['read_at'])
-        return Response(UserNotificationSerializer(n).data)

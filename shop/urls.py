@@ -21,7 +21,6 @@ from .views import (
     NotificationListAPIView,
     NotificationUnreadCountAPIView,
     NotificationMarkAllReadAPIView,
-    NotificationDetailAPIView,
     ZohoProductListAPIView,
     ZohoProductDetailAPIView,
     ZohoProductImageProxyAPIView,
@@ -48,7 +47,6 @@ urlpatterns = [
 
     path('notifications/unread-count/', NotificationUnreadCountAPIView.as_view(), name='shop-notifications-unread-count'),
     path('notifications/mark-all-read/', NotificationMarkAllReadAPIView.as_view(), name='shop-notifications-mark-all-read'),
-    path('notifications/<int:pk>/', NotificationDetailAPIView.as_view(), name='shop-notification-detail'),
     path('notifications/', NotificationListAPIView.as_view(), name='shop-notifications-list'),
 
     path('zoho-products/', ZohoProductListAPIView.as_view(), name='zoho-product-list'),

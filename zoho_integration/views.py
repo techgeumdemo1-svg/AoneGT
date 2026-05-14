@@ -2,6 +2,7 @@ from django.http import JsonResponse, HttpResponseRedirect
 from django.conf import settings
 import re
 import requests
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 from urllib.parse import quote, urlencode
 from rest_framework.views import APIView
@@ -149,6 +150,71 @@ def build_zoho_cdn_product_document_url(store_domain: str, payload: dict) -> str
     return ""
 
 
+def _explicit_product_image_url(store_domain: str, product_row: dict) -> str:
+    """
+    Image URL as returned by Zoho (absolute https). Avoids synthesizing
+    ``product-images/{document_id}/…`` which can return HTTP 400 when ``document_id``
+    is not a valid public storefront image document for that CDN path.
+    """
+    p_image = _extract_image_url(product_row)
+    p_image = build_image_url(store_domain, p_image) or p_image
+    if p_image.startswith(("http://", "https://")):
+        return p_image
+    for list_key in ("documents", "attachments", "images", "product_images"):
+        rows = product_row.get(list_key) or []
+        if not isinstance(rows, list):
+            continue
+        for doc in rows:
+            if not isinstance(doc, dict):
+                continue
+            for key in ("image_url", "url", "secure_url", "download_url", "src", "thumbnail_url", "file_url"):
+                val = doc.get(key)
+                if isinstance(val, str):
+                    candidate = val.strip().replace("&amp;", "&")
+                    if candidate.startswith(("http://", "https://")):
+                        return candidate
+    return ""
+
+
+def _best_product_fallback_image_url(
+    service: ZohoCommerceService,
+    organization_id: str,
+    store_domain: str,
+    product_rows: list,
+) -> str:
+    """
+    For category tiles: prefer real URLs from product list/detail; synthetic CDN URL last.
+    """
+    rows = [r for r in product_rows if isinstance(r, dict)]
+    for pr in rows:
+        u = _explicit_product_image_url(store_domain, pr)
+        if u:
+            return u
+    # List payloads often omit full URLs; one product detail keeps category list responsive.
+    for pr in rows[:1]:
+        pid = str(pr.get("product_id") or pr.get("item_id") or pr.get("id") or "").strip()
+        if not pid:
+            continue
+        try:
+            detail = service.get_product_detail(str(organization_id), pid)
+        except Exception:
+            continue
+        prod = detail.get("product") if isinstance(detail.get("product"), dict) else None
+        if prod is None and isinstance(detail.get("data"), dict):
+            prod = detail.get("data")
+        if prod is None and isinstance(detail, dict):
+            prod = detail
+        if isinstance(prod, dict):
+            u = _explicit_product_image_url(store_domain, prod)
+            if u:
+                return u
+    for pr in rows:
+        u = build_zoho_cdn_product_document_url(store_domain, pr)
+        if u:
+            return u
+    return ""
+
+
 def _category_summary(category: dict, fallback_image_url: str = "", store_domain: str = "") -> dict:
     extracted = _extract_image_url(category)
     image_url = build_image_url(store_domain, extracted) or extracted
@@ -264,7 +330,20 @@ def _extract_image_url(payload: dict) -> str:
                     return candidate
 
     # Some Zoho category payloads embed image tags in HTML fields.
-    for html_key in ("description_html", "description", "category_content", "content"):
+    for html_key in (
+        "description_html",
+        "description",
+        "category_content",
+        "content",
+        "long_description",
+        "category_description",
+        "category_description_html",
+        "html_description",
+        "summary",
+        "information",
+        "seo_description",
+        "meta_description",
+    ):
         raw_html = payload.get(html_key)
         if not raw_html:
             continue
@@ -1446,7 +1525,37 @@ class MultiAccountZohoProductDetailQueryAPIView(APIView):
             }, status=400)
 
 
-def _multi_account_category_list_response(request, account, organization_id: str):
+# Merged from Zoho category detail (and descendants) so _extract_image_url can read
+# ``<img src="https://cdn1.zohoecommerce.com/...">`` from description HTML.
+_CATEGORY_DETAIL_IMAGE_MERGE_KEYS = (
+    "image_url",
+    "image",
+    "image_name",
+    "image_path",
+    "document_id",
+    "documents",
+    "description_html",
+    "description",
+    "category_content",
+    "content",
+    "long_description",
+    "category_description",
+    "category_description_html",
+    "html_description",
+    "summary",
+    "information",
+    "seo_description",
+    "meta_description",
+)
+
+
+def _multi_account_category_list_response(
+    request,
+    account,
+    organization_id: str,
+    *,
+    skip_product_image_fallback: bool = False,
+):
     service = ZohoCommerceService(account)
     data = service.list_categories(organization_id=organization_id)
     categories = data.get("categories", []) or data.get("category", [])
@@ -1456,8 +1565,11 @@ def _multi_account_category_list_response(request, account, organization_id: str
     # Optional query params:
     # - category_id: return categories under this parent/root category
     # - include_descendants: whether to include all descendants (default true)
+    # - strict_category_images: if true, do not use product thumbnails as category image fallback
     query_category_id = (request.GET.get("category_id") or "").strip() or None
     include_descendants = _as_bool(request.GET.get("include_descendants"), default=True)
+    strict_category_images = _as_bool(request.GET.get("strict_category_images"), default=False)
+    skip_product_fb = bool(skip_product_image_fallback) or strict_category_images
 
     if query_category_id:
         root_id = str(query_category_id).strip()
@@ -1533,47 +1645,71 @@ def _multi_account_category_list_response(request, account, organization_id: str
         return result
 
     enriched_categories: list[dict] = []
+    ordered_pairs: list[tuple[str, dict]] = []
     for c in main_categories:
         if not _category_name(c):
             continue
         cid = str(c.get("category_id") or c.get("id") or "").strip()
         if not cid:
             continue
-        row = dict(c)
-        direct_image = (
-            row.get("image_url")
-            or row.get("image")
-            or row.get("image_name")
-            or row.get("image_path")
-            or ""
-        )
-        if not direct_image and not row.get("document_id"):
+        ordered_pairs.append((cid, dict(c)))
+
+    # One Zoho detail call per category without a list-time image — sequential calls
+    # exceed gateway timeouts (e.g. Render). Fetch details in parallel (bounded).
+    pending_ids = [cid for cid, row in ordered_pairs if not _extract_image_url(row)]
+    detail_cap = int(getattr(settings, "ZOHO_MAX_CATEGORY_DETAIL_FETCH", 24) or 24)
+    raw_lim = (request.GET.get("category_detail_limit") or "").strip()
+    if raw_lim:
+        try:
+            detail_cap = max(0, min(int(raw_lim), 80))
+        except ValueError:
+            pass
+    if detail_cap <= 0:
+        pending_ids = []
+    elif len(pending_ids) > detail_cap:
+        pending_ids = pending_ids[:detail_cap]
+    scheduled_category_detail_fetches = len(pending_ids)
+    detail_by_id: dict[str, dict] = {}
+    if pending_ids:
+        org_s = str(organization_id)
+
+        def _detail_for(cat_id: str) -> tuple[str, dict]:
             try:
                 detail = service.get_category_detail(
-                    organization_id=str(organization_id),
-                    category_id=cid,
+                    organization_id=org_s,
+                    category_id=cat_id,
                 )
-                detail_row = (
-                    detail.get("category")
-                    or detail.get("data")
-                    or {}
-                )
-                if isinstance(detail_row, dict):
-                    for key in ("image_url", "image", "image_name", "image_path", "document_id", "documents"):
-                        if key in detail_row and detail_row.get(key) not in (None, "", []):
-                            row[key] = detail_row.get(key)
+                dr = detail.get("category") or detail.get("data") or {}
+                return cat_id, (dr if isinstance(dr, dict) else {})
             except Exception:
-                pass
+                return cat_id, {}
+
+        workers = min(8, max(1, len(pending_ids)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            detail_by_id = dict(pool.map(_detail_for, pending_ids))
+
+    for cid, row in ordered_pairs:
+        row = dict(row)
+        dr = detail_by_id.get(cid)
+        if dr:
+            for key in _CATEGORY_DETAIL_IMAGE_MERGE_KEYS:
+                if key in dr and dr.get(key) not in (None, "", []):
+                    row[key] = dr[key]
         if not _extract_image_url(row) and not build_zoho_cdn_document_url(store_domain, row):
             descendant = _first_descendant_with_image(cid)
             if isinstance(descendant, dict):
                 row = dict(row)
-                for key in ("image_url", "image", "image_name", "image_path", "document_id", "documents"):
+                for key in _CATEGORY_DETAIL_IMAGE_MERGE_KEYS:
                     if descendant.get(key) not in (None, "", []):
                         row[key] = descendant.get(key)
-        if not _extract_image_url(row) and not build_zoho_cdn_document_url(store_domain, row):
+        if (
+            not skip_product_fb
+            and not _extract_image_url(row)
+            and not build_zoho_cdn_document_url(store_domain, row)
+        ):
             # Final fallback: use first product image inside this category,
-            # so image_url remains a real Zoho CDN URL.
+            # so image_url remains a real Zoho CDN URL (cdn1.zohoecommerce.com/product-images/…).
+            # Omit with ?strict_category_images=1 or the legacy strict-only grocery view flag.
             try:
                 search_category_ids = _descendant_category_ids(cid)
                 for search_cid in search_category_ids:
@@ -1586,17 +1722,12 @@ def _multi_account_category_list_response(request, account, organization_id: str
                     product_rows = product_data.get("products", []) or product_data.get("items", [])
                     if not isinstance(product_rows, list):
                         continue
-                    found_product_image = ""
-                    for product_row in product_rows:
-                        if not isinstance(product_row, dict):
-                            continue
-                        p_image = _extract_image_url(product_row)
-                        p_image = build_image_url(store_domain, p_image) or p_image
-                        if not p_image:
-                            p_image = build_zoho_cdn_product_document_url(store_domain, product_row)
-                        if p_image:
-                            found_product_image = p_image
-                            break
+                    found_product_image = _best_product_fallback_image_url(
+                        service,
+                        str(organization_id),
+                        store_domain,
+                        product_rows,
+                    )
                     if found_product_image:
                         row = dict(row)
                         row["image_url"] = found_product_image
@@ -1622,6 +1753,9 @@ def _multi_account_category_list_response(request, account, organization_id: str
         "organization_id": organization_id,
         "category_id": query_category_id,
         "include_descendants": include_descendants,
+        "strict_category_images": strict_category_images,
+        "category_detail_fetches": scheduled_category_detail_fetches,
+        "category_detail_cap": detail_cap,
         "count": len(main_categories),
         "categories": main_categories,
     })
@@ -1646,6 +1780,10 @@ class MultiAccountZohoCategoryListAPIView(APIView):
 
 
 class MultiAccountZohoCategoryListQueryAPIView(APIView):
+    """GET …/zoho/multi/categories/?account_id=&organization_id= — Zoho category menu + image enrichment."""
+
+    skip_product_image_fallback = False
+
     def get(self, request):
         account_id_raw = (request.GET.get("account_id") or "").strip()
         organization_id = (request.GET.get("organization_id") or "").strip()
@@ -1674,12 +1812,27 @@ class MultiAccountZohoCategoryListQueryAPIView(APIView):
                 status=404,
             )
         try:
-            return _multi_account_category_list_response(request, account, organization_id)
+            return _multi_account_category_list_response(
+                request,
+                account,
+                organization_id,
+                skip_product_image_fallback=self.skip_product_image_fallback,
+            )
         except Exception as e:
             return Response({
                 "status": "error",
                 "message": str(e),
             }, status=400)
+
+
+class MultiAccountZohoCategoryListAonegtGroceryQueryAPIView(MultiAccountZohoCategoryListQueryAPIView):
+    """
+    Same behavior as ``/zoho/multi/categories/`` (including Zoho CDN ``product-images`` fallback
+    when Zoho does not assign category art). Kept as a stable path for AoneGT Grocery clients.
+
+    Append ``&strict_category_images=1`` to skip product thumbnails and use only category
+    metadata / descendant category images / placeholder.
+    """
 
 
 class MultiAccountZohoSubCategoryListQueryAPIView(APIView):

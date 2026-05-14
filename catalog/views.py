@@ -274,6 +274,9 @@ class StoreProductReviewListCreateAPIView(generics.ListCreateAPIView):
     GET — list reviews for a product (public).
     POST — add a review (authenticated). Allowed only if the user bought this product on a
     delivered order (``Order.status == synced``). One review per user per product.
+
+    Query (required): ``store_id``, ``product_id`` — catalog store and product primary keys.
+    Example: ``/api/catalog/stores/products/reviews/?store_id=2&product_id=6``
     """
 
     def get_permissions(self):
@@ -286,24 +289,41 @@ class StoreProductReviewListCreateAPIView(generics.ListCreateAPIView):
             return ProductReviewCreateSerializer
         return ProductReviewReadSerializer
 
+    def _review_store_product(self):
+        if hasattr(self, '_review_store_product_cache'):
+            return self._review_store_product_cache
+        request = self.request
+        raw_s = (request.query_params.get('store_id') or '').strip()
+        raw_p = (request.query_params.get('product_id') or '').strip()
+        if not raw_s or not raw_p:
+            raise ValidationError(
+                {'detail': 'Query parameters store_id and product_id are required.'},
+            )
+        try:
+            store_id = int(raw_s)
+            product_id = int(raw_p)
+        except ValueError:
+            raise ValidationError({'detail': 'store_id and product_id must be integers.'})
+        store = get_object_or_404(Store, pk=store_id, is_active=True)
+        product = get_object_or_404(
+            Product.objects.select_related('store'),
+            pk=product_id,
+            store=store,
+            is_active=True,
+        )
+        self._review_store_product_cache = (store, product)
+        return self._review_store_product_cache
+
     def get_queryset(self):
-        store = get_object_or_404(Store, pk=self.kwargs['store_id'], is_active=True)
-        get_object_or_404(Product, pk=self.kwargs['pk'], store=store, is_active=True)
+        _, product = self._review_store_product()
         return ProductReview.objects.filter(
-            product_id=self.kwargs['pk'],
-            product__store_id=store.pk,
+            product_id=product.pk,
+            product__store_id=product.store_id,
         ).select_related('user')
 
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
-        store = Store.objects.filter(pk=self.kwargs.get('store_id'), is_active=True).first()
-        product = None
-        if store:
-            product = Product.objects.filter(
-                pk=self.kwargs.get('pk'),
-                store=store,
-                is_active=True,
-            ).first()
+        _, product = self._review_store_product()
         ctx['product'] = product
         return ctx
 

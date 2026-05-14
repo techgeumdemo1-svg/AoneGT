@@ -56,7 +56,7 @@ urlpatterns = [
     ),
     path('stores/', StoreListAPIView.as_view(), name='catalog-store-list'),
     path(
-        'stores/<int:store_id>/products/<int:pk>/reviews/',
+        'stores/products/reviews/',
         StoreProductReviewListCreateAPIView.as_view(),
         name='catalog-store-product-reviews',
     ),
