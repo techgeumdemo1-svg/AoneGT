@@ -48,9 +48,9 @@ def cart_item_snapshot(item) -> dict[str, Any]:
     product = item.product
     return {
         'item_id': item.pk,
-        'product_id': product.pk if product else None,
-        'category_id': (getattr(product, 'category', '') or '').strip() if product else '',
-        'collection_id': None,
+        'product_id': str(getattr(product, 'zoho_product_id', '') or '') if product else None,
+        'category_id': str(getattr(product, 'zoho_category_id', '') or '') if product else '',
+        'collection_id': str(getattr(product, 'zoho_collection_id', '') or '') if product else '',
         'quantity': int(item.quantity or 0),
         'unit_price': _as_decimal(product.price if product else '0'),
         'line_total': _as_decimal(product.price if product else '0') * int(item.quantity or 0),
@@ -107,9 +107,9 @@ def _is_active_limit(value: Any) -> bool:
 
 
 def _quantity_in_items(items: list[dict[str, Any]], *, product_ids=None, categories=None, collections=None) -> int:
-    product_ids = {str(x).strip() for x in (product_ids or []) if str(x).strip()}
-    categories = {str(x).strip() for x in (categories or []) if str(x).strip()}
-    collections = {str(x).strip() for x in (collections or []) if str(x).strip()}
+    product_ids = {str((x.get('product_id') or x.get('id') or x.get('category_id') or x.get('collection_id') or x.get('zs_product_id') or x) if isinstance(x, dict) else x).strip() for x in (product_ids or []) if str((x.get('product_id') or x.get('id') or x.get('category_id') or x.get('collection_id') or x.get('zs_product_id') or x) if isinstance(x, dict) else x).strip()}
+    categories = {str((x.get('product_id') or x.get('id') or x.get('category_id') or x.get('collection_id') or x.get('zs_product_id') or x) if isinstance(x, dict) else x).strip() for x in (categories or []) if str((x.get('product_id') or x.get('id') or x.get('category_id') or x.get('collection_id') or x.get('zs_product_id') or x) if isinstance(x, dict) else x).strip()}
+    collections = {str((x.get('product_id') or x.get('id') or x.get('category_id') or x.get('collection_id') or x.get('zs_product_id') or x) if isinstance(x, dict) else x).strip() for x in (collections or []) if str((x.get('product_id') or x.get('id') or x.get('category_id') or x.get('collection_id') or x.get('zs_product_id') or x) if isinstance(x, dict) else x).strip()}
     total = 0
     for item in items:
         item_product_id = str(item.get('product_id') or '').strip()
@@ -130,9 +130,9 @@ def _quantity_in_items(items: list[dict[str, Any]], *, product_ids=None, categor
 
 
 def _matched_line_total(items: list[dict[str, Any]], *, product_ids=None, categories=None, collections=None) -> Decimal:
-    product_ids = {str(x).strip() for x in (product_ids or []) if str(x).strip()}
-    categories = {str(x).strip() for x in (categories or []) if str(x).strip()}
-    collections = {str(x).strip() for x in (collections or []) if str(x).strip()}
+    product_ids = {str((x.get('product_id') or x.get('id') or x.get('category_id') or x.get('collection_id') or x.get('zs_product_id') or x) if isinstance(x, dict) else x).strip() for x in (product_ids or []) if str((x.get('product_id') or x.get('id') or x.get('category_id') or x.get('collection_id') or x.get('zs_product_id') or x) if isinstance(x, dict) else x).strip()}
+    categories = {str((x.get('product_id') or x.get('id') or x.get('category_id') or x.get('collection_id') or x.get('zs_product_id') or x) if isinstance(x, dict) else x).strip() for x in (categories or []) if str((x.get('product_id') or x.get('id') or x.get('category_id') or x.get('collection_id') or x.get('zs_product_id') or x) if isinstance(x, dict) else x).strip()}
+    collections = {str((x.get('product_id') or x.get('id') or x.get('category_id') or x.get('collection_id') or x.get('zs_product_id') or x) if isinstance(x, dict) else x).strip() for x in (collections or []) if str((x.get('product_id') or x.get('id') or x.get('category_id') or x.get('collection_id') or x.get('zs_product_id') or x) if isinstance(x, dict) else x).strip()}
     total = Decimal('0')
     for item in items:
         item_product_id = str(item.get('product_id') or '').strip()
@@ -193,9 +193,7 @@ def coupon_is_applicable(coupon: Coupon, user, cart_items: list[dict[str, Any]],
 
     elif (coupon.coupon_type or '').lower() == 'buyxgety':
         buy_products = _json_dict(coupon.buy_products)
-        get_products = _json_dict(coupon.get_products)
         buy_qty = int(buy_products.get('quantity') or 0)
-        get_qty = int(get_products.get('quantity') or 0)
         if buy_qty > 0:
             if _quantity_in_items(
                 cart_items,
@@ -203,9 +201,6 @@ def coupon_is_applicable(coupon: Coupon, user, cart_items: list[dict[str, Any]],
                 categories=_json_list(buy_products.get('categories')),
                 collections=_json_list(buy_products.get('collections')),
             ) < buy_qty:
-                return False, 'Coupon not applicable to your cart.'
-        if get_qty > 0:
-            if _quantity_in_items(cart_items, product_ids=_json_list(get_products.get('products'))) < get_qty:
                 return False, 'Coupon not applicable to your cart.'
 
     return True, ''

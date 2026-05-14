@@ -50,9 +50,12 @@ from .models import (
     WishlistItem,
 )
 from .services.zoho_commerce import ZohoCommerceError, ZohoCommerceService
+from offer.models import Coupon
 from offer.services import (
+    _as_decimal,
     calculate_coupon_discount,
     coupon_is_applicable,
+    get_applicable_coupons_for_store,
     get_cart_context,
     get_coupon_for_checkout,
     increment_coupon_usage,
@@ -1270,8 +1273,60 @@ class CheckoutAPIView(APIView):
                         {'error': 'Sorry, this coupon is no longer available. Please place your order without it.'},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
+                cart_snapshots = [
+                    {
+                        'product_id': str(getattr(it.product, 'zoho_product_id', '') or ''),
+                        'category_id': str(getattr(it.product, 'zoho_category_id', '') or ''),
+                        'collection_id': str(getattr(it.product, 'zoho_collection_id', '') or ''),
+                        'quantity': int(it.quantity or 0),
+                        'line_total': _as_decimal(it.line_subtotal),
+                    }
+                    for it in items
+                ]
+                allowed, reason = coupon_is_applicable(offer_coupon, locked_user, cart_snapshots, subtotal)
+                if not allowed:
+                    return Response({'error': reason}, status=status.HTTP_400_BAD_REQUEST)
                 if offer_coupon_discount is not None:
                     offer_coupon_discount_value = Decimal(str(offer_coupon_discount)).quantize(Decimal('0.01'))
+            else:
+                applicable = get_applicable_coupons_for_store(locked_user, store)
+                auto_coupons = applicable.get('auto_applied_coupons') or []
+                first_auto = auto_coupons[0] if isinstance(auto_coupons, list) and auto_coupons else None
+                if isinstance(first_auto, dict):
+                    auto_coupon_id = str(first_auto.get('coupon_id') or '').strip()
+                    if auto_coupon_id:
+                        org_raw = (getattr(store, 'zoho_org_id', '') or getattr(settings, 'ZOHO_COMMERCE_ORGANIZATION_ID', '')).strip()
+                        try:
+                            org_id = int(org_raw)
+                        except Exception:
+                            org_id = None
+                        coupon_qs = Coupon.objects.filter(coupon_id=auto_coupon_id)
+                        if org_id is not None:
+                            coupon_qs = coupon_qs.filter(org_id=org_id)
+                        offer_coupon = coupon_qs.first()
+
+                if offer_coupon is not None:
+                    cart_snapshots = [
+                        {
+                            'product_id': str(getattr(it.product, 'zoho_product_id', '') or ''),
+                            'category_id': str(getattr(it.product, 'zoho_category_id', '') or ''),
+                            'collection_id': str(getattr(it.product, 'zoho_collection_id', '') or ''),
+                            'quantity': int(it.quantity or 0),
+                            'line_total': _as_decimal(it.line_subtotal),
+                        }
+                        for it in items
+                    ]
+                    allowed, _reason = coupon_is_applicable(offer_coupon, locked_user, cart_snapshots, subtotal)
+                    if allowed:
+                        offer_coupon_discount_value = calculate_coupon_discount(
+                            offer_coupon,
+                            cart_snapshots,
+                            subtotal,
+                            shipping_amount,
+                            currency,
+                        )
+                    else:
+                        offer_coupon = None
 
             final_total = (gross_total - loyalty_discount).quantize(Decimal('0.01'))
             if offer_coupon is not None:
@@ -1308,6 +1363,44 @@ class CheckoutAPIView(APIView):
                     quantity=it.quantity,
                     line_total=line,
                 )
+            if offer_coupon is not None and (offer_coupon.coupon_type or '').lower() == 'buyxgety':
+                get_products = offer_coupon.get_products if isinstance(offer_coupon.get_products, dict) else {}
+                get_product_rows = get_products.get('products', []) if isinstance(get_products, dict) else []
+                get_qty = float(get_products.get('quantity') or 1) if isinstance(get_products, dict) else 1.0
+                max_count = float(offer_coupon.max_discounted_product_count_per_cart or get_qty)
+                bxgy_discount_total = Decimal('0.00')
+                bxgy_discount_found = False
+                for product_row in get_product_rows if isinstance(get_product_rows, list) else []:
+                    if not isinstance(product_row, dict):
+                        continue
+                    zoho_product_id = str(product_row.get('product_id') or '').strip()
+                    if not zoho_product_id:
+                        continue
+                    get_product = Product.objects.filter(
+                        store=store,
+                        zoho_product_id=zoho_product_id,
+                    ).first()
+                    if get_product is None:
+                        continue
+                    get_unit_price = get_product.price
+                    get_quantity = int(max_count)
+                    get_line_total = (get_unit_price * Decimal(str(get_quantity))).quantize(Decimal('0.01'))
+                    discount_pct = _as_decimal(offer_coupon.discount_value or '0')
+                    get_item_discount = (get_line_total * discount_pct / Decimal('100')).quantize(Decimal('0.01'))
+                    net_line_total = (get_line_total - get_item_discount).quantize(Decimal('0.01'))
+                    OrderItem.objects.create(
+                        order=order,
+                        product=get_product,
+                        product_name=get_product.name,
+                        sku=get_product.sku,
+                        unit_price=get_unit_price,
+                        quantity=get_quantity,
+                        line_total=net_line_total,
+                    )
+                    bxgy_discount_total += get_item_discount
+                    bxgy_discount_found = True
+                    break
+                offer_coupon_discount_value = bxgy_discount_total
             CartItem.objects.filter(pk__in=[i.pk for i in items]).delete()
 
             if offer_coupon is not None:
