@@ -342,3 +342,28 @@ class UserNotification(models.Model):
 
     def __str__(self):
         return f'{self.kind} → user {self.user_id}: {self.title[:40]}'
+
+
+class FCMDeviceToken(models.Model):
+    class DeviceType(models.TextChoices):
+        ANDROID = 'android', 'android'
+        IOS = 'ios', 'ios'
+        WEB = 'web', 'web'
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='fcm_tokens',
+    )
+    token = models.TextField(unique=True)
+    device_type = models.CharField(max_length=10, choices=DeviceType.choices)
+    is_active = models.BooleanField(default=True)
+    push_enabled = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at', '-created_at']
+
+    def __str__(self):
+        return f'{self.user_id}:{self.device_type}:{self.token[:24]}'

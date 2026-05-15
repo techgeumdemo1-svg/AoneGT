@@ -40,6 +40,7 @@ from .loyalty import (
 from .models import (
     Cart,
     CartItem,
+    FCMDeviceToken,
     LoyaltyIssuedCoupon,
     Order,
     OrderItem,
@@ -69,6 +70,8 @@ from .serializers import (
     CheckoutSerializer,
     LoyaltyIssueCouponSerializer,
     OrderSerializer,
+    FCMDeviceTokenSerializer,
+    PushSettingsSerializer,
     OrderReturnCreateSerializer,
     OrderReturnReadSerializer,
     order_code_for_order,
@@ -1972,6 +1975,67 @@ class ZohoProductImageProxyAPIView(APIView):
                 else status.HTTP_502_BAD_GATEWAY
             )
             return Response({'detail': msg}, status=st)
+
+
+class RegisterDeviceView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = FCMDeviceTokenSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        token = serializer.validated_data['token']
+        device_type = serializer.validated_data['device_type']
+
+        FCMDeviceToken.objects.update_or_create(
+            token=token,
+            defaults={
+                'user': request.user,
+                'device_type': device_type,
+                'is_active': True,
+            },
+        )
+        return Response(
+            {
+                'status': 'registered',
+                'token': token,
+                'device_type': device_type,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class UnregisterDeviceView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request):
+        token = str(request.data.get('token') or '').strip()
+        if not token:
+            return Response({'token': ['Token is required.']}, status=status.HTTP_400_BAD_REQUEST)
+
+        FCMDeviceToken.objects.filter(user=request.user, token=token).update(is_active=False)
+        return Response({'status': 'unregistered'}, status=status.HTTP_200_OK)
+
+
+class PushSettingsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        row = (
+            FCMDeviceToken.objects.filter(user=request.user, is_active=True)
+            .order_by('-updated_at')
+            .first()
+        )
+        push_enabled = row.push_enabled if row is not None else True
+        return Response({'push_enabled': push_enabled}, status=status.HTTP_200_OK)
+
+    def patch(self, request):
+        serializer = PushSettingsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        push_enabled = serializer.validated_data['push_enabled']
+        FCMDeviceToken.objects.filter(user=request.user, is_active=True).update(
+            push_enabled=push_enabled,
+        )
+        return Response({'push_enabled': push_enabled}, status=status.HTTP_200_OK)
 
 
 class NotificationPagination(PageNumberPagination):

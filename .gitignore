@@ -30,3 +30,7 @@ BXGY_COUPON_ANALYSIS_REPORT.md
 DEBUG_OTP_EMAIL.md
 README_INTERNAL_POLL.md
 NOTIFICATION_SYSTEM_REPORT.md
+etc/
+shop/migrations/0015_add_fcm_device_token.py
+etc/shop/migrations/0015_add_fcm_device_token.py
+/etc/shop/migrations/0015_add_fcm_device_token.py

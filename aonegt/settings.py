@@ -230,3 +230,19 @@ if not DEBUG:
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
 
+
+import os
+import firebase_admin
+from firebase_admin import credentials as fb_credentials
+
+_fb_cred_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', '')
+if _fb_cred_path and os.path.isfile(_fb_cred_path):
+    if not firebase_admin._apps:
+        cred = fb_credentials.Certificate(_fb_cred_path)
+        firebase_admin.initialize_app(cred)
+else:
+    import logging
+    logging.getLogger(__name__).warning(
+        'Firebase credentials not found — push notifications disabled.',
+    )
+

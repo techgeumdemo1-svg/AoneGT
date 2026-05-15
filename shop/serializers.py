@@ -15,6 +15,7 @@ from .loyalty import min_points_to_redeem
 from .models import (
     Cart,
     CartItem,
+    FCMDeviceToken,
     Order,
     OrderItem,
     OrderReturn,
@@ -1041,3 +1042,18 @@ class UserNotificationSerializer(serializers.ModelSerializer):
 
     def get_is_read(self, obj):
         return obj.read_at is not None
+
+
+class FCMDeviceTokenSerializer(serializers.Serializer):
+    token = serializers.CharField()
+    device_type = serializers.ChoiceField(choices=FCMDeviceToken.DeviceType.choices)
+
+    def validate_token(self, value):
+        token = (value or '').strip()
+        if not token:
+            raise serializers.ValidationError('Token is required.')
+        return token
+
+
+class PushSettingsSerializer(serializers.Serializer):
+    push_enabled = serializers.BooleanField()
