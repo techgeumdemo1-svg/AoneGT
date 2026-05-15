@@ -774,6 +774,7 @@ class CheckoutSerializer(serializers.Serializer):
     coupon_discount = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
+        allow_null=True,
         required=False,
         min_value=Decimal('0'),
     )
