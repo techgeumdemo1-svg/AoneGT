@@ -6,16 +6,72 @@ from typing import Any
 
 import requests
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.utils import timezone
 
 from catalog.models import Store
-from shop.models import Cart
+from shop.models import Cart, FCMDeviceToken, UserNotification
+from shop.services.notifications import create_user_notification
+from shop.services.push_notifications import send_push_notification
 from shop.services.zoho_commerce import ZohoCommerceService
 
 from .models import Coupon, CouponUsageLog
 
 logger = logging.getLogger(__name__)
+
+
+def _notify_new_coupon(coupon: Coupon, org_id: int) -> None:
+    store = Store.objects.filter(zoho_org_id=str(org_id), is_active=True).first()
+    if store is None:
+        return
+
+    coupon_name = (coupon.coupon_name or '').strip() or 'Offer'
+    title = f'{store.name} — New offer: {coupon_name}'
+    title = title[:100]
+    body = (coupon.description or '')[:200] if coupon.description else coupon_name
+
+    User = get_user_model()
+    active_users = User.objects.filter(is_active=True)
+    for user in active_users:
+        try:
+            create_user_notification(
+                user=user,
+                kind=UserNotification.Kind.OFFER,
+                title=title,
+                body=body,
+            )
+        except Exception:
+            logger.exception(
+                'Failed creating in-app coupon notification for user %s and coupon %s',
+                user.pk,
+                coupon.coupon_id,
+            )
+
+    try:
+        token_list = list(
+            FCMDeviceToken.objects.filter(is_active=True, push_enabled=True)
+            .values_list('token', flat=True),
+        )
+        data_payload = {
+            'type': 'new_coupon',
+            'store_slug': str(store.slug or ''),
+            'org_id': str(store.zoho_org_id or ''),
+            'coupon_id': str(coupon.coupon_id or ''),
+            'click_action': 'OPEN_STORE',
+        }
+        send_push_notification(
+            tokens=token_list,
+            title=title,
+            body=body,
+            data=data_payload,
+        )
+    except Exception:
+        logger.exception(
+            'Failed sending push coupon notification for coupon %s and org %s',
+            coupon.coupon_id,
+            org_id,
+        )
 
 
 def _as_decimal(value: Any, default: str = '0') -> Decimal:
@@ -400,6 +456,14 @@ def sync_coupon_from_payload(store: Store, payload: dict[str, Any]) -> Coupon | 
     coupon.eligible_shipping_zones = payload.get('eligible_shipping_zones') or {}
     coupon.raw_data = payload
     coupon.save()
+    if created:
+        try:
+            _notify_new_coupon(coupon, org_id)
+        except Exception:
+            logger.exception(
+                'Failed notifying users for newly created coupon %s',
+                coupon.coupon_id,
+            )
     return coupon
 
 
