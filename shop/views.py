@@ -2097,3 +2097,14 @@ class NotificationMarkAllReadAPIView(APIView):
         )
         return Response({'marked': n})
 
+class NotificationDetailAPIView(APIView):
+    """PATCH — mark one notification read (idempotent)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+        n = get_object_or_404(UserNotification, pk=pk, user=request.user)
+        if n.read_at is None:
+            n.read_at = timezone.now()
+            n.save(update_fields=['read_at'])
+        return Response(UserNotificationSerializer(n).data)
