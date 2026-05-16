@@ -19,6 +19,7 @@ from .views import (
     OrderReturnListCreateAPIView,
     OrderReorderAPIView,
     NotificationListAPIView,
+    OfferNotificationListAPIView,
     NotificationUnreadCountAPIView,
     NotificationMarkAllReadAPIView,
     NotificationDetailAPIView,
@@ -51,6 +52,7 @@ urlpatterns = [
 
     path('notifications/unread-count/', NotificationUnreadCountAPIView.as_view(), name='shop-notifications-unread-count'),
     path('notifications/mark-all-read/', NotificationMarkAllReadAPIView.as_view(), name='shop-notifications-mark-all-read'),
+    path('notifications/offers/', OfferNotificationListAPIView.as_view(), name='shop-offer-notifications-list'),
     path('notifications/<int:pk>/', NotificationDetailAPIView.as_view(), name='shop-notification-detail'),
     path('notifications/', NotificationListAPIView.as_view(), name='shop-notifications-list'),
     path('devices/register/', RegisterDeviceView.as_view(), name='shop-device-register'),
