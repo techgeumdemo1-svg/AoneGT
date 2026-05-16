@@ -231,18 +231,30 @@ if not DEBUG:
     CSRF_COOKIE_SECURE = True
 
 
-import os
+import os, json
 import firebase_admin
 from firebase_admin import credentials as fb_credentials
 
-_fb_cred_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', '')
-if _fb_cred_path and os.path.isfile(_fb_cred_path):
-    if not firebase_admin._apps:
+if not firebase_admin._apps:
+    _fb_cred_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', '')
+    _fb_cred_json = os.environ.get('FIREBASE_SERVICE_ACCOUNT_JSON', '')
+
+    if _fb_cred_path and os.path.isfile(_fb_cred_path):
         cred = fb_credentials.Certificate(_fb_cred_path)
         firebase_admin.initialize_app(cred)
-else:
-    import logging
-    logging.getLogger(__name__).warning(
-        'Firebase credentials not found — push notifications disabled.',
-    )
+    elif _fb_cred_json:
+        try:
+            cred_dict = json.loads(_fb_cred_json)
+            cred = fb_credentials.Certificate(cred_dict)
+            firebase_admin.initialize_app(cred)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                f'Firebase JSON parse failed — push notifications disabled. Error: {e}'
+            )
+    else:
+        import logging
+        logging.getLogger(__name__).warning(
+            'Firebase credentials not found — push notifications disabled.'
+        )
 
