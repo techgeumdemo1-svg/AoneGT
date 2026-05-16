@@ -186,6 +186,19 @@ class VerifyResetOTPSerializer(serializers.Serializer):
         return otp
 
 
+def _validate_new_password_fields(attrs):
+    password = attrs['new_password']
+    if any(ch.isspace() for ch in password):
+        raise serializers.ValidationError({'new_password': 'Password cannot contain spaces.'})
+    try:
+        validate_password(password)
+    except DjangoValidationError as e:
+        raise serializers.ValidationError({'new_password': list(e.messages)})
+    if attrs['new_password'] != attrs['confirm_password']:
+        raise serializers.ValidationError({'confirm_password': 'Passwords do not match.'})
+    return attrs
+
+
 class ResetPasswordSerializer(serializers.Serializer):
     email = serializers.EmailField()
     otp = serializers.CharField(max_length=6)
@@ -193,16 +206,35 @@ class ResetPasswordSerializer(serializers.Serializer):
     confirm_password = serializers.CharField(write_only=True)
 
     def validate(self, attrs):
-        password = attrs['new_password']
-        if any(ch.isspace() for ch in password):
-            raise serializers.ValidationError({'new_password': 'Password cannot contain spaces.'})
-        try:
-            validate_password(password)
-        except DjangoValidationError as e:
-            raise serializers.ValidationError({'new_password': list(e.messages)})
-        if attrs['new_password'] != attrs['confirm_password']:
-            raise serializers.ValidationError({'confirm_password': 'Passwords do not match.'})
-        return attrs
+        return _validate_new_password_fields(attrs)
+
+
+class ChangePasswordConfirmSerializer(serializers.Serializer):
+    """Send after the user confirms they want to change password."""
+
+    confirm = serializers.BooleanField(required=True)
+
+    def validate_confirm(self, value):
+        if value is not True:
+            raise serializers.ValidationError(
+                'You must send confirm: true to change your password.',
+            )
+        return value
+
+
+class ChangePasswordSerializer(ChangePasswordConfirmSerializer):
+    otp = serializers.CharField(max_length=6, min_length=6)
+    new_password = serializers.CharField(write_only=True)
+    confirm_password = serializers.CharField(write_only=True)
+
+    def validate_otp(self, value):
+        otp = str(value).strip()
+        if not otp.isdigit() or len(otp) != 6:
+            raise serializers.ValidationError('Enter a valid 6-digit OTP.')
+        return otp
+
+    def validate(self, attrs):
+        return _validate_new_password_fields(attrs)
 
 
 class UserProfileSerializer(serializers.ModelSerializer):
@@ -240,10 +272,72 @@ class UserProfileUpdateSerializer(serializers.ModelSerializer):
         return (value or '').strip()
 
 
+class DeactivateAccountConfirmSerializer(serializers.Serializer):
+    """Send after the user taps Yes on the deactivate confirmation dialog."""
+
+    confirm = serializers.BooleanField(required=True)
+
+    def validate_confirm(self, value):
+        if value is not True:
+            raise serializers.ValidationError(
+                'You must send confirm: true to deactivate your account.',
+            )
+        return value
+
+
+class DeactivateAccountOTPSerializer(DeactivateAccountConfirmSerializer):
+    otp = serializers.CharField(max_length=6, min_length=6)
+
+    def validate_otp(self, value):
+        otp = str(value).strip()
+        if not otp.isdigit() or len(otp) != 6:
+            raise serializers.ValidationError('Enter a valid 6-digit OTP.')
+        return otp
+
+
 class DeleteAccountConfirmSerializer(serializers.Serializer):
+    """Send after the user taps Yes on the delete confirmation dialog."""
+
     confirm = serializers.BooleanField(required=True)
 
     def validate_confirm(self, value):
         if value is not True:
             raise serializers.ValidationError('You must send confirm: true to delete your account.')
         return value
+
+
+class DeleteAccountOTPSerializer(DeleteAccountConfirmSerializer):
+    otp = serializers.CharField(max_length=6, min_length=6)
+
+    def validate_otp(self, value):
+        otp = str(value).strip()
+        if not otp.isdigit() or len(otp) != 6:
+            raise serializers.ValidationError('Enter a valid 6-digit OTP.')
+        return otp
+
+
+class ReactivateAccountRequestSerializer(serializers.Serializer):
+    """Public endpoint: inactive users cannot log in, so email identifies the account."""
+
+    email = serializers.EmailField()
+    confirm = serializers.BooleanField(required=True)
+
+    def validate_email(self, value):
+        return value.strip().lower()
+
+    def validate_confirm(self, value):
+        if value is not True:
+            raise serializers.ValidationError(
+                'You must send confirm: true to reactivate your account.',
+            )
+        return value
+
+
+class ReactivateAccountOTPSerializer(ReactivateAccountRequestSerializer):
+    otp = serializers.CharField(max_length=6, min_length=6)
+
+    def validate_otp(self, value):
+        otp = str(value).strip()
+        if not otp.isdigit() or len(otp) != 6:
+            raise serializers.ValidationError('Enter a valid 6-digit OTP.')
+        return otp

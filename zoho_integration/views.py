@@ -94,59 +94,147 @@ def build_image_url(store_domain: str, image_url: str) -> str:
     return f"https://{domain}{raw}"
 
 
-def build_zoho_cdn_document_url(store_domain: str, payload: dict) -> str:
-    """Best-effort Zoho CDN URL from document ids (preferred) or file name."""
+def _zoho_cdn_static_storefront_file_url(store_domain: str, file_name: str, meta: dict) -> str:
+    """Zoho CDN root asset, e.g. ``…/Rice.png?v=…&storefront_domain=www.aonegt.com``."""
     domain = (store_domain or "").strip().replace("https://", "").replace("http://", "")
-    if not domain:
+    fn = (file_name or "").strip()
+    if not domain or not fn:
         return ""
+    v_raw = (
+        meta.get("version")
+        or meta.get("image_version")
+        or meta.get("revision")
+        or meta.get("v")
+        or meta.get("cache_key")
+    )
+    params = [("storefront_domain", domain)]
+    if v_raw not in (None, "", 0):
+        params.insert(0, ("v", str(v_raw).strip()))
+    qs = urlencode(params)
+    return f"https://cdn1.zohoecommerce.com/{quote(fn, safe='')}?{qs}"
+
+
+def build_zoho_cdn_document_url(store_domain: str, payload: dict) -> str:
+    """
+    Zoho Commerce CDN category / document image.
+
+    Prefer storefront static files (``cdn1.zohoecommerce.com/Name.png?v=…&storefront_domain=…``)
+    when ``file_name`` (or similar) is present. Otherwise use ``category-images/{document_id}/…``.
+    """
+    domain = (store_domain or "").strip().replace("https://", "").replace("http://", "")
+    if not domain or not isinstance(payload, dict):
+        return ""
+
+    _IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".bmp", ".ico", ".avif")
+
+    def _looks_like_image_file(name: str) -> bool:
+        n = (name or "").strip().lower()
+        return any(n.endswith(ext) for ext in _IMAGE_EXT)
+
+    def _file_from(p: dict) -> str:
+        return str(
+            p.get("file_name")
+            or p.get("image_name")
+            or p.get("filename")
+            or p.get("image_file_name")
+            or ""
+        ).strip()
+
+    rows = payload.get("documents") or payload.get("attachments") or []
+    if not isinstance(rows, list):
+        rows = []
+
+    fn = _file_from(payload)
+    if fn and _looks_like_image_file(fn):
+        return _zoho_cdn_static_storefront_file_url(store_domain, fn, payload)
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        fn = _file_from(row) or str(row.get("name") or "").strip()
+        if fn and _looks_like_image_file(fn):
+            return _zoho_cdn_static_storefront_file_url(store_domain, fn, row)
+
     top_document_id = str(payload.get("document_id") or "").strip()
     if top_document_id:
         return (
             f"https://cdn1.zohoecommerce.com/category-images/{quote(top_document_id)}/800x800"
             f"?storefront_domain={domain}"
         )
-    rows = payload.get("documents") or payload.get("attachments") or []
-    if isinstance(rows, list):
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            row_document_id = str(row.get("document_id") or "").strip()
-            if row_document_id:
-                return (
-                    f"https://cdn1.zohoecommerce.com/category-images/{quote(row_document_id)}/800x800"
-                    f"?storefront_domain={domain}"
-                )
-            file_name = str(row.get("file_name") or row.get("name") or "").strip()
-            if file_name:
-                return f"https://cdn1.zohoecommerce.com/{quote(file_name)}?storefront_domain={domain}"
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_document_id = str(row.get("document_id") or "").strip()
+        if row_document_id:
+            return (
+                f"https://cdn1.zohoecommerce.com/category-images/{quote(row_document_id)}/800x800"
+                f"?storefront_domain={domain}"
+            )
+        fn = str(row.get("file_name") or row.get("name") or "").strip()
+        if fn:
+            return _zoho_cdn_static_storefront_file_url(store_domain, fn, row)
     file_name = str(payload.get("file_name") or "").strip()
     if file_name:
-        return f"https://cdn1.zohoecommerce.com/{quote(file_name)}?storefront_domain={domain}"
+        return _zoho_cdn_static_storefront_file_url(store_domain, file_name, payload)
     return ""
 
 
 def build_zoho_cdn_product_document_url(store_domain: str, payload: dict) -> str:
-    """Best-effort Zoho product image URL from product document ids."""
+    """
+    Zoho Commerce CDN product image URL.
+
+    Prefer storefront shape (matches Zoho site / AoneGT):
+    ``product-images/{file_name}/{document_id}/800x800?storefront_domain=...``
+    Fall back to ``product-images/{document_id}/800x800?...`` when filename is missing.
+    """
     domain = (store_domain or "").strip().replace("https://", "").replace("http://", "")
-    if not domain:
+    if not domain or not isinstance(payload, dict):
         return ""
-    top_document_id = str(payload.get("document_id") or "").strip()
-    if top_document_id:
-        return (
-            f"https://cdn1.zohoecommerce.com/product-images/{quote(top_document_id)}/800x800"
-            f"?storefront_domain={domain}"
-        )
+
+    def _file_and_doc(p: dict) -> tuple[str, str]:
+        fn = str(
+            p.get("file_name")
+            or p.get("image_name")
+            or p.get("original_file_name")
+            or p.get("filename")
+            or ""
+        ).strip()
+        did = str(
+            p.get("document_id")
+            or p.get("image_document_id")
+            or p.get("image_id")
+            or ""
+        ).strip()
+        return fn, did
+
     rows = payload.get("documents") or payload.get("attachments") or payload.get("images") or []
-    if isinstance(rows, list):
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            row_document_id = str(row.get("document_id") or row.get("id") or "").strip()
-            if row_document_id:
-                return (
-                    f"https://cdn1.zohoecommerce.com/product-images/{quote(row_document_id)}/800x800"
-                    f"?storefront_domain={domain}"
-                )
+    if not isinstance(rows, list):
+        rows = []
+
+    blocks: list[dict] = [payload]
+    blocks.extend(r for r in rows if isinstance(r, dict))
+
+    for block in blocks:
+        fn, did = _file_and_doc(block)
+        if fn and did:
+            return (
+                f"https://cdn1.zohoecommerce.com/product-images/{quote(fn, safe='')}/{did}/800x800"
+                f"?storefront_domain={domain}"
+            )
+
+    for block in blocks:
+        did = str(
+            block.get("document_id")
+            or block.get("image_document_id")
+            or block.get("image_id")
+            or block.get("id")
+            or ""
+        ).strip()
+        if did:
+            return (
+                f"https://cdn1.zohoecommerce.com/product-images/{quote(did, safe='')}/800x800"
+                f"?storefront_domain={domain}"
+            )
     return ""
 
 

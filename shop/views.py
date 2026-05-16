@@ -84,6 +84,7 @@ from .serializers import (
     WishlistMoveToCartSerializer,
 )
 from .services.notifications import create_user_notification
+from .services.order_email import send_order_placed_email
 from .services.zoho_returns import enqueue_push_return_to_zoho
 
 User = get_user_model()
@@ -1457,6 +1458,7 @@ class CheckoutAPIView(APIView):
                 'order_code': code,
             },
         )
+        send_order_placed_email(order, request.user)
         if points_awarded > 0:
             create_user_notification(
                 request.user,
@@ -1513,6 +1515,7 @@ class CheckoutAPIView(APIView):
                     'vat_amount': str(order.vat_amount.quantize(Decimal('0.01'))),
                     'shipping_amount': str(order.shipping_amount.quantize(Decimal('0.01'))),
                     'gross_total': str(gross_total.quantize(Decimal('0.01'))),
+                    'coupon_discount': str(offer_coupon_discount_value.quantize(Decimal('0.01'))),
                     'loyalty_discount': str(order.loyalty_discount.quantize(Decimal('0.01'))),
                     'points_redeemed': order.loyalty_points_redeemed,
                     'points_earned': points_awarded,

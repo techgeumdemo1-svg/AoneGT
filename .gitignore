@@ -6,6 +6,10 @@ __pycache__/
 .env
 .env.*
 !.env.example
+
+# Firebase / secrets (private keys)
+secrets/*.json
+secrets/*-firebase*.json
 .venv
 
 *.sqlite3

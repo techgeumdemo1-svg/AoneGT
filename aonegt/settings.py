@@ -125,13 +125,11 @@ REST_FRAMEWORK = {
     ),
     'DEFAULT_THROTTLE_RATES': {
         'forgot_password': os.getenv('FORGOT_PASSWORD_THROTTLE_RATE', '5/hour'),
+        'deactivate_account_otp': os.getenv('DEACTIVATE_ACCOUNT_OTP_THROTTLE_RATE', '5/hour'),
+        'delete_account_otp': os.getenv('DELETE_ACCOUNT_OTP_THROTTLE_RATE', '5/hour'),
+        'reactivate_account_otp': os.getenv('REACTIVATE_ACCOUNT_OTP_THROTTLE_RATE', '5/hour'),
+        'change_password_otp': os.getenv('CHANGE_PASSWORD_OTP_THROTTLE_RATE', '5/hour'),
     },
-}
-
-SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
-    'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
 if DEBUG:
@@ -156,6 +154,7 @@ try:
 except ValueError:
     EMAIL_TIMEOUT = 20
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'webmaster@localhost')
+ORDER_CONFIRMATION_EMAIL = os.getenv('ORDER_CONFIRMATION_EMAIL', 'True') == 'True'
 FRONTEND_RESET_URL = os.getenv('FRONTEND_RESET_URL', 'aonegt://reset-password')
 
 # --- Loyalty (AED): earn 1 point per LOYALTY_AED_PER_POINT_EARNED spent; 1 point = LOYALTY_POINT_VALUE_AED off.
@@ -214,8 +213,9 @@ ZOHO_BEST_DEALS_COLLECTION_ID = os.getenv('ZOHO_BEST_DEALS_COLLECTION_ID', '').s
 ZOHO_REDIRECT_URI = os.getenv("ZOHO_REDIRECT_URI")
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=5),   # 👈 increase this
+    'ACCESS_TOKEN_LIFETIME': timedelta(days=5),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=5),
+    'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
 
@@ -231,11 +231,23 @@ if not DEBUG:
     CSRF_COOKIE_SECURE = True
 
 
-import os, json
-import firebase_admin
-from firebase_admin import credentials as fb_credentials
+import json
+import logging
 
-if not firebase_admin._apps:
+_logger = logging.getLogger(__name__)
+
+try:
+    import firebase_admin
+    from firebase_admin import credentials as fb_credentials
+except ImportError:
+    firebase_admin = None  # type: ignore
+    fb_credentials = None  # type: ignore
+    _logger.warning(
+        'firebase-admin not installed — push notifications disabled. '
+        'Install with: pip install firebase-admin',
+    )
+
+if firebase_admin is not None and fb_credentials is not None and not firebase_admin._apps:
     _fb_cred_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', '')
     _fb_cred_json = os.environ.get('FIREBASE_SERVICE_ACCOUNT_JSON', '')
 
@@ -247,14 +259,12 @@ if not firebase_admin._apps:
             cred_dict = json.loads(_fb_cred_json)
             cred = fb_credentials.Certificate(cred_dict)
             firebase_admin.initialize_app(cred)
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning(
-                f'Firebase JSON parse failed — push notifications disabled. Error: {e}'
+        except Exception as exc:
+            _logger.warning(
+                'Firebase JSON parse failed — push notifications disabled. Error: %s',
+                exc,
             )
     else:
-        import logging
-        logging.getLogger(__name__).warning(
-            'Firebase credentials not found — push notifications disabled.'
+        _logger.warning(
+            'Firebase credentials not found — push notifications disabled.',
         )
-

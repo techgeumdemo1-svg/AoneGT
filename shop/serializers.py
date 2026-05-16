@@ -467,6 +467,7 @@ class WishlistProductSerializer(serializers.ModelSerializer):
         model = Product
         fields = (
             'product_id',
+            'zoho_product_id',
             'name',
             'slug',
             'category',
@@ -581,6 +582,17 @@ class OrderItemSerializer(serializers.ModelSerializer):
         )
 
 
+# Mobile order-tracking rail (labels). Per-stage updates require Zoho fulfilment data not stored here yet.
+ORDER_CUSTOMER_TRACKING_PIPELINE = (
+    ('pending', 'Pending'),
+    ('confirmed', 'Confirmed'),
+    ('packed', 'Packed'),
+    ('shipped', 'Shipped'),
+    ('out_for_delivery', 'Out for Delivery'),
+    ('delivered', 'Delivered'),
+)
+
+
 class OrderSerializer(serializers.ModelSerializer):
     order_id = serializers.IntegerField(source='id', read_only=True)
     items = OrderItemSerializer(many=True, read_only=True)
@@ -588,6 +600,7 @@ class OrderSerializer(serializers.ModelSerializer):
     balance_remaining = serializers.SerializerMethodField()
     order_code = serializers.SerializerMethodField()
     display_status = serializers.SerializerMethodField()
+    tracking = serializers.SerializerMethodField()
     items_count = serializers.SerializerMethodField()
     can_reorder = serializers.SerializerMethodField()
     can_return = serializers.SerializerMethodField()
@@ -602,7 +615,7 @@ class OrderSerializer(serializers.ModelSerializer):
         fields = (
             'order_id', 'store', 'status', 'currency', 'payment_method',
             'subtotal', 'vat_percent', 'vat_amount', 'shipping_amount', 'total',
-            'order_code', 'display_status', 'items_count',
+            'order_code', 'display_status', 'tracking', 'items_count',
             'can_reorder', 'can_return', 'return_status', 'order_date',
             'return_eligible_lines',
             'shipping_name', 'shipping_phone', 'shipping_address', 'shipping_city',
@@ -620,7 +633,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'order_id', 'status', 'subtotal', 'vat_percent', 'vat_amount', 'total',
             'zoho_checkout_id', 'zoho_salesorder_id',
             'zoho_sync_error', 'zoho_synced_at',
-            'order_code', 'display_status', 'items_count',
+            'order_code', 'display_status', 'tracking', 'items_count',
             'can_reorder', 'can_return', 'return_status', 'order_date',
             'return_eligible_lines',
             'returned_total', 'balance_remaining', 'refunded_amount', 'net_paid',
@@ -659,13 +672,73 @@ class OrderSerializer(serializers.ModelSerializer):
         return result
 
     def get_display_status(self, obj):
-        mapping = {
-            Order.Status.SYNCED: 'Delivered',
-            Order.Status.PENDING_ZOHO_SYNC: 'Pending',
-            Order.Status.SYNC_FAILED: 'Pending',
-            Order.Status.CANCELLED: 'Cancelled',
+        if obj.status == Order.Status.CANCELLED:
+            return 'Cancelled'
+        if obj.status in (Order.Status.PENDING_ZOHO_SYNC, Order.Status.SYNC_FAILED):
+            return 'Pending'
+        if obj.status == Order.Status.SYNCED:
+            if self._order_return_status(obj) == 'full':
+                return 'Returned'
+            return 'Delivered'
+        return 'Pending'
+
+    def get_tracking(self, obj):
+        def step_dict(key: str, label: str, state: str) -> dict:
+            return {'key': key, 'label': label, 'state': state}
+
+        pipeline = ORDER_CUSTOMER_TRACKING_PIPELINE
+        if obj.status == Order.Status.CANCELLED:
+            return {
+                'steps': [step_dict(k, l, 'skipped') for k, l in pipeline],
+                'current_key': 'cancelled',
+                'current_label': 'Cancelled',
+                'is_cancelled': True,
+                'is_returned': False,
+                'note': 'Order was cancelled.',
+            }
+
+        ret = self._order_return_status(obj)
+        if ret == 'full':
+            steps = [step_dict(k, l, 'completed') for k, l in pipeline]
+            steps.append(step_dict('returned', 'Returned', 'current'))
+            return {
+                'steps': steps,
+                'current_key': 'returned',
+                'current_label': 'Returned',
+                'is_cancelled': False,
+                'is_returned': True,
+                'note': None,
+            }
+
+        if obj.status in (Order.Status.PENDING_ZOHO_SYNC, Order.Status.SYNC_FAILED):
+            steps = []
+            for i, (k, l) in enumerate(pipeline):
+                steps.append(step_dict(k, l, 'current' if i == 0 else 'upcoming'))
+            return {
+                'steps': steps,
+                'current_key': pipeline[0][0],
+                'current_label': pipeline[0][1],
+                'is_cancelled': False,
+                'is_returned': False,
+                'note': (
+                    'Further stages appear after the order is confirmed. '
+                    'Live courier steps require fulfilment data from Zoho.'
+                ),
+            }
+
+        steps = [step_dict(k, l, 'completed') for k, l in pipeline]
+        steps[-1] = step_dict(pipeline[-1][0], pipeline[-1][1], 'current')
+        note = None
+        if ret == 'partial':
+            note = 'Some items were returned; order is still delivered with partial refund.'
+        return {
+            'steps': steps,
+            'current_key': pipeline[-1][0],
+            'current_label': pipeline[-1][1],
+            'is_cancelled': False,
+            'is_returned': False,
+            'note': note,
         }
-        return mapping.get(obj.status, 'Pending')
 
     def get_items_count(self, obj):
         return int(sum((int(it.quantity or 0) for it in obj.items.all()), 0))

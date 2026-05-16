@@ -9,7 +9,13 @@ from .views import (
     VerifyResetOTPAPIView,
     ResetPasswordAPIView,
     ProfileAPIView,
+    RequestChangePasswordOTPAPIView,
+    ChangePasswordAPIView,
+    RequestDeactivateAccountOTPAPIView,
     DeactivateAccountAPIView,
+    RequestReactivateAccountOTPAPIView,
+    ReactivateAccountAPIView,
+    RequestDeleteAccountOTPAPIView,
     DeleteAccountAPIView,
 )
 
@@ -27,6 +33,28 @@ urlpatterns = [
     path('verify-reset-otp/', VerifyResetOTPAPIView.as_view(), name='verify-reset-otp'),
     path('reset-password/', ResetPasswordAPIView.as_view(), name='reset-password'),
     path('profile/', ProfileAPIView.as_view(), name='profile'),
+    path(
+        'change-password/send-otp/',
+        RequestChangePasswordOTPAPIView.as_view(),
+        name='change-password-send-otp',
+    ),
+    path('change-password/', ChangePasswordAPIView.as_view(), name='change-password'),
+    path(
+        'account/deactivate/send-otp/',
+        RequestDeactivateAccountOTPAPIView.as_view(),
+        name='account-deactivate-send-otp',
+    ),
     path('account/deactivate/', DeactivateAccountAPIView.as_view(), name='account-deactivate'),
+    path(
+        'account/reactivate/send-otp/',
+        RequestReactivateAccountOTPAPIView.as_view(),
+        name='account-reactivate-send-otp',
+    ),
+    path('account/reactivate/', ReactivateAccountAPIView.as_view(), name='account-reactivate'),
+    path(
+        'account/delete/send-otp/',
+        RequestDeleteAccountOTPAPIView.as_view(),
+        name='account-delete-send-otp',
+    ),
     path('account/delete/', DeleteAccountAPIView.as_view(), name='account-delete'),
 ]
