@@ -2079,6 +2079,13 @@ class NotificationListAPIView(generics.ListAPIView):
         return Response(UserNotificationSerializer(n).data)
 
 
+class OfferNotificationListAPIView(NotificationListAPIView):
+    """GET - paginated offer notifications for the current user."""
+
+    def get_queryset(self):
+        return super().get_queryset().filter(kind=UserNotification.Kind.OFFER)
+
+
 class NotificationUnreadCountAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
