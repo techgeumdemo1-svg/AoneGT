@@ -35,6 +35,13 @@ def _notify_new_coupon(coupon: Coupon, org_id: int) -> None:
     active_users = User.objects.filter(is_active=True)
     for user in active_users:
         try:
+            already_notified = UserNotification.objects.filter(
+                user=user,
+                kind=UserNotification.Kind.OFFER,
+                payload__coupon_id=str(coupon.coupon_id),
+            ).exists()
+            if already_notified:
+                continue
             create_user_notification(
                 user=user,
                 kind=UserNotification.Kind.OFFER,
@@ -43,6 +50,7 @@ def _notify_new_coupon(coupon: Coupon, org_id: int) -> None:
                 payload={
                     'org_id': str(org_id),
                     'store_slug': str(store.slug or ''),
+                    'coupon_id': str(coupon.coupon_id),
                 },
             )
         except Exception:
