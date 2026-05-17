@@ -2055,7 +2055,9 @@ class NotificationListAPIView(generics.ListAPIView):
     pagination_class = NotificationPagination
 
     def get_queryset(self):
-        qs = UserNotification.objects.filter(user=self.request.user)
+        qs = UserNotification.objects.filter(user=self.request.user).exclude(
+            kind=UserNotification.Kind.OFFER
+        )
         raw = (self.request.query_params.get('unread') or '').strip().lower()
         if raw in ('1', 'true', 'yes'):
             qs = qs.filter(read_at__isnull=True)
@@ -2086,7 +2088,17 @@ class OfferNotificationListAPIView(NotificationListAPIView):
     """GET - paginated offer notifications for the current user."""
 
     def get_queryset(self):
-        return super().get_queryset().filter(kind=UserNotification.Kind.OFFER)
+        qs = UserNotification.objects.filter(
+            user=self.request.user,
+            kind=UserNotification.Kind.OFFER,
+        )
+        raw = (self.request.query_params.get('unread') or '').strip().lower()
+        if raw in ('1', 'true', 'yes'):
+            qs = qs.filter(read_at__isnull=True)
+        org_id = (self.request.query_params.get('org_id') or '').strip()
+        if org_id:
+            qs = qs.filter(payload__org_id=org_id)
+        return qs
 
 
 class NotificationUnreadCountAPIView(APIView):

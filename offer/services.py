@@ -40,6 +40,10 @@ def _notify_new_coupon(coupon: Coupon, org_id: int) -> None:
                 kind=UserNotification.Kind.OFFER,
                 title=title,
                 body=body,
+                payload={
+                    'org_id': str(org_id),
+                    'store_slug': str(store.slug or ''),
+                },
             )
         except Exception:
             logger.exception(
