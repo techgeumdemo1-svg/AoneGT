@@ -79,6 +79,7 @@ from .serializers import (
     return_reason_options_payload,
     PurchasePointsLedgerSerializer,
     UserAddressSerializer,
+    OfferNotificationSerializer,
     UserNotificationSerializer,
     WishlistItemSerializer,
     WishlistMoveToCartSerializer,
@@ -2086,6 +2087,8 @@ class NotificationListAPIView(generics.ListAPIView):
 
 class OfferNotificationListAPIView(NotificationListAPIView):
     """GET - paginated offer notifications for the current user."""
+
+    serializer_class = OfferNotificationSerializer
 
     def get_queryset(self):
         qs = UserNotification.objects.filter(

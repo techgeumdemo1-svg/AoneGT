@@ -7,6 +7,7 @@ from django.shortcuts import get_object_or_404
 from rest_framework import serializers
 
 from catalog.models import Product, Store
+from offer.models import Coupon
 from shop.services.zoho_commerce import ZohoCommerceError, ZohoCommerceService
 from zoho_integration.models import ZohoCommerceAccount
 from zoho_integration.services import ZohoCommerceService as ZohoAccountService
@@ -1115,6 +1116,93 @@ class UserNotificationSerializer(serializers.ModelSerializer):
 
     def get_is_read(self, obj):
         return obj.read_at is not None
+
+
+class OfferNotificationSerializer(UserNotificationSerializer):
+    coupon_name = serializers.SerializerMethodField()
+    coupon_code = serializers.SerializerMethodField()
+    coupon_description = serializers.SerializerMethodField()
+    coupon_created_date = serializers.SerializerMethodField()
+    coupon_created_time = serializers.SerializerMethodField()
+    coupon_expiry_date = serializers.SerializerMethodField()
+    coupon_expiry_time = serializers.SerializerMethodField()
+
+    class Meta(UserNotificationSerializer.Meta):
+        fields = UserNotificationSerializer.Meta.fields + (
+            'coupon_name',
+            'coupon_code',
+            'coupon_description',
+            'coupon_created_date',
+            'coupon_created_time',
+            'coupon_expiry_date',
+            'coupon_expiry_time',
+        )
+        read_only_fields = fields
+
+    def _get_coupon(self, obj):
+        coupon_id = (obj.payload or {}).get('coupon_id', '')
+        if not coupon_id:
+            return None
+        if not hasattr(obj, '_coupon_cache'):
+            obj._coupon_cache = Coupon.objects.filter(coupon_id=coupon_id).first()
+        return obj._coupon_cache
+
+    def _to_dubai(self, dt):
+        from zoneinfo import ZoneInfo
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            from django.utils import timezone
+            dt = timezone.make_aware(dt, ZoneInfo('Asia/Dubai'))
+        return dt.astimezone(ZoneInfo('Asia/Dubai'))
+
+    def get_coupon_name(self, obj):
+        coupon = self._get_coupon(obj)
+        return coupon.coupon_name if coupon else None
+
+    def get_coupon_code(self, obj):
+        coupon = self._get_coupon(obj)
+        return coupon.coupon_code if coupon else None
+
+    def get_coupon_description(self, obj):
+        coupon = self._get_coupon(obj)
+        return coupon.description if coupon else None
+
+    def get_coupon_created_date(self, obj):
+        coupon = self._get_coupon(obj)
+        if coupon and coupon.created_at:
+            local_dt = self._to_dubai(coupon.created_at)
+            return local_dt.strftime('%Y-%m-%d') if local_dt else None
+        return None
+
+    def get_coupon_created_time(self, obj):
+        coupon = self._get_coupon(obj)
+        if coupon and coupon.created_at:
+            local_dt = self._to_dubai(coupon.created_at)
+            return local_dt.strftime('%H:%M:%S') if local_dt else None
+        return None
+
+    def get_coupon_expiry_date(self, obj):
+        coupon = self._get_coupon(obj)
+        if coupon and coupon.expiry_time:
+            local_dt = self._to_dubai(coupon.expiry_time)
+            return local_dt.strftime('%Y-%m-%d') if local_dt else None
+        return None
+
+    def get_coupon_expiry_time(self, obj):
+        coupon = self._get_coupon(obj)
+        if coupon and coupon.expiry_time:
+            local_dt = self._to_dubai(coupon.expiry_time)
+            return local_dt.strftime('%H:%M:%S') if local_dt else None
+        return None
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if data.get('coupon_expiry_date') is None:
+            data.pop('coupon_expiry_date', None)
+        if data.get('coupon_expiry_time') is None:
+            data.pop('coupon_expiry_time', None)
+        return data
 
 
 class FCMDeviceTokenSerializer(serializers.Serializer):

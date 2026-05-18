@@ -498,8 +498,6 @@ def sync_zoho_coupons_for_store(store: Store) -> dict[str, int]:
         if not isinstance(row, dict):
             continue
         live_id = str(row.get('coupon_id') or row.get('id') or '').strip()
-        if live_id:
-            live_ids.add(live_id)
         try:
             detail_payload = get_live_coupon_for_checkout(store, Coupon(coupon_id=live_id, org_id=org_id, coupon_code='')) if live_id else row
             if isinstance(detail_payload, dict) and detail_payload:
@@ -507,6 +505,8 @@ def sync_zoho_coupons_for_store(store: Store) -> dict[str, int]:
             coupon = sync_coupon_from_payload(store, row)
             if coupon is not None:
                 synced += 1
+            if live_id:
+                live_ids.add(live_id)
         except Exception:
             logger.exception('Failed to sync coupon row for org %s', org_id)
     now = timezone.now()
