@@ -50,4 +50,5 @@ class OrderAdmin(admin.ModelAdmin):
     inlines = [OrderItemInline]
     readonly_fields = ('created_at', 'updated_at', 'zoho_synced_at', 'zoho_sync_error')
 
+
 admin.site.register(FCMDeviceToken)
