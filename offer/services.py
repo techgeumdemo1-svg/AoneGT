@@ -31,7 +31,7 @@ def _notify_new_coupon(coupon: Coupon, org_id: int) -> None:
     title = title[:100]
     body = coupon_name
     description_text = (coupon.description or '').strip()
-    expanded_body = f'{coupon_name}\n\nDetails\n    {description_text}' if description_text else coupon_name
+    expanded_body = f'{coupon_name}\n\nDetails\n{description_text}' if description_text else coupon_name
 
     User = get_user_model()
     active_users = User.objects.filter(is_active=True)
