@@ -31,7 +31,7 @@ def _is_invalid_token_error(exc: Exception) -> bool:
     return any(marker in haystack for marker in markers)
 
 
-def send_push_notification(tokens: list, title: str, body: str, data: dict) -> dict:
+def send_push_notification(tokens: list, title: str, body: str, data: dict, expanded_body: str = '') -> dict:
     """
     tokens: list of FCM token strings
     title: notification title
@@ -55,9 +55,21 @@ def send_push_notification(tokens: list, title: str, body: str, data: dict) -> d
         invalid_tokens = set()
 
         for chunk in _chunked(token_list, 500):
+            android_notification = messaging.AndroidNotification(
+                title=title or '',
+                body=body or '',
+            )
+            if expanded_body:
+                android_notification = messaging.AndroidNotification(
+                    title=title or '',
+                    body=expanded_body,
+                )
             message = messaging.MulticastMessage(
                 tokens=chunk,
                 notification=messaging.Notification(title=title or '', body=body or ''),
+                android=messaging.AndroidConfig(
+                    notification=android_notification,
+                ),
                 data=payload,
             )
             response = messaging.send_each_for_multicast(message)
