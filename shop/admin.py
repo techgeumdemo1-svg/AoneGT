@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Cart, CartItem, Order, OrderItem, OrderReturn, OrderReturnLine, UserNotification
+from .models import Cart, CartItem, Order, OrderItem, OrderReturn, OrderReturnLine, UserNotification, FCMDeviceToken
 
 
 class CartItemInline(admin.TabularInline):
@@ -49,3 +49,5 @@ class OrderAdmin(admin.ModelAdmin):
     search_fields = ('user__email', 'shipping_name', 'zoho_salesorder_id')
     inlines = [OrderItemInline]
     readonly_fields = ('created_at', 'updated_at', 'zoho_synced_at', 'zoho_sync_error')
+
+admin.site.register(FCMDeviceToken)
