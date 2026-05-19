@@ -82,6 +82,14 @@ class Product(models.Model):
     currency = models.CharField(max_length=8, default='AED')
     image_url = models.URLField(max_length=500, blank=True)
     is_active = models.BooleanField(default=True)
+    is_best_deal = models.BooleanField(
+        default=False,
+        help_text='Show this product in the app Best Deals section (curated in Django admin).',
+    )
+    best_deal_sort_order = models.PositiveIntegerField(
+        default=0,
+        help_text='Lower numbers appear first in Best Deals.',
+    )
     zoho_product_id = models.CharField(max_length=120, blank=True)
     zoho_category_id = models.CharField(
         max_length=120,

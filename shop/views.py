@@ -1682,7 +1682,7 @@ class OrderReturnFlowMetaAPIView(APIView):
     Return-flow metadata: reason codes/labels, cancel vs confirm wiring, and where prices live.
 
     Item selection: GET order detail → ``return_eligible_lines`` (``unit_price_display`` per line).
-    Confirm return: POST ``/api/shop/orders/<order_id>/returns/`` after reason step.
+    Confirm return: POST ``/api/shop/orders/returns/?order_id=<id>`` (or path ``.../orders/<id>/returns/``).
     Cancel: client-only (close modal); no server endpoint.
     """
 
@@ -1699,10 +1699,46 @@ class OrderReturnFlowMetaAPIView(APIView):
 
 
 class OrderReturnListCreateAPIView(APIView):
+    """
+    List or create returns for an order.
+
+    Path: GET/POST /api/shop/orders/<order_id>/returns/
+    Query: GET/POST /api/shop/orders/returns/?order_id=<order_id>
+    """
+
     permission_classes = [IsAuthenticated]
 
-    def get(self, request, pk):
-        order = get_object_or_404(Order, pk=pk, user=request.user)
+    def _resolve_order_pk(self, request, pk=None):
+        if pk is not None:
+            return pk
+        raw_order_id = (request.query_params.get('order_id') or '').strip()
+        if not raw_order_id:
+            return None
+        try:
+            return int(raw_order_id)
+        except (TypeError, ValueError):
+            return None
+
+    def _order_pk_required_response(self):
+        return Response(
+            {'detail': 'order_id query parameter is required.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    def _invalid_order_id_response(self):
+        return Response(
+            {'detail': 'order_id must be an integer.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    def get(self, request, pk=None):
+        order_pk = self._resolve_order_pk(request, pk)
+        if order_pk is None:
+            raw = (request.query_params.get('order_id') or '').strip()
+            if raw:
+                return self._invalid_order_id_response()
+            return self._order_pk_required_response()
+        order = get_object_or_404(Order, pk=order_pk, user=request.user)
         qs = (
             order.returns.prefetch_related('lines__order_item')
             .select_related('order')
@@ -1710,8 +1746,14 @@ class OrderReturnListCreateAPIView(APIView):
         )
         return Response(OrderReturnReadSerializer(qs, many=True).data)
 
-    def post(self, request, pk):
-        order = get_object_or_404(Order, pk=pk, user=request.user)
+    def post(self, request, pk=None):
+        order_pk = self._resolve_order_pk(request, pk)
+        if order_pk is None:
+            raw = (request.query_params.get('order_id') or '').strip()
+            if raw:
+                return self._invalid_order_id_response()
+            return self._order_pk_required_response()
+        order = get_object_or_404(Order, pk=order_pk, user=request.user)
         ser = OrderReturnCreateSerializer(
             data=request.data,
             context={'order': order, 'request': request},

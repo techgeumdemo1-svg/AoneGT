@@ -1,3 +1,5 @@
+.otp_purge_scheduler.lock
+
 __pycache__/
 *.pyc
 *.pyo

@@ -165,6 +165,16 @@ class LoginSerializer(serializers.Serializer):
         }
 
 
+class LogoutSerializer(serializers.Serializer):
+    refresh = serializers.CharField()
+
+    def validate_refresh(self, value):
+        value = (value or '').strip()
+        if not value:
+            raise serializers.ValidationError('Refresh token is required.')
+        return value
+
+
 class ForgotPasswordRequestSerializer(serializers.Serializer):
     email = serializers.EmailField()
 

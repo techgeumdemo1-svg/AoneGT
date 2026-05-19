@@ -201,7 +201,7 @@ class BannerSerializer(serializers.ModelSerializer):
     """Public read — carousel banners."""
 
     banner_id = serializers.IntegerField(source='id', read_only=True)
-    store_id = serializers.IntegerField(source='store_id', read_only=True, allow_null=True)
+    store_id = serializers.IntegerField(read_only=True, allow_null=True)
 
     class Meta:
         model = Banner

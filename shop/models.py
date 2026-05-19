@@ -107,6 +107,13 @@ class Order(models.Model):
         CASH_ON_DELIVERY = 'cash_on_delivery', 'Cash on Delivery'
         PAY_BY_LINK = 'pay_by_link', 'Pay by Link'
 
+    class CustomerTrackingStage(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        CONFIRMED = 'confirmed', 'Confirmed'
+        UNDER_PROCESSING = 'under_processing', 'Under Processing'
+        OUT_FOR_DELIVERY = 'out_for_delivery', 'Out for Delivery'
+        DELIVERED = 'delivered', 'Delivered'
+
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='orders')
     store = models.ForeignKey(Store, on_delete=models.PROTECT, related_name='orders')
     status = models.CharField(
@@ -147,6 +154,18 @@ class Order(models.Model):
     zoho_salesorder_id = models.CharField(max_length=120, blank=True)
     zoho_sync_error = models.TextField(blank=True)
     zoho_synced_at = models.DateTimeField(null=True, blank=True)
+
+    customer_tracking_stage = models.CharField(
+        max_length=32,
+        choices=CustomerTrackingStage.choices,
+        blank=True,
+        help_text='Customer-facing delivery stage for the app tracking rail and emails.',
+    )
+    out_for_delivery_email_sent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text='Set when the out-for-delivery email was sent to the customer.',
+    )
 
     loyalty_points_redeemed = models.PositiveIntegerField(
         default=0,

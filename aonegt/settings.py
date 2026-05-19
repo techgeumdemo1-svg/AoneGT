@@ -24,6 +24,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
     'accounts',
     'catalog',
@@ -155,7 +156,29 @@ except ValueError:
     EMAIL_TIMEOUT = 20
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'webmaster@localhost')
 ORDER_CONFIRMATION_EMAIL = os.getenv('ORDER_CONFIRMATION_EMAIL', 'True') == 'True'
+ORDER_OUT_FOR_DELIVERY_EMAIL = os.getenv('ORDER_OUT_FOR_DELIVERY_EMAIL', 'True') == 'True'
 FRONTEND_RESET_URL = os.getenv('FRONTEND_RESET_URL', 'aonegt://reset-password')
+
+# --- OTP cleanup (background scheduler + manage.py purge_expired_otps) ---
+OTP_PURGE_SCHEDULER_ENABLED = os.getenv('OTP_PURGE_SCHEDULER_ENABLED', 'True').strip().lower() in (
+    'true',
+    '1',
+    'yes',
+)
+try:
+    OTP_PURGE_INTERVAL_MINUTES = max(1, int(os.getenv('OTP_PURGE_INTERVAL_MINUTES', '60')))
+except ValueError:
+    OTP_PURGE_INTERVAL_MINUTES = 60
+OTP_PURGE_INCLUDE_USED = os.getenv('OTP_PURGE_INCLUDE_USED', 'False').strip().lower() in (
+    'true',
+    '1',
+    'yes',
+)
+OTP_PURGE_RUN_ON_START = os.getenv('OTP_PURGE_RUN_ON_START', 'True').strip().lower() in (
+    'true',
+    '1',
+    'yes',
+)
 
 # --- Loyalty (AED): earn 1 point per LOYALTY_AED_PER_POINT_EARNED spent; 1 point = LOYALTY_POINT_VALUE_AED off.
 LOYALTY_AED_PER_POINT_EARNED = int(os.getenv('LOYALTY_AED_PER_POINT_EARNED', '100'))
@@ -205,9 +228,19 @@ ZOHO_IMAGE_PLACEHOLDER_URL = os.getenv(
 # Comma-separated Zoho storefront collection ids to probe when saving a product
 # (Storefront Get Collection API). See zoho_integration.storefront_collections.
 ZOHO_COLLECTION_PROBE_IDS = os.getenv('ZOHO_COLLECTION_PROBE_IDS', '').strip()
-# Optional default Zoho storefront collection id for GET /zoho/multi/best-deals/
-# when the client omits collection_id (same Storefront Get Collection API).
+# GET /zoho/multi/best-deals/ source: admin | category | collection
+# Set SOURCE=collection + COLLECTION_ID to drive best deals from a Zoho storefront collection.
 ZOHO_BEST_DEALS_COLLECTION_ID = os.getenv('ZOHO_BEST_DEALS_COLLECTION_ID', '').strip()
+ZOHO_BEST_DEALS_COLLECTION_NAME = os.getenv('ZOHO_BEST_DEALS_COLLECTION_NAME', 'Best Deals').strip()
+_best_deals_source_env = os.getenv('ZOHO_BEST_DEALS_SOURCE', '').strip().lower()
+if _best_deals_source_env:
+    ZOHO_BEST_DEALS_SOURCE = _best_deals_source_env
+elif ZOHO_BEST_DEALS_COLLECTION_ID:
+    ZOHO_BEST_DEALS_SOURCE = 'collection'
+else:
+    ZOHO_BEST_DEALS_SOURCE = 'admin'
+ZOHO_BEST_DEALS_CATEGORY_ID = os.getenv('ZOHO_BEST_DEALS_CATEGORY_ID', '').strip()
+ZOHO_BEST_DEALS_CATEGORY_NAME = os.getenv('ZOHO_BEST_DEALS_CATEGORY_NAME', 'Best Deals').strip()
 
 
 ZOHO_REDIRECT_URI = os.getenv("ZOHO_REDIRECT_URI")

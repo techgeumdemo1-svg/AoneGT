@@ -45,6 +45,7 @@ urlpatterns = [
     path('rewards/points/', RewardPointsAPIView.as_view(), name='shop-reward-points'),
     path('rewards/issue-coupon/', LoyaltyIssueCouponAPIView.as_view(), name='shop-reward-issue-coupon'),
     path('orders/return-flow/', OrderReturnFlowMetaAPIView.as_view(), name='shop-order-return-flow'),
+    path('orders/returns/', OrderReturnListCreateAPIView.as_view(), name='shop-order-returns-by-query'),
     path('orders/<int:pk>/returns/', OrderReturnListCreateAPIView.as_view(), name='shop-order-returns'),
     path('orders/reorder/', OrderReorderAPIView.as_view(), name='shop-order-reorder-by-query'),
     path('orders/', OrderListAPIView.as_view(), name='shop-order-list'),

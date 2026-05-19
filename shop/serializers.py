@@ -67,7 +67,8 @@ def return_flow_ui_payload():
         'confirm_return': {
             'type': 'http',
             'method': 'POST',
-            'path_template': '/api/shop/orders/{order_id}/returns/',
+            'path_template': '/api/shop/orders/returns/?order_id={order_id}',
+            'path_template_alt': '/api/shop/orders/{order_id}/returns/',
             'description': (
                 'Call after user selects lines and reason. JSON body: return_reason, '
                 'lines[{order_item_id, quantity}], optional note / return_reason_detail.'
@@ -587,11 +588,47 @@ class OrderItemSerializer(serializers.ModelSerializer):
 ORDER_CUSTOMER_TRACKING_PIPELINE = (
     ('pending', 'Pending'),
     ('confirmed', 'Confirmed'),
-    ('packed', 'Packed'),
-    ('shipped', 'Shipped'),
+    ('under_processing', 'Under Processing'),
     ('out_for_delivery', 'Out for Delivery'),
     ('delivered', 'Delivered'),
 )
+
+ORDER_CUSTOMER_TRACKING_STAGE_LABELS = dict(ORDER_CUSTOMER_TRACKING_PIPELINE)
+
+
+def _tracking_stage_index(stage_key: str) -> int:
+    keys = [k for k, _ in ORDER_CUSTOMER_TRACKING_PIPELINE]
+    try:
+        return keys.index(stage_key)
+    except ValueError:
+        return 0
+
+
+def _effective_customer_tracking_stage(order: Order) -> str:
+    stage = (getattr(order, 'customer_tracking_stage', '') or '').strip()
+    if stage and stage in ORDER_CUSTOMER_TRACKING_STAGE_LABELS:
+        return stage
+    if order.status == Order.Status.SYNCED:
+        return 'confirmed'
+    return 'pending'
+
+
+def order_allows_returns(order: Order) -> bool:
+    """Customer may start a return when Zoho sync completed or order marked delivered."""
+    if order.status == Order.Status.CANCELLED:
+        return False
+    if order.status == Order.Status.SYNCED:
+        return True
+    stage = (getattr(order, 'customer_tracking_stage', '') or '').strip()
+    return stage == Order.CustomerTrackingStage.DELIVERED
+
+
+def order_return_ineligible_message(order: Order) -> str:
+    stage = (getattr(order, 'customer_tracking_stage', '') or '').strip() or 'none'
+    return (
+        "Returns require order status 'synced' or customer tracking 'delivered'. "
+        f"Current status={order.status}, tracking_stage={stage}."
+    )
 
 
 class OrderSerializer(serializers.ModelSerializer):
@@ -626,6 +663,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'billing_state', 'billing_postal_code', 'billing_country',
             'zoho_checkout_id', 'zoho_salesorder_id',
             'zoho_sync_error', 'zoho_synced_at',
+            'customer_tracking_stage', 'out_for_delivery_email_sent_at',
             'returned_total', 'balance_remaining', 'refunded_amount', 'net_paid',
             'loyalty_points_redeemed', 'loyalty_discount',
             'items', 'created_at', 'updated_at',
@@ -647,7 +685,7 @@ class OrderSerializer(serializers.ModelSerializer):
 
     def get_return_eligible_lines(self, obj):
         """Lines still returnable (for select-items-to-return modal). Empty if order not eligible."""
-        if obj.status != Order.Status.SYNCED:
+        if not order_allows_returns(obj):
             return []
         currency = ((obj.currency or '') or 'AED').strip() or 'AED'
         result = []
@@ -680,6 +718,10 @@ class OrderSerializer(serializers.ModelSerializer):
         if obj.status == Order.Status.SYNCED:
             if self._order_return_status(obj) == 'full':
                 return 'Returned'
+            stage = _effective_customer_tracking_stage(obj)
+            label = ORDER_CUSTOMER_TRACKING_STAGE_LABELS.get(stage)
+            if label:
+                return label
             return 'Delivered'
         return 'Pending'
 
@@ -722,20 +764,28 @@ class OrderSerializer(serializers.ModelSerializer):
                 'is_cancelled': False,
                 'is_returned': False,
                 'note': (
-                    'Further stages appear after the order is confirmed. '
-                    'Live courier steps require fulfilment data from Zoho.'
+                    'Further stages appear after the order is confirmed.'
                 ),
             }
 
-        steps = [step_dict(k, l, 'completed') for k, l in pipeline]
-        steps[-1] = step_dict(pipeline[-1][0], pipeline[-1][1], 'current')
+        stage_key = _effective_customer_tracking_stage(obj)
+        stage_idx = _tracking_stage_index(stage_key)
+        steps = []
+        for i, (k, l) in enumerate(pipeline):
+            if i < stage_idx:
+                state = 'completed'
+            elif i == stage_idx:
+                state = 'current'
+            else:
+                state = 'upcoming'
+            steps.append(step_dict(k, l, state))
         note = None
         if ret == 'partial':
-            note = 'Some items were returned; order is still delivered with partial refund.'
+            note = 'Some items were returned; order is still in progress with partial refund.'
         return {
             'steps': steps,
-            'current_key': pipeline[-1][0],
-            'current_label': pipeline[-1][1],
+            'current_key': stage_key,
+            'current_label': ORDER_CUSTOMER_TRACKING_STAGE_LABELS.get(stage_key, stage_key),
             'is_cancelled': False,
             'is_returned': False,
             'note': note,
@@ -748,7 +798,7 @@ class OrderSerializer(serializers.ModelSerializer):
         return bool(obj.items.exists())
 
     def get_can_return(self, obj):
-        if obj.status != Order.Status.SYNCED:
+        if not order_allows_returns(obj):
             return False
         return self._order_return_status(obj) != 'full'
 
@@ -968,10 +1018,8 @@ class OrderReturnCreateSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         order: Order = self.context['order']
-        if order.status != Order.Status.SYNCED:
-            raise serializers.ValidationError(
-                {'detail': 'Returns are only allowed after the order is delivered (synced).'},
-            )
+        if not order_allows_returns(order):
+            raise serializers.ValidationError({'detail': order_return_ineligible_message(order)})
         detail = (attrs.get('return_reason_detail') or '').strip()
         if attrs['return_reason'] == OrderReturn.ReturnReason.OTHER and not detail:
             raise serializers.ValidationError(
