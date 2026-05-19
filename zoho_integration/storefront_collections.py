@@ -30,22 +30,16 @@ def _storefront_origin(commerce_base_url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
-def fetch_storefront_collection_json(
-    commerce_base_url: str,
-    domain_name: str,
-    collection_id: str,
-    *,
-    timeout: int = 25,
-) -> dict:
-    """
-    GET /storefront/api/v1/collections/{id} with domain-name header (no OAuth).
-    """
-    cid = (collection_id or "").strip()
-    host = (domain_name or "").strip().replace("https://", "").replace("http://", "").split("/")[0].lower()
-    if not cid or not host:
+def _normalize_storefront_host(domain_name: str) -> str:
+    return (domain_name or "").strip().replace("https://", "").replace("http://", "").split("/")[0].lower()
+
+
+def _storefront_get_json(origin: str, host: str, resource_path: str, *, timeout: int) -> dict:
+    """GET {origin}/storefront/api/v1/{resource_path} with domain-name header."""
+    path = (resource_path or "").strip().lstrip("/")
+    if not path:
         return {}
-    origin = _storefront_origin(commerce_base_url)
-    url = f"{origin}/storefront/api/v1/collections/{quote(cid, safe='')}"
+    url = f"{origin}/storefront/api/v1/{path}"
     try:
         response = requests.get(
             url,
@@ -55,15 +49,93 @@ def fetch_storefront_collection_json(
             },
             params={"format": "json"},
             timeout=timeout,
+            allow_redirects=True,
         )
         if not response.ok:
+            logger.warning(
+                "storefront collection request failed: HTTP %s domain=%s url=%s body=%s",
+                response.status_code,
+                host,
+                url,
+                (response.text or "")[:300],
+            )
             return {}
         if not (response.content or b"").strip():
             return {}
         return response.json()
-    except (requests.RequestException, ValueError) as e:
-        logger.debug("storefront collection fetch failed %s: %s", cid, e)
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning("storefront collection request failed domain=%s url=%s: %s", host, url, exc)
         return {}
+
+
+def _payload_root(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        return {}
+    root = payload.get("payload")
+    return root if isinstance(root, dict) else {}
+
+
+def _storefront_redirect_path(payload: dict) -> str:
+    redirect = str(_payload_root(payload).get("redirect") or "").strip()
+    if not redirect:
+        return ""
+    return redirect.split("?")[0].strip()
+
+
+def _collection_payload_has_products(payload: dict) -> bool:
+    return bool(extract_storefront_collection_products(payload))
+
+
+def fetch_storefront_collection_json(
+    commerce_base_url: str,
+    domain_name: str,
+    collection_id: str,
+    *,
+    collection_url: str = "",
+    timeout: int = 25,
+) -> dict:
+    """
+    GET /storefront/api/v1/collections/{id} with domain-name header (no OAuth).
+
+    Some stores return payload.redirect to /collections/{slug}/{id}; we follow that.
+    Optional collection_url (e.g. best-deals from admin API) is used as a fallback path.
+    """
+    cid = (collection_id or "").strip()
+    host = _normalize_storefront_host(domain_name)
+    if not cid or not host:
+        return {}
+    origin = _storefront_origin(commerce_base_url)
+    slug = (collection_url or "").strip().strip("/")
+
+    candidates: list[str] = [f"collections/{quote(cid, safe='')}"]
+    if slug:
+        candidates.append(f"collections/{quote(slug, safe='')}/{quote(cid, safe='')}")
+
+    seen_paths: set[str] = set()
+    last_data: dict = {}
+
+    def _try_path(resource_path: str) -> dict:
+        if not resource_path or resource_path in seen_paths:
+            return {}
+        seen_paths.add(resource_path)
+        return _storefront_get_json(origin, host, resource_path, timeout=timeout)
+
+    for resource_path in candidates:
+        data = _try_path(resource_path)
+        if not data:
+            continue
+        last_data = data
+        if _collection_payload_has_products(data):
+            return data
+        follow_path = _storefront_redirect_path(data).lstrip("/")
+        if follow_path:
+            followed = _try_path(follow_path)
+            if followed:
+                last_data = followed
+                if _collection_payload_has_products(followed):
+                    return followed
+
+    return last_data
 
 
 def _storefront_collection_dict(payload: dict) -> dict:

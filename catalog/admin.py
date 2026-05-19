@@ -71,9 +71,54 @@ class ProductReviewAdmin(admin.ModelAdmin):
 
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
-    list_display = ('name', 'store', 'category', 'sku', 'price', 'currency', 'is_active')
-    list_filter = ('is_active', 'store', 'currency')
+    list_display = (
+        'name',
+        'store',
+        'category',
+        'sku',
+        'price',
+        'currency',
+        'is_best_deal',
+        'best_deal_sort_order',
+        'is_active',
+    )
+    list_filter = ('is_active', 'is_best_deal', 'store', 'currency')
+    list_editable = ('is_best_deal', 'best_deal_sort_order')
     search_fields = ('name', 'slug', 'category', 'sku', 'zoho_product_id')
     prepopulated_fields = {'slug': ('name',)}
     autocomplete_fields = ('store',)
     inlines = [ProductReviewInline]
+    fieldsets = (
+        (
+            None,
+            {
+                'fields': (
+                    'store',
+                    'name',
+                    'slug',
+                    'category',
+                    'sku',
+                    'description',
+                    'price',
+                    'compare_at_price',
+                    'currency',
+                    'image_url',
+                    'is_active',
+                ),
+            },
+        ),
+        (
+            'Best deals (app)',
+            {
+                'fields': ('is_best_deal', 'best_deal_sort_order'),
+                'description': (
+                    'Mark products to feature in GET /zoho/multi/best-deals/ (source=admin). '
+                    'Requires zoho_product_id for live price/stock from Zoho.'
+                ),
+            },
+        ),
+        (
+            'Zoho Commerce',
+            {'fields': ('zoho_product_id', 'zoho_category_id', 'zoho_collection_id')},
+        ),
+    )

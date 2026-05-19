@@ -64,6 +64,9 @@ def apply_order_sync_transition(
         order.zoho_sync_error = ''
         order.zoho_synced_at = dj_tz.now()
         update_fields.extend(['zoho_sync_error', 'zoho_synced_at'])
+        if not (order.customer_tracking_stage or '').strip():
+            order.customer_tracking_stage = Order.CustomerTrackingStage.CONFIRMED
+            update_fields.append('customer_tracking_stage')
     elif clear_error:
         order.zoho_sync_error = ''
         update_fields.append('zoho_sync_error')

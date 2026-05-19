@@ -8,6 +8,8 @@ from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.tokens import RefreshToken
 from shop.models import Cart, Order, UserAddress, WishlistItem
 from .throttles import (
     ChangePasswordOTPThrottle,
@@ -31,6 +33,7 @@ from .serializers import (
     EmailCheckSerializer,
     RequestRegistrationOTPSerializer,
     LoginSerializer,
+    LogoutSerializer,
     ForgotPasswordRequestSerializer,
     VerifyResetOTPSerializer,
     ResetPasswordSerializer,
@@ -210,6 +213,31 @@ class LoginAPIView(APIView):
         serializer = LoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class LogoutAPIView(APIView):
+    """
+    Invalidate the refresh token (server-side blacklist).
+    Client should also discard access and refresh tokens locally.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = LogoutSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            token = RefreshToken(serializer.validated_data['refresh'])
+            token.blacklist()
+        except TokenError:
+            return Response(
+                {'detail': 'Invalid or expired refresh token.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(
+            {'message': 'Logged out successfully.'},
+            status=status.HTTP_200_OK,
+        )
 
 
 class ForgotPasswordAPIView(APIView):

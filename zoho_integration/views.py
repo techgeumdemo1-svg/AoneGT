@@ -11,12 +11,18 @@ from rest_framework import status
 
 from .models import ZohoCommerceAccount
 from .services import ZohoCommerceService
+from .commerce_collections import (
+    collection_summary,
+    list_zoho_commerce_collections,
+    resolve_collection_id_by_name,
+)
 from .storefront_collections import (
     extract_storefront_collection_name,
     extract_storefront_collection_products,
     fetch_storefront_collection_json,
 )
-from catalog.models import Store
+from shop.services.zoho_commerce import ZohoCommerceError
+from catalog.models import Product, Store
 from catalog.text_utils import html_to_plain_text
 
 
@@ -1350,47 +1356,205 @@ class MultiAccountZohoProductSearchAPIView(APIView):
             )
 
 
+def _zoho_detail_product_dict(detail_data: dict) -> dict:
+    product = (
+        detail_data.get("product")
+        or detail_data.get("item")
+        or detail_data.get("data")
+        or detail_data
+    )
+    return product if isinstance(product, dict) else {}
+
+
+def _normalize_best_deals_product_images(
+    request,
+    store: Store,
+    store_domain: str,
+    product_summaries: list[dict],
+) -> None:
+    for row in product_summaries:
+        current_image = (row.get("image_url") or "").strip()
+        normalized_image = build_image_url(store_domain, current_image)
+        if normalized_image:
+            row["image_url"] = normalized_image
+            continue
+        if current_image and (
+            current_image.startswith("http://")
+            or current_image.startswith("https://")
+            or current_image.startswith("/")
+        ):
+            continue
+        pid = (row.get("product_id") or "").strip()
+        if not pid:
+            continue
+        row["image_url"] = request.build_absolute_uri(
+            f"/api/shop/zoho-products/{pid}/image/?store_id={store.pk}"
+        )
+
+
+def _best_deal_summary_from_local_zoho(local: Product, zoho_row: dict, store_domain: str) -> dict:
+    summary = _product_summary(zoho_row, store_domain=store_domain)
+    zpid = (local.zoho_product_id or "").strip()
+    if not summary.get("product_id"):
+        summary["product_id"] = zpid
+    if not (summary.get("product_name") or "").strip():
+        summary["product_name"] = local.name
+    price = str(summary.get("price") or "").strip()
+    if price in ("", "0", "0.00"):
+        summary["price"] = str(local.price)
+    if not (summary.get("sku") or "").strip():
+        summary["sku"] = local.sku or ""
+    if not (summary.get("image_url") or "").strip() and (local.image_url or "").strip():
+        summary["image_url"] = local.image_url
+    summary["catalog_product_id"] = local.pk
+    summary["is_best_deal"] = True
+    summary["best_deal_sort_order"] = local.best_deal_sort_order
+    summary["currency"] = (local.currency or "AED").strip() or "AED"
+    return summary
+
+
+def _resolve_best_deals_category_id(
+    service: ZohoCommerceService,
+    organization_id: str,
+    *,
+    category_id: str,
+    category_name: str,
+) -> tuple[str, str]:
+    cid = (category_id or "").strip()
+    if cid:
+        resolved_name = ""
+        try:
+            category_data = service.list_categories(organization_id=organization_id)
+            category_rows = category_data.get("categories", []) or category_data.get("category", [])
+            for row in category_rows:
+                if not isinstance(row, dict):
+                    continue
+                row_id = str(row.get("category_id") or row.get("id") or "").strip()
+                if row_id == cid:
+                    resolved_name = _category_name(row)
+                    break
+        except Exception:
+            pass
+        return cid, resolved_name
+
+    want_name = (category_name or "").strip()
+    if not want_name:
+        return "", ""
+
+    category_data = service.list_categories(organization_id=organization_id)
+    category_rows = category_data.get("categories", []) or category_data.get("category", [])
+    category_rows = [c for c in category_rows if isinstance(c, dict)]
+    want_lower = want_name.lower()
+    exact: list[tuple[str, str]] = []
+    partial: list[tuple[str, str]] = []
+    for row in category_rows:
+        row_id = str(row.get("category_id") or row.get("id") or "").strip()
+        if not row_id:
+            continue
+        name = _category_name(row)
+        name_lower = name.lower()
+        if name_lower == want_lower:
+            exact.append((row_id, name))
+        elif want_lower in name_lower:
+            partial.append((row_id, name))
+    if exact:
+        return exact[0]
+    if partial:
+        return partial[0]
+    return "", ""
+
+
 class MultiAccountZohoBestDealsAPIView(APIView):
     """
-    Products in a Zoho Storefront collection (e.g. a curated "Best deals" collection).
+    Best deals for the mobile app.
 
-    Uses the public Storefront Get Collection API (same collection ids as admin / probes).
+    Default (source=admin): Django admin marks catalog.Product.is_best_deal; API loads
+    Zoho product detail per zoho_product_id and merges live Zoho fields with local order/ids.
+
+    Alternatives:
+      - source=category — Zoho category (ZOHO_BEST_DEALS_CATEGORY_ID / category_name)
+      - source=collection — Zoho storefront collection (collection_id, collection_name, or env)
+      - GET /zoho/multi/collections/ — list collection ids for an organization (admin API)
 
     Query params:
-      - account_id (required)
-      - organization_id (required)
-      - collection_id (optional): defaults to ZOHO_BEST_DEALS_COLLECTION_ID in settings
+      - account_id + organization_id, or store_id (resolves org / account when possible)
+      - source (optional): admin | category | collection (default from ZOHO_BEST_DEALS_SOURCE)
+      - collection_id (optional): when set, forces source=collection (else ZOHO_BEST_DEALS_COLLECTION_ID)
       - limit (optional, default 50, max 200)
-
-    Requires a catalog Store with zoho_org_id matching organization_id and zoho_store_domain set.
     """
+
+    @staticmethod
+    def _resolve_best_deals_source(request) -> str:
+        if (request.GET.get("collection_id") or "").strip():
+            return "collection"
+        source_param = (request.GET.get("source") or "").strip().lower()
+        if source_param:
+            return source_param
+        return (
+            getattr(settings, "ZOHO_BEST_DEALS_SOURCE", "admin") or "admin"
+        ).strip().lower()
 
     def get(self, request):
         account_id_raw = (request.GET.get("account_id") or "").strip()
         organization_id = (request.GET.get("organization_id") or "").strip()
-        collection_id = (request.GET.get("collection_id") or "").strip()
-        if not collection_id:
-            collection_id = str(getattr(settings, "ZOHO_BEST_DEALS_COLLECTION_ID", "") or "").strip()
+        store_id_raw = (request.GET.get("store_id") or "").strip()
+        source = self._resolve_best_deals_source(request)
         limit_raw = (request.GET.get("limit") or "").strip()
+
+        if store_id_raw:
+            try:
+                store_pk = int(store_id_raw)
+            except ValueError:
+                return Response(
+                    {"status": "error", "message": "store_id must be an integer"},
+                    status=400,
+                )
+            store_from_id = Store.objects.filter(pk=store_pk).first()
+            if not store_from_id:
+                return Response(
+                    {"status": "error", "message": "Store not found"},
+                    status=404,
+                )
+            resolved_org = str(store_from_id.zoho_org_id or "").strip()
+            if not resolved_org:
+                return Response(
+                    {
+                        "status": "error",
+                        "message": "Store has no zoho_org_id configured",
+                    },
+                    status=400,
+                )
+            if organization_id and organization_id != resolved_org:
+                return Response(
+                    {
+                        "status": "error",
+                        "message": "store_id does not match organization_id",
+                    },
+                    status=400,
+                )
+            organization_id = resolved_org
+
+        if not account_id_raw and organization_id:
+            linked = ZohoCommerceAccount.objects.filter(
+                organization_id=organization_id,
+                is_active=True,
+            ).first()
+            if linked:
+                account_id_raw = str(linked.id)
 
         if not account_id_raw:
             return Response(
-                {"status": "error", "message": "account_id query parameter is required"},
+                {
+                    "status": "error",
+                    "message": "account_id query parameter is required (or use store_id with a linked Zoho account)",
+                },
                 status=400,
             )
         if not organization_id:
             return Response(
-                {"status": "error", "message": "organization_id query parameter is required"},
-                status=400,
-            )
-        if not collection_id:
-            return Response(
                 {
                     "status": "error",
-                    "message": (
-                        "collection_id query parameter is required "
-                        "(or set ZOHO_BEST_DEALS_COLLECTION_ID)"
-                    ),
+                    "message": "organization_id or store_id query parameter is required",
                 },
                 status=400,
             )
@@ -1433,6 +1597,257 @@ class MultiAccountZohoBestDealsAPIView(APIView):
                 status=404,
             )
         store_domain = (getattr(store, "zoho_store_domain", "") or "").strip()
+
+        if source == "collection":
+            return self._best_deals_from_collection(
+                request,
+                account=account,
+                organization_id=organization_id,
+                store=store,
+                store_domain=store_domain,
+                limit=limit,
+            )
+        if source == "category":
+            return self._best_deals_from_category(
+                request,
+                account=account,
+                organization_id=organization_id,
+                store=store,
+                store_domain=store_domain,
+                limit=limit,
+            )
+        if source != "admin":
+            return Response(
+                {"status": "error", "message": "source must be admin, category, or collection"},
+                status=400,
+            )
+        return self._best_deals_from_admin(
+            request,
+            account=account,
+            organization_id=organization_id,
+            store=store,
+            store_domain=store_domain,
+            limit=limit,
+        )
+
+    def _best_deals_from_admin(
+        self,
+        request,
+        *,
+        account: ZohoCommerceAccount,
+        organization_id: str,
+        store: Store,
+        store_domain: str,
+        limit: int,
+    ):
+        local_rows = list(
+            Product.objects.filter(
+                store=store,
+                is_best_deal=True,
+                is_active=True,
+            ).order_by("best_deal_sort_order", "name")[:limit]
+        )
+
+        service = ZohoCommerceService(account)
+        product_summaries: list[dict] = []
+        skipped: list[dict] = []
+
+        for local in local_rows:
+            zpid = (local.zoho_product_id or "").strip()
+            if not zpid:
+                skipped.append(
+                    {
+                        "catalog_product_id": local.pk,
+                        "product_name": local.name,
+                        "reason": "missing zoho_product_id",
+                    }
+                )
+                continue
+            try:
+                detail_data = service.get_product_detail(
+                    organization_id=organization_id,
+                    product_id=zpid,
+                )
+            except Exception as e:
+                skipped.append(
+                    {
+                        "catalog_product_id": local.pk,
+                        "product_id": zpid,
+                        "product_name": local.name,
+                        "reason": str(e),
+                    }
+                )
+                continue
+
+            zoho_row = _zoho_detail_product_dict(detail_data)
+            if not zoho_row:
+                skipped.append(
+                    {
+                        "catalog_product_id": local.pk,
+                        "product_id": zpid,
+                        "product_name": local.name,
+                        "reason": "empty Zoho product detail",
+                    }
+                )
+                continue
+
+            product_summaries.append(
+                _best_deal_summary_from_local_zoho(local, zoho_row, store_domain)
+            )
+
+        _normalize_best_deals_product_images(request, store, store_domain, product_summaries)
+
+        payload = {
+            "status": "success",
+            "source": "admin",
+            "account_id": account.id,
+            "account_name": account.name,
+            "account_email": account.email,
+            "organization_id": organization_id,
+            "store_id": store.pk,
+            "count": len(product_summaries),
+            "products": product_summaries,
+        }
+        if skipped:
+            payload["skipped"] = skipped
+        if not product_summaries and not local_rows:
+            payload["message"] = (
+                "No products marked as best deal. In Django admin, open Products and enable "
+                "'Is best deal' (requires zoho_product_id)."
+            )
+        return Response(payload, status=200)
+
+    def _best_deals_from_category(
+        self,
+        request,
+        *,
+        account: ZohoCommerceAccount,
+        organization_id: str,
+        store: Store,
+        store_domain: str,
+        limit: int,
+    ):
+        category_id = (request.GET.get("category_id") or "").strip()
+        if not category_id:
+            category_id = str(getattr(settings, "ZOHO_BEST_DEALS_CATEGORY_ID", "") or "").strip()
+        category_name = (request.GET.get("category_name") or "").strip()
+        if not category_name:
+            category_name = str(getattr(settings, "ZOHO_BEST_DEALS_CATEGORY_NAME", "") or "").strip()
+        include_descendants = _as_bool(request.GET.get("include_descendants"), default=True)
+
+        service = ZohoCommerceService(account)
+        try:
+            category_id, category_name = _resolve_best_deals_category_id(
+                service,
+                organization_id,
+                category_id=category_id,
+                category_name=category_name,
+            )
+        except Exception as e:
+            return Response({"status": "error", "message": str(e)}, status=400)
+
+        if not category_id:
+            return Response(
+                {
+                    "status": "error",
+                    "message": (
+                        "No best-deals category found. Pass category_id or create a Zoho category "
+                        "(e.g. Best Deals)."
+                    ),
+                },
+                status=404,
+            )
+
+        raw_products = _zoho_product_rows_for_org(
+            service,
+            organization_id,
+            category_id=category_id,
+            include_descendants=include_descendants,
+        )[:limit]
+        _enrich_zoho_list_product_rows_from_detail(service, organization_id, raw_products)
+
+        product_summaries = [_product_summary(p, store_domain=store_domain) for p in raw_products]
+        for row in product_summaries:
+            row["category_id"] = category_id
+        _normalize_best_deals_product_images(request, store, store_domain, product_summaries)
+
+        return Response(
+            {
+                "status": "success",
+                "source": "category",
+                "account_id": account.id,
+                "account_name": account.name,
+                "account_email": account.email,
+                "organization_id": organization_id,
+                "category_id": category_id,
+                "category_name": category_name,
+                "include_descendants": include_descendants,
+                "count": len(product_summaries),
+                "products": product_summaries,
+            },
+            status=200,
+        )
+
+    def _best_deals_from_collection(
+        self,
+        request,
+        *,
+        account: ZohoCommerceAccount,
+        organization_id: str,
+        store: Store,
+        store_domain: str,
+        limit: int,
+    ):
+        collection_id = (request.GET.get("collection_id") or "").strip()
+        if not collection_id:
+            collection_id = str(getattr(settings, "ZOHO_BEST_DEALS_COLLECTION_ID", "") or "").strip()
+
+        collection_name_query = (request.GET.get("collection_name") or "").strip()
+        if not collection_name_query:
+            collection_name_query = str(
+                getattr(settings, "ZOHO_BEST_DEALS_COLLECTION_NAME", "") or ""
+            ).strip()
+
+        if not collection_id and collection_name_query:
+            try:
+                admin_rows = list_zoho_commerce_collections(
+                    organization_id,
+                    store=store,
+                )
+                collection_id, _resolved_name = resolve_collection_id_by_name(
+                    admin_rows,
+                    collection_name_query,
+                )
+            except ZohoCommerceError as exc:
+                return Response(
+                    {"status": "error", "message": str(exc)},
+                    status=400,
+                )
+            if not collection_id:
+                return Response(
+                    {
+                        "status": "error",
+                        "message": (
+                            f'No collection named "{collection_name_query}" found for '
+                            f'organization_id={organization_id}. '
+                            'Use GET /zoho/multi/collections/ to list available collections.'
+                        ),
+                    },
+                    status=404,
+                )
+
+        if not collection_id:
+            return Response(
+                {
+                    "status": "error",
+                    "message": (
+                        "collection_id is required for source=collection "
+                        "(or set ZOHO_BEST_DEALS_COLLECTION_ID, or pass collection_name=Best Deals)"
+                    ),
+                },
+                status=400,
+            )
+
         host = store_domain.replace("https://", "").replace("http://", "").split("/")[0].lower()
         if not host:
             return Response(
@@ -1444,47 +1859,63 @@ class MultiAccountZohoBestDealsAPIView(APIView):
             )
 
         commerce_url = (getattr(account, "commerce_base_url", "") or "").strip() or "https://commerce.zoho.com"
-        payload = fetch_storefront_collection_json(commerce_url, host, collection_id)
-        if not payload:
+        collection_url_slug = (request.GET.get("collection_url") or "").strip().strip("/")
+        if not collection_url_slug:
+            try:
+                for row in list_zoho_commerce_collections(organization_id, store=store):
+                    rid = str(row.get("collection_id") or row.get("id") or "").strip()
+                    if rid == collection_id:
+                        collection_url_slug = str(
+                            row.get("url") or row.get("collection_url") or ""
+                        ).strip().strip("/")
+                        break
+            except ZohoCommerceError:
+                pass
+
+        payload = fetch_storefront_collection_json(
+            commerce_url,
+            host,
+            collection_id,
+            collection_url=collection_url_slug,
+        )
+        if not payload or not extract_storefront_collection_products(payload):
+            slug_hint = f"collections/{collection_url_slug}/{collection_id}" if collection_url_slug else f"collections/{collection_id}"
             return Response(
                 {
                     "status": "error",
-                    "message": "Storefront collection response empty or unavailable",
+                    "message": (
+                        "Storefront collection has no products (or could not be loaded). "
+                        "Confirm products are in this collection in Zoho and the collection is published."
+                    ),
+                    "collection_id": collection_id,
+                    "collection_url": collection_url_slug or None,
+                    "store_domain": host,
+                    "hint": (
+                        "Test in Postman: GET "
+                        f"https://commerce.zoho.com/storefront/api/v1/{slug_hint}"
+                        f"?format=json with header domain-name: {host}"
+                    ),
                 },
                 status=502,
             )
 
-        raw_products = extract_storefront_collection_products(payload)
+        raw_products = extract_storefront_collection_products(payload)[:limit]
         collection_name = extract_storefront_collection_name(payload)
-        raw_products = raw_products[:limit]
 
         product_summaries = [_product_summary(p, store_domain=store_domain) for p in raw_products]
         for row in product_summaries:
-            current_image = (row.get("image_url") or "").strip()
-            normalized_image = build_image_url(store_domain, current_image)
-            if normalized_image:
-                row["image_url"] = normalized_image
-                continue
-            if current_image and (
-                current_image.startswith("http://")
-                or current_image.startswith("https://")
-                or current_image.startswith("/")
-            ):
-                continue
-            pid = (row.get("product_id") or "").strip()
-            if not pid:
-                continue
-            row["image_url"] = request.build_absolute_uri(
-                f"/api/shop/zoho-products/{pid}/image/?store_id={store.pk}"
-            )
+            row["collection_id"] = collection_id
+        _normalize_best_deals_product_images(request, store, store_domain, product_summaries)
 
         return Response(
             {
                 "status": "success",
+                "source": "collection",
                 "account_id": account.id,
                 "account_name": account.name,
                 "account_email": account.email,
                 "organization_id": organization_id,
+                "store_id": store.pk,
                 "collection_id": collection_id,
                 "collection_name": collection_name,
                 "count": len(product_summaries),
@@ -1865,6 +2296,148 @@ class MultiAccountZohoCategoryListAPIView(APIView):
                 "status": "error",
                 "message": str(e),
             }, status=400)
+
+
+class MultiAccountZohoCollectionListQueryAPIView(APIView):
+    """
+    GET /zoho/multi/collections/?account_id=&organization_id=
+    Lists Zoho Commerce collections via admin API (zohoapis.com/commerce/v1/collections).
+
+    Optional: collection_name=Best Deals — returns only that match in collections[] (case-insensitive).
+    Optional: all=true — return every collection plus matched when collection_name is set.
+    Also accepts store_id (resolves organization_id / account_id when possible).
+    """
+
+    def get(self, request):
+        account_id_raw = (request.GET.get("account_id") or "").strip()
+        organization_id = (request.GET.get("organization_id") or "").strip()
+        store_id_raw = (request.GET.get("store_id") or "").strip()
+        collection_name = (request.GET.get("collection_name") or "").strip()
+        list_all = _as_bool(request.GET.get("all"), default=False)
+
+        if store_id_raw:
+            try:
+                store_pk = int(store_id_raw)
+            except ValueError:
+                return Response(
+                    {"status": "error", "message": "store_id must be an integer"},
+                    status=400,
+                )
+            store_from_id = Store.objects.filter(pk=store_pk).first()
+            if not store_from_id:
+                return Response(
+                    {"status": "error", "message": "Store not found"},
+                    status=404,
+                )
+            resolved_org = str(store_from_id.zoho_org_id or "").strip()
+            if not resolved_org:
+                return Response(
+                    {
+                        "status": "error",
+                        "message": "Store has no zoho_org_id configured",
+                    },
+                    status=400,
+                )
+            if organization_id and organization_id != resolved_org:
+                return Response(
+                    {
+                        "status": "error",
+                        "message": "store_id does not match organization_id",
+                    },
+                    status=400,
+                )
+            organization_id = resolved_org
+
+        if not account_id_raw and organization_id:
+            linked = ZohoCommerceAccount.objects.filter(
+                organization_id=organization_id,
+                is_active=True,
+            ).first()
+            if linked:
+                account_id_raw = str(linked.id)
+
+        if not account_id_raw:
+            return Response(
+                {"status": "error", "message": "account_id query parameter is required"},
+                status=400,
+            )
+        if not organization_id:
+            return Response(
+                {
+                    "status": "error",
+                    "message": "organization_id or store_id query parameter is required",
+                },
+                status=400,
+            )
+
+        try:
+            account_id = int(account_id_raw)
+        except ValueError:
+            return Response(
+                {"status": "error", "message": "account_id must be an integer"},
+                status=400,
+            )
+
+        try:
+            account = ZohoCommerceAccount.objects.get(id=account_id, is_active=True)
+        except ZohoCommerceAccount.DoesNotExist:
+            return Response(
+                {"status": "error", "message": "Zoho account not found"},
+                status=404,
+            )
+
+        store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
+        try:
+            rows = list_zoho_commerce_collections(organization_id, store=store)
+        except ZohoCommerceError as exc:
+            return Response(
+                {"status": "error", "message": str(exc)},
+                status=400,
+            )
+
+        all_summaries = [collection_summary(r) for r in rows]
+        matched_id = ""
+        matched_name = ""
+        matched_summary = None
+        if collection_name:
+            matched_id, matched_name = resolve_collection_id_by_name(rows, collection_name)
+            if matched_id:
+                matched_summary = {
+                    "collection_id": matched_id,
+                    "name": matched_name,
+                    "url": "",
+                    "status": "",
+                }
+                for s in all_summaries:
+                    if s.get("collection_id") == matched_id:
+                        matched_summary = s
+                        break
+
+        if collection_name and not list_all:
+            summaries = [matched_summary] if matched_summary else []
+        else:
+            summaries = all_summaries
+
+        payload = {
+            "status": "success",
+            "account_id": account.id,
+            "account_name": account.name,
+            "account_email": account.email,
+            "organization_id": organization_id,
+            "store_id": store.pk if store else None,
+            "count": len(summaries),
+            "collections": summaries,
+        }
+        if collection_name:
+            payload["collection_name_query"] = collection_name
+            payload["matched"] = (
+                {"collection_id": matched_id, "name": matched_name}
+                if matched_id
+                else None
+            )
+            if list_all:
+                payload["total_collections"] = len(all_summaries)
+        return Response(payload, status=200)
 
 
 class MultiAccountZohoCategoryListQueryAPIView(APIView):
