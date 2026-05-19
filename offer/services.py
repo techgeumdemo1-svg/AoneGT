@@ -27,9 +27,11 @@ def _notify_new_coupon(coupon: Coupon, org_id: int) -> None:
         return
 
     coupon_name = (coupon.coupon_name or '').strip() or 'Offer'
-    title = f'{store.name} — New offer: {coupon_name}'
+    title = f'{store.name} New Offer'
     title = title[:100]
-    body = (coupon.description or '')[:200] if coupon.description else coupon_name
+    body = coupon_name
+    description_text = (coupon.description or '').strip()
+    expanded_body = f'{coupon_name}\n\nDetails\n{description_text}' if description_text else coupon_name
 
     User = get_user_model()
     active_users = User.objects.filter(is_active=True)
@@ -77,6 +79,7 @@ def _notify_new_coupon(coupon: Coupon, org_id: int) -> None:
             title=title,
             body=body,
             data=data_payload,
+            expanded_body=expanded_body,
         )
     except Exception:
         logger.exception(
@@ -498,8 +501,6 @@ def sync_zoho_coupons_for_store(store: Store) -> dict[str, int]:
         if not isinstance(row, dict):
             continue
         live_id = str(row.get('coupon_id') or row.get('id') or '').strip()
-        if live_id:
-            live_ids.add(live_id)
         try:
             detail_payload = get_live_coupon_for_checkout(store, Coupon(coupon_id=live_id, org_id=org_id, coupon_code='')) if live_id else row
             if isinstance(detail_payload, dict) and detail_payload:
@@ -507,6 +508,8 @@ def sync_zoho_coupons_for_store(store: Store) -> dict[str, int]:
             coupon = sync_coupon_from_payload(store, row)
             if coupon is not None:
                 synced += 1
+            if live_id:
+                live_ids.add(live_id)
         except Exception:
             logger.exception('Failed to sync coupon row for org %s', org_id)
     now = timezone.now()

@@ -1,6 +1,15 @@
 from django.contrib import admin
 
-from .models import Cart, CartItem, Order, OrderItem, OrderReturn, OrderReturnLine, UserNotification
+from .models import (
+    Cart,
+    CartItem,
+    FCMDeviceToken,
+    Order,
+    OrderItem,
+    OrderReturn,
+    OrderReturnLine,
+    UserNotification,
+)
 from .services.order_email import handle_customer_tracking_stage_change
 
 
@@ -145,3 +154,6 @@ class OrderAdmin(admin.ModelAdmin):
         super().save_model(request, obj, form, change)
         if obj.status == Order.Status.SYNCED:
             handle_customer_tracking_stage_change(obj, previous_stage)
+
+
+admin.site.register(FCMDeviceToken)
