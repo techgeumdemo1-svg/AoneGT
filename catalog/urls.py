@@ -7,6 +7,7 @@ from .views import (
     StoreListAPIView,
     StoreProductListAPIView,
     StoreProductReviewListCreateAPIView,
+    StoreProductRatingAPIView,
     StoreProductDetailAPIView,
     ZohoCommerceShopListAPIView,
     ZohoCommerceShopProductListAPIView,
@@ -59,6 +60,11 @@ urlpatterns = [
         'stores/products/reviews/',
         StoreProductReviewListCreateAPIView.as_view(),
         name='catalog-store-product-reviews',
+    ),
+    path(
+        'stores/products/rating/',
+        StoreProductRatingAPIView.as_view(),
+        name='catalog-store-product-rating',
     ),
     path(
         'stores/<int:store_id>/products/',

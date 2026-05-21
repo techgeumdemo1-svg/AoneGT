@@ -269,14 +269,42 @@ class StoreProductDetailAPIView(APIView):
         return Response(ProductDetailSerializer(product).data, status=status.HTTP_200_OK)
 
 
+def _resolve_store_product_by_zoho_query(request):
+    raw_s = (request.query_params.get('store_id') or '').strip()
+    zoho_product_id = (request.query_params.get('zoho_product_id') or '').strip()
+    if not raw_s or not zoho_product_id:
+        raise ValidationError(
+            {'detail': 'Query parameters store_id and zoho_product_id are required.'},
+        )
+    try:
+        store_id = int(raw_s)
+    except ValueError:
+        raise ValidationError({'detail': 'store_id must be an integer.'})
+    store = get_object_or_404(Store, pk=store_id, is_active=True)
+    product = (
+        Product.objects.filter(
+            store=store,
+            zoho_product_id=zoho_product_id,
+            is_active=True,
+        )
+        .select_related('store')
+        .first()
+    )
+    if product is None:
+        raise ValidationError(
+            {'zoho_product_id': 'No active product with this Zoho id for this store.'},
+        )
+    return store, product
+
+
 class StoreProductReviewListCreateAPIView(generics.ListCreateAPIView):
     """
     GET — list reviews for a product (public).
     POST — add a review (authenticated). Allowed only if the user bought this product on a
     delivered order (``Order.status == synced``). One review per user per product.
 
-    Query (required): ``store_id``, ``product_id`` — catalog store and product primary keys.
-    Example: ``/api/catalog/stores/products/reviews/?store_id=2&product_id=6``
+    Query (required): ``store_id``, ``zoho_product_id``.
+    Example: ``/api/catalog/stores/products/reviews/?store_id=4&zoho_product_id=7501414000004708555``
     """
 
     def get_permissions(self):
@@ -292,26 +320,7 @@ class StoreProductReviewListCreateAPIView(generics.ListCreateAPIView):
     def _review_store_product(self):
         if hasattr(self, '_review_store_product_cache'):
             return self._review_store_product_cache
-        request = self.request
-        raw_s = (request.query_params.get('store_id') or '').strip()
-        raw_p = (request.query_params.get('product_id') or '').strip()
-        if not raw_s or not raw_p:
-            raise ValidationError(
-                {'detail': 'Query parameters store_id and product_id are required.'},
-            )
-        try:
-            store_id = int(raw_s)
-            product_id = int(raw_p)
-        except ValueError:
-            raise ValidationError({'detail': 'store_id and product_id must be integers.'})
-        store = get_object_or_404(Store, pk=store_id, is_active=True)
-        product = get_object_or_404(
-            Product.objects.select_related('store'),
-            pk=product_id,
-            store=store,
-            is_active=True,
-        )
-        self._review_store_product_cache = (store, product)
+        self._review_store_product_cache = _resolve_store_product_by_zoho_query(self.request)
         return self._review_store_product_cache
 
     def get_queryset(self):
@@ -329,6 +338,36 @@ class StoreProductReviewListCreateAPIView(generics.ListCreateAPIView):
 
     def perform_create(self, serializer):
         serializer.save()
+
+
+class StoreProductRatingAPIView(APIView):
+    """
+    GET — average rating summary for a product (public).
+
+    Query (required): ``store_id``, ``zoho_product_id``.
+    Example: ``/api/catalog/stores/products/rating/?store_id=4&zoho_product_id=7501414000004708555``
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from django.db.models import Avg
+
+        store, product = _resolve_store_product_by_zoho_query(request)
+        reviews = ProductReview.objects.filter(product=product)
+        review_count = reviews.count()
+        row = reviews.aggregate(a=Avg('rating'))
+        avg = row.get('a')
+        average_rating = round(float(avg), 2) if avg is not None else None
+        return Response(
+            {
+                'store_id': store.pk,
+                'zoho_product_id': product.zoho_product_id,
+                'product_id': product.pk,
+                'review_count': review_count,
+                'average_rating': average_rating,
+            },
+        )
 
 
 def _related_as_bool(value, default: bool = False) -> bool:
