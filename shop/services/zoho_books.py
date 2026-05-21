@@ -123,6 +123,18 @@ def _books_request(
     return body if isinstance(body, dict) else {'data': body}
 
 
+def books_get_contact(contact_id: str, *, store=None) -> dict | None:
+    contact_id = (contact_id or '').strip()
+    if not contact_id:
+        return None
+    try:
+        payload = _books_request('GET', f'contacts/{contact_id}', store=store)
+    except ZohoBooksError:
+        return None
+    contact = payload.get('contact')
+    return contact if isinstance(contact, dict) else None
+
+
 def books_find_contact_id_by_email(email: str, *, store=None) -> str | None:
     normalized = (email or '').strip().lower()
     if not normalized:
@@ -188,3 +200,11 @@ def books_create_invoice(invoice_body: dict[str, Any], *, store=None) -> dict[st
     if not isinstance(invoice, dict):
         raise ZohoBooksError('Zoho Books did not return invoice payload.')
     return invoice
+
+
+def books_create_customer_payment(payment_body: dict[str, Any], *, store=None) -> dict[str, Any]:
+    payload = _books_request('POST', 'customerpayments', store=store, json_data=payment_body)
+    payment = payload.get('payment')
+    if not isinstance(payment, dict):
+        raise ZohoBooksError('Zoho Books did not return payment payload.')
+    return payment

@@ -27,6 +27,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     last_name = models.CharField(max_length=150, blank=True)
     email = models.EmailField(unique=True)
     phone = models.CharField(max_length=32, blank=True)
+    zoho_books_contact_id = models.CharField(max_length=64, blank=True, default='')
     points_balance = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)

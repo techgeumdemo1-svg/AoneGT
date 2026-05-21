@@ -1,5 +1,6 @@
 """Remove stale OTP rows from the database."""
 
+from django.db.models import Q
 from django.utils import timezone
 
 from accounts.models import (
@@ -32,13 +33,14 @@ def purge_otps(*, include_used=False, dry_run=False):
     counts = {}
 
     for model in OTP_MODELS:
-        qs = model.objects.filter(expires_at__lt=now)
         if include_used:
-            qs = qs | model.objects.filter(is_used=True)
-        if dry_run:
-            counts[model.__name__] = qs.distinct().count()
+            qs = model.objects.filter(Q(expires_at__lt=now) | Q(is_used=True))
         else:
-            deleted, _ = qs.distinct().delete()
+            qs = model.objects.filter(expires_at__lt=now)
+        if dry_run:
+            counts[model.__name__] = qs.count()
+        else:
+            deleted, _ = qs.delete()
             counts[model.__name__] = deleted
 
     return counts

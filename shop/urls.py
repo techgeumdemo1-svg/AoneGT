@@ -15,6 +15,7 @@ from .views import (
     RewardPointsAPIView,
     OrderListAPIView,
     OrderDetailAPIView,
+    OrderRecordPaymentAPIView,
     OrderReturnFlowMetaAPIView,
     OrderReturnListCreateAPIView,
     OrderReorderAPIView,
@@ -48,6 +49,7 @@ urlpatterns = [
     path('orders/returns/', OrderReturnListCreateAPIView.as_view(), name='shop-order-returns-by-query'),
     path('orders/<int:pk>/returns/', OrderReturnListCreateAPIView.as_view(), name='shop-order-returns'),
     path('orders/reorder/', OrderReorderAPIView.as_view(), name='shop-order-reorder-by-query'),
+    path('orders/record-payment/', OrderRecordPaymentAPIView.as_view(), name='shop-order-record-payment'),
     path('orders/', OrderListAPIView.as_view(), name='shop-order-list'),
     path('orders/<int:pk>/', OrderDetailAPIView.as_view(), name='shop-order-detail'),
 
