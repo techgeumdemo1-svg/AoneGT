@@ -665,6 +665,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'zoho_sync_error', 'zoho_synced_at',
             'zoho_books_invoice_id', 'zoho_books_invoice_number',
             'zoho_books_invoiced_at', 'zoho_books_invoice_error',
+            'zoho_books_payment_id', 'zoho_books_paid_at', 'zoho_books_payment_error',
             'customer_tracking_stage', 'out_for_delivery_email_sent_at',
             'returned_total', 'balance_remaining', 'refunded_amount', 'net_paid',
             'loyalty_points_redeemed', 'loyalty_discount',
@@ -676,6 +677,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'zoho_sync_error', 'zoho_synced_at',
             'zoho_books_invoice_id', 'zoho_books_invoice_number',
             'zoho_books_invoiced_at', 'zoho_books_invoice_error',
+            'zoho_books_payment_id', 'zoho_books_paid_at', 'zoho_books_payment_error',
             'order_code', 'display_status', 'tracking', 'items_count',
             'can_reorder', 'can_return', 'return_status', 'order_date',
             'return_eligible_lines',
@@ -989,6 +991,28 @@ class CheckoutSerializer(serializers.Serializer):
                 {'loyalty_coupon_code': 'Use either loyalty coupon code or points_to_redeem, not both.'},
             )
         return attrs
+
+
+class OrderRecordPaymentSerializer(serializers.Serializer):
+    """Record a Zoho Books customer payment for an invoiced order."""
+
+    amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        required=False,
+        min_value=Decimal('0.01'),
+    )
+    payment_method = serializers.ChoiceField(
+        choices=Order.PaymentMethod.choices,
+        required=False,
+    )
+    gateway_reference = serializers.CharField(
+        max_length=255,
+        required=False,
+        allow_blank=True,
+        trim_whitespace=True,
+    )
+    paid_at = serializers.DateTimeField(required=False)
 
 
 class OrderReturnLineInputSerializer(serializers.Serializer):

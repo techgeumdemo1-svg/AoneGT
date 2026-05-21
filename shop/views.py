@@ -70,6 +70,7 @@ from .serializers import (
     CheckoutSerializer,
     LoyaltyIssueCouponSerializer,
     OrderSerializer,
+    OrderRecordPaymentSerializer,
     FCMDeviceTokenSerializer,
     PushSettingsSerializer,
     OrderReturnCreateSerializer,
@@ -1161,6 +1162,27 @@ class WishlistMoveToCartAPIView(APIView):
         return Response(response_data, status=status.HTTP_200_OK)
 
 
+def _checkout_totals(
+    subtotal: Decimal,
+    vat_percent: Decimal,
+    shipping_amount: Decimal,
+    *,
+    loyalty_discount: Decimal = Decimal('0'),
+    coupon_discount: Decimal = Decimal('0'),
+) -> dict[str, Decimal]:
+    """VAT applies to subtotal after loyalty and coupon discounts (matches order summary API)."""
+    discount_total = (loyalty_discount + coupon_discount).quantize(Decimal('0.01'))
+    taxable_subtotal = max(subtotal - discount_total, Decimal('0')).quantize(Decimal('0.01'))
+    vat_amount = ((taxable_subtotal * vat_percent) / Decimal('100')).quantize(Decimal('0.01'))
+    total = (taxable_subtotal + vat_amount + shipping_amount).quantize(Decimal('0.01'))
+    return {
+        'taxable_subtotal': taxable_subtotal,
+        'vat_amount': vat_amount,
+        'total': total,
+        'gross_total': total,
+    }
+
+
 class CheckoutAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1183,8 +1205,6 @@ class CheckoutAPIView(APIView):
         subtotal = sum((it.line_subtotal for it in items), Decimal('0'))
         subtotal = subtotal.quantize(Decimal('0.01'))
         vat_percent = Decimal(ser.validated_data.get('vat_percent') or '0').quantize(Decimal('0.01'))
-        vat_amount = ((subtotal * vat_percent) / Decimal('100')).quantize(Decimal('0.01'))
-        gross_total = (subtotal + vat_amount + shipping_amount).quantize(Decimal('0.01'))
 
         billing_same = ser.validated_data['billing_same_as_shipping']
         ship = {k: ser.validated_data[k] for k in (
@@ -1219,53 +1239,6 @@ class CheckoutAPIView(APIView):
 
         with transaction.atomic():
             locked_user = User.objects.select_for_update().get(pk=request.user.pk)
-
-            if coupon_code_in:
-                coupon_row = (
-                    LoyaltyIssuedCoupon.objects.select_for_update()
-                    .filter(
-                        user_id=locked_user.pk,
-                        code__iexact=coupon_code_in,
-                        used_at__isnull=True,
-                    )
-                    .first()
-                )
-                if not coupon_row:
-                    return Response(
-                        {'detail': 'Invalid or already used loyalty coupon code.'},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-                if coupon_row.expires_at < timezone.now():
-                    return Response(
-                        {'detail': 'This loyalty coupon has expired.'},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-                loyalty_discount = min(Decimal(coupon_row.amount_aed), gross_total).quantize(Decimal('0.01'))
-
-            elif points_to_redeem_req > 0:
-                bal = int(locked_user.points_balance or 0)
-                min_w = min_points_to_redeem()
-                if bal < min_w:
-                    return Response(
-                        {
-                            'detail': (
-                                f'You need at least {min_w} points in your wallet before redeeming.'
-                            ),
-                        },
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-                max_pts = max_points_redeemable_for_total(gross_total, pv)
-                actual_pts = min(points_to_redeem_req, bal, max_pts)
-                if actual_pts <= 0:
-                    return Response(
-                        {'detail': 'No loyalty points can be applied to this order total.'},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-                discount_calc = (Decimal(actual_pts) * pv).quantize(Decimal('0.01'))
-                loyalty_discount = min(discount_calc, gross_total).quantize(Decimal('0.01'))
-                loyalty_points_redeemed = actual_pts
-                locked_user.points_balance = bal - actual_pts
-                locked_user.save(update_fields=['points_balance'])
 
             if offer_coupon_code:
                 offer_coupon = get_coupon_for_checkout(store, offer_coupon_code)
@@ -1333,11 +1306,65 @@ class CheckoutAPIView(APIView):
                     else:
                         offer_coupon = None
 
-            final_total = (gross_total - loyalty_discount).quantize(Decimal('0.01'))
-            if offer_coupon is not None:
-                final_total = (final_total - offer_coupon_discount_value).quantize(Decimal('0.01'))
-            if final_total < 0:
-                final_total = Decimal('0')
+            loyalty_cap = max(subtotal - offer_coupon_discount_value, Decimal('0')).quantize(Decimal('0.01'))
+
+            if coupon_code_in:
+                coupon_row = (
+                    LoyaltyIssuedCoupon.objects.select_for_update()
+                    .filter(
+                        user_id=locked_user.pk,
+                        code__iexact=coupon_code_in,
+                        used_at__isnull=True,
+                    )
+                    .first()
+                )
+                if not coupon_row:
+                    return Response(
+                        {'detail': 'Invalid or already used loyalty coupon code.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if coupon_row.expires_at < timezone.now():
+                    return Response(
+                        {'detail': 'This loyalty coupon has expired.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                loyalty_discount = min(Decimal(coupon_row.amount_aed), loyalty_cap).quantize(Decimal('0.01'))
+
+            elif points_to_redeem_req > 0:
+                bal = int(locked_user.points_balance or 0)
+                min_w = min_points_to_redeem()
+                if bal < min_w:
+                    return Response(
+                        {
+                            'detail': (
+                                f'You need at least {min_w} points in your wallet before redeeming.'
+                            ),
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                max_pts = max_points_redeemable_for_total(loyalty_cap, pv)
+                actual_pts = min(points_to_redeem_req, bal, max_pts)
+                if actual_pts <= 0:
+                    return Response(
+                        {'detail': 'No loyalty points can be applied to this order total.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                discount_calc = (Decimal(actual_pts) * pv).quantize(Decimal('0.01'))
+                loyalty_discount = min(discount_calc, loyalty_cap).quantize(Decimal('0.01'))
+                loyalty_points_redeemed = actual_pts
+                locked_user.points_balance = bal - actual_pts
+                locked_user.save(update_fields=['points_balance'])
+
+            checkout_totals = _checkout_totals(
+                subtotal,
+                vat_percent,
+                shipping_amount,
+                loyalty_discount=loyalty_discount,
+                coupon_discount=offer_coupon_discount_value,
+            )
+            vat_amount = checkout_totals['vat_amount']
+            gross_total = checkout_totals['gross_total']
+            final_total = checkout_totals['total']
 
             order = Order.objects.create(
                 user=request.user,
@@ -1406,6 +1433,20 @@ class CheckoutAPIView(APIView):
                     bxgy_discount_found = True
                     break
                 offer_coupon_discount_value = bxgy_discount_total
+                if bxgy_discount_found:
+                    checkout_totals = _checkout_totals(
+                        subtotal,
+                        vat_percent,
+                        shipping_amount,
+                        loyalty_discount=loyalty_discount,
+                        coupon_discount=offer_coupon_discount_value,
+                    )
+                    vat_amount = checkout_totals['vat_amount']
+                    gross_total = checkout_totals['gross_total']
+                    final_total = checkout_totals['total']
+                    order.vat_amount = vat_amount
+                    order.total = final_total
+                    order.save(update_fields=['vat_amount', 'total', 'updated_at'])
             CartItem.objects.filter(pk__in=[i.pk for i in items]).delete()
 
             if offer_coupon is not None:
@@ -1501,8 +1542,16 @@ class CheckoutAPIView(APIView):
             }
             for item in order.items.all()
         ]
+        coupon_discount = offer_coupon_discount_value.quantize(Decimal('0.01'))
+        loyalty_discount_amount = order.loyalty_discount.quantize(Decimal('0.01'))
+        discount_amount = (coupon_discount + loyalty_discount_amount).quantize(Decimal('0.01'))
+        taxable_subtotal = max(order.subtotal - discount_amount, Decimal('0')).quantize(Decimal('0.01'))
+        order_data = OrderSerializer(order).data
+        order_data['coupon_discount'] = str(coupon_discount)
+        order_data['discount_amount'] = str(discount_amount)
+        order_data['taxable_subtotal'] = str(taxable_subtotal)
         response_payload = {
-            'order': OrderSerializer(order).data,
+            'order': order_data,
             'checkout_view': {
                 'delivery_address': {
                     'name': order.shipping_name,
@@ -1516,12 +1565,14 @@ class CheckoutAPIView(APIView):
                 'order_summary': {
                     'items': order_lines,
                     'subtotal': str(order.subtotal.quantize(Decimal('0.01'))),
+                    'coupon_discount': str(coupon_discount),
+                    'loyalty_discount': str(loyalty_discount_amount),
+                    'discount_amount': str(discount_amount),
+                    'taxable_subtotal': str(taxable_subtotal),
                     'vat_percent': str(order.vat_percent.quantize(Decimal('0.01'))),
                     'vat_amount': str(order.vat_amount.quantize(Decimal('0.01'))),
                     'shipping_amount': str(order.shipping_amount.quantize(Decimal('0.01'))),
                     'gross_total': str(gross_total.quantize(Decimal('0.01'))),
-                    'coupon_discount': str(offer_coupon_discount_value.quantize(Decimal('0.01'))),
-                    'loyalty_discount': str(order.loyalty_discount.quantize(Decimal('0.01'))),
                     'points_redeemed': order.loyalty_points_redeemed,
                     'points_earned': points_awarded,
                     'total': str(order.total.quantize(Decimal('0.01'))),
@@ -1678,6 +1729,85 @@ class OrderDetailAPIView(generics.RetrieveAPIView):
             Order.objects.filter(user=self.request.user, store=store)
             .select_related('store')
             .prefetch_related('items', 'returns__lines__order_item')
+        )
+
+
+class OrderRecordPaymentAPIView(APIView):
+    """
+    Record a Zoho Books customer payment against the order invoice.
+
+    Staff only. Call after payment is confirmed (pay link, card, cash on delivery, etc.).
+    Maps ``payment_method`` to Zoho ``payment_mode`` automatically.
+
+    POST /api/shop/orders/record-payment/?order_id=<order_id>
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not (request.user.is_staff or request.user.is_superuser):
+            return Response(
+                {'detail': 'Staff access is required to record payments.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        raw_order_id = (request.query_params.get('order_id') or '').strip()
+        if not raw_order_id:
+            return Response(
+                {'detail': 'order_id query parameter is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            order_id = int(raw_order_id)
+        except (TypeError, ValueError):
+            return Response(
+                {'detail': 'order_id must be an integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ser = OrderRecordPaymentSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+
+        order = get_object_or_404(
+            Order.objects.select_related('user', 'store'),
+            pk=order_id,
+        )
+
+        from shop.services.zoho_books import ZohoBooksError
+        from shop.services.zoho_books_payment import (
+            books_payment_mode_for_order,
+            record_zoho_books_payment_for_order,
+        )
+
+        try:
+            order = record_zoho_books_payment_for_order(
+                order,
+                amount=ser.validated_data.get('amount'),
+                payment_method=(ser.validated_data.get('payment_method') or '').strip(),
+                gateway_reference=(ser.validated_data.get('gateway_reference') or '').strip(),
+                paid_at=ser.validated_data.get('paid_at'),
+            )
+        except ZohoBooksError as exc:
+            Order.objects.filter(pk=order.pk).update(
+                zoho_books_payment_error=str(exc)[:5000],
+            )
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        zoho_payment_mode = books_payment_mode_for_order(
+            order,
+            override=(ser.validated_data.get('payment_method') or '').strip(),
+        )
+
+        return Response(
+            {
+                'status': 'success',
+                'message': 'Payment recorded in Zoho Books.',
+                'order': OrderSerializer(order).data,
+                'zoho_books_payment_id': order.zoho_books_payment_id,
+                'zoho_books_paid_at': order.zoho_books_paid_at,
+                'zoho_payment_mode': zoho_payment_mode,
+            },
+            status=status.HTTP_200_OK,
         )
 
 

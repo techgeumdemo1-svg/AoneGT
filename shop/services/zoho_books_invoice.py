@@ -16,6 +16,7 @@ from shop.services.zoho_books import (
     books_create_contact,
     books_create_invoice,
     books_find_contact_id_by_email,
+    books_get_contact,
     store_has_books_config,
     zoho_books_enabled,
     zoho_books_vat_tax_id,
@@ -59,6 +60,72 @@ def _decimal_str(value) -> str:
     return str(Decimal(str(value or 0)).quantize(Decimal('0.01')))
 
 
+def _order_coupon_discount(order: Order) -> Decimal:
+    """Offer coupon amount applied on this order (from usage log or derived totals)."""
+    try:
+        from offer.models import CouponUsageLog
+
+        usage = CouponUsageLog.objects.filter(order_id=order.pk).order_by('-used_at').first()
+        if usage is not None:
+            return max(
+                Decimal(str(usage.discount_amount_applied or 0)).quantize(Decimal('0.01')),
+                Decimal('0'),
+            )
+    except Exception:
+        pass
+    taxable_subtotal = (
+        Decimal(str(order.total or 0))
+        - Decimal(str(order.vat_amount or 0))
+        - Decimal(str(order.shipping_amount or 0))
+    ).quantize(Decimal('0.01'))
+    coupon = (
+        Decimal(str(order.subtotal or 0))
+        - Decimal(str(order.loyalty_discount or 0))
+        - taxable_subtotal
+    ).quantize(Decimal('0.01'))
+    return max(coupon, Decimal('0'))
+
+
+def _invoice_summary_notes(order: Order) -> str:
+    currency = (order.currency or 'AED').strip() or 'AED'
+    subtotal = Decimal(str(order.subtotal or 0)).quantize(Decimal('0.01'))
+    coupon_discount = _order_coupon_discount(order)
+    loyalty_discount = Decimal(str(order.loyalty_discount or 0)).quantize(Decimal('0.01'))
+    taxable_subtotal = (subtotal - coupon_discount - loyalty_discount).quantize(Decimal('0.01'))
+    if taxable_subtotal < 0:
+        taxable_subtotal = Decimal('0.00')
+    vat_percent = Decimal(str(order.vat_percent or 0)).quantize(Decimal('0.01'))
+    vat_amount = Decimal(str(order.vat_amount or 0)).quantize(Decimal('0.01'))
+    shipping_amount = Decimal(str(order.shipping_amount or 0)).quantize(Decimal('0.01'))
+    total = Decimal(str(order.total or 0)).quantize(Decimal('0.01'))
+
+    coupon_code = ''
+    try:
+        from offer.models import CouponUsageLog
+
+        usage = CouponUsageLog.objects.filter(order_id=order.pk).order_by('-used_at').first()
+        if usage is not None:
+            coupon_code = (usage.coupon_code or '').strip()
+    except Exception:
+        pass
+
+    lines = [
+        f'AoneGt order #{order.pk}',
+        '',
+        'Order summary:',
+        f'Subtotal\t{_decimal_str(subtotal)} {currency}',
+        f'Coupon discount\t-{_decimal_str(coupon_discount)} {currency}',
+        f'Loyalty discount\t-{_decimal_str(loyalty_discount)} {currency}',
+        f'Taxable subtotal\t{_decimal_str(taxable_subtotal)} {currency}',
+        f'VAT ({_decimal_str(vat_percent)}%)\t{_decimal_str(vat_amount)} {currency}',
+        f'Shipping\t{_decimal_str(shipping_amount)} {currency}',
+        f'Total\t{_decimal_str(total)} {currency}',
+    ]
+    if coupon_code:
+        lines.insert(3, f'Coupon code\t{coupon_code}')
+    return '\n'.join(lines)
+
+
 def _build_invoice_payload(order: Order, customer_id: str) -> dict:
     from shop.models import OrderItem
 
@@ -87,12 +154,14 @@ def _build_invoice_payload(order: Order, customer_id: str) -> dict:
         'line_items': line_items,
         'shipping_charge': float(Decimal(str(order.shipping_amount or 0))),
         'currency_code': (order.currency or 'AED').strip() or 'AED',
-        'notes': f'AoneGt order #{order.pk}',
+        'notes': _invoice_summary_notes(order),
     }
 
+    coupon_discount = _order_coupon_discount(order)
     loyalty_discount = Decimal(str(order.loyalty_discount or 0))
-    if loyalty_discount > 0:
-        payload['discount'] = float(loyalty_discount)
+    total_discount = (coupon_discount + loyalty_discount).quantize(Decimal('0.01'))
+    if total_discount > 0:
+        payload['discount'] = float(total_discount)
         payload['discount_type'] = 'entity_level'
         payload['is_discount_before_tax'] = True
 
@@ -104,19 +173,44 @@ def _build_invoice_payload(order: Order, customer_id: str) -> dict:
     return payload
 
 
+def _persist_user_books_contact_id(user, contact_id: str) -> None:
+    contact_id = (contact_id or '').strip()
+    if not contact_id:
+        return
+    if (getattr(user, 'zoho_books_contact_id', '') or '').strip() == contact_id:
+        return
+    from accounts.models import User
+
+    User.objects.filter(pk=user.pk).update(zoho_books_contact_id=contact_id[:64])
+    user.zoho_books_contact_id = contact_id[:64]
+
+
 def _resolve_customer_id(order: Order) -> str:
     user = order.user
-    email = (getattr(user, 'email', '') or '').strip().lower()
-    name = (order.shipping_name or '').strip()
-    if not name:
-        first = (getattr(user, 'first_name', '') or '').strip()
-        last = (getattr(user, 'last_name', '') or '').strip()
-        name = f'{first} {last}'.strip() or email or f'Customer {user.pk}'
     store = order.store
+    email = (getattr(user, 'email', '') or '').strip().lower()
+
+    stored = (getattr(user, 'zoho_books_contact_id', '') or '').strip()
+    if stored and books_get_contact(stored, store=store):
+        return stored
+    if stored:
+        from accounts.models import User
+
+        User.objects.filter(pk=user.pk).update(zoho_books_contact_id='')
+        user.zoho_books_contact_id = ''
 
     existing = books_find_contact_id_by_email(email, store=store) if email else None
     if existing:
+        _persist_user_books_contact_id(user, existing)
         return existing
+
+    first = (getattr(user, 'first_name', '') or '').strip()
+    last = (getattr(user, 'last_name', '') or '').strip()
+    name = f'{first} {last}'.strip()
+    if not name:
+        name = (order.shipping_name or '').strip()
+    if not name:
+        name = email or f'Customer {user.pk}'
 
     billing_address = {
         'attention': name[:100],
@@ -127,13 +221,16 @@ def _resolve_customer_id(order: Order) -> str:
         'country': (order.billing_country or order.shipping_country or '')[:100],
         'phone': (order.billing_phone or order.shipping_phone or '')[:50],
     }
-    return books_create_contact(
+    phone = (getattr(user, 'phone', '') or order.shipping_phone or '')[:50]
+    contact_id = books_create_contact(
         contact_name=name,
         email=email,
-        phone=(order.shipping_phone or '')[:50],
+        phone=phone,
         billing_address=billing_address,
         store=store,
     )
+    _persist_user_books_contact_id(user, contact_id)
+    return contact_id
 
 
 def create_zoho_books_invoice_for_order(order: Order) -> bool:

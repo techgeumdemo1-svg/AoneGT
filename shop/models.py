@@ -170,6 +170,17 @@ class Order(models.Model):
         blank=True,
         help_text='When the Zoho Books invoice was created for this order.',
     )
+    zoho_books_payment_id = models.CharField(
+        max_length=64,
+        blank=True,
+        help_text='Zoho Books customerpayment id after payment is recorded.',
+    )
+    zoho_books_payment_error = models.TextField(blank=True)
+    zoho_books_paid_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text='When payment was recorded in Zoho Books for this order.',
+    )
 
     customer_tracking_stage = models.CharField(
         max_length=32,
