@@ -20,11 +20,12 @@ class StoreAdmin(admin.ModelAdmin):
         'is_active',
         'sort_order',
         'zoho_org_id',
+        'zoho_books_org_id',
         'zoho_store_domain',
         'created_at',
     )
     list_filter = ('is_active',)
-    search_fields = ('name', 'slug', 'contact_email', 'category', 'zoho_org_id')
+    search_fields = ('name', 'slug', 'contact_email', 'category', 'zoho_org_id', 'zoho_books_org_id')
     prepopulated_fields = {'slug': ('name',)}
     readonly_fields = ('created_at',)
     fieldsets = (
@@ -44,6 +45,10 @@ class StoreAdmin(admin.ModelAdmin):
             },
         ),
         ('Zoho Commerce', {'fields': ('zoho_org_id', 'zoho_store_domain')}),
+        (
+            'Zoho Books (invoices)',
+            {'fields': ('zoho_books_org_id', 'zoho_books_vat_tax_id')},
+        ),
         (
             'Zoho OAuth (optional; per-store — falls back to global env)',
             {'fields': ('client_id', 'client_secret', 'refresh_token', 'access_token', 'token_expiry')},
