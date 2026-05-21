@@ -31,6 +31,19 @@ class Store(models.Model):
     refresh_token = models.TextField(blank=True)
     access_token = models.TextField(blank=True)
     token_expiry = models.DateTimeField(null=True, blank=True)
+    zoho_books_org_id = models.CharField(
+        max_length=120,
+        blank=True,
+        help_text=(
+            'Zoho Books organization id for invoices (per store). '
+            'Falls back to ZOHO_BOOKS_ORGANIZATION_ID in .env when empty.'
+        ),
+    )
+    zoho_books_vat_tax_id = models.CharField(
+        max_length=120,
+        blank=True,
+        help_text='Optional Zoho Books tax_id for VAT on invoice line items for this store.',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     sort_order = models.PositiveIntegerField(default=0)
 

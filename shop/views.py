@@ -1440,6 +1440,10 @@ class CheckoutAPIView(APIView):
                 uearn.points_balance = int(uearn.points_balance or 0) + points_awarded
                 uearn.save(update_fields=['points_balance'])
 
+        from shop.services.zoho_books_invoice import maybe_create_zoho_books_invoice
+
+        maybe_create_zoho_books_invoice(order.pk, trigger='placed')
+
         order = Order.objects.prefetch_related(
             'items', 'returns__lines__order_item',
         ).get(pk=order.pk)
