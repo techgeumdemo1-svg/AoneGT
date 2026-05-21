@@ -220,6 +220,16 @@ ZOHO_ORG_ID = (os.getenv('ZOHO_ORG_ID') or ZOHO_COMMERCE_ORGANIZATION_ID or '').
 ZOHO_CLIENT_ID = os.getenv('ZOHO_CLIENT_ID', '').strip()
 ZOHO_CLIENT_SECRET = os.getenv('ZOHO_CLIENT_SECRET', '').strip()
 ZOHO_REFRESH_TOKEN = os.getenv('ZOHO_REFRESH_TOKEN', '').strip()
+ZOHO_ACCESS_TOKEN = os.getenv('ZOHO_ACCESS_TOKEN', '').strip()
+
+# Zoho Books invoices (per-store zoho_books_org_id on catalog.Store; see shop.services.zoho_books)
+ZOHO_BOOKS_CREATE_INVOICE_ENABLED = os.getenv(
+    'ZOHO_BOOKS_CREATE_INVOICE_ENABLED', 'False',
+).strip().lower() in ('true', '1', 'yes')
+ZOHO_BOOKS_ORGANIZATION_ID = os.getenv('ZOHO_BOOKS_ORGANIZATION_ID', '').strip()
+ZOHO_BOOKS_CREATE_INVOICE_ON = os.getenv('ZOHO_BOOKS_CREATE_INVOICE_ON', 'placed').strip().lower()
+ZOHO_BOOKS_VAT_TAX_ID = os.getenv('ZOHO_BOOKS_VAT_TAX_ID', '').strip()
+
 # Optional image fallback used by /api/shop/zoho-products/<id>/image/ when Zoho has no image URL.
 ZOHO_IMAGE_PLACEHOLDER_URL = os.getenv(
     'ZOHO_IMAGE_PLACEHOLDER_URL',

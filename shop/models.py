@@ -154,6 +154,22 @@ class Order(models.Model):
     zoho_salesorder_id = models.CharField(max_length=120, blank=True)
     zoho_sync_error = models.TextField(blank=True)
     zoho_synced_at = models.DateTimeField(null=True, blank=True)
+    zoho_books_invoice_id = models.CharField(
+        max_length=64,
+        blank=True,
+        help_text='Zoho Books invoice_id after successful invoice creation.',
+    )
+    zoho_books_invoice_number = models.CharField(
+        max_length=64,
+        blank=True,
+        help_text='Human-readable invoice number from Zoho Books.',
+    )
+    zoho_books_invoice_error = models.TextField(blank=True)
+    zoho_books_invoiced_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text='When the Zoho Books invoice was created for this order.',
+    )
 
     customer_tracking_stage = models.CharField(
         max_length=32,
