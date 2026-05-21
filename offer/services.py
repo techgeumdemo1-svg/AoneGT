@@ -119,6 +119,7 @@ def cart_item_snapshot(item) -> dict[str, Any]:
     product = item.product
     return {
         'item_id': item.pk,
+        'name': (product.name if product else ''),
         'product_id': str(getattr(product, 'zoho_product_id', '') or '') if product else None,
         'category_id': str(getattr(product, 'zoho_category_id', '') or '') if product else '',
         'collection_id': str(getattr(product, 'zoho_collection_id', '') or '') if product else '',

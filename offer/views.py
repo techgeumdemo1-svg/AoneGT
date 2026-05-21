@@ -45,6 +45,14 @@ class OrderSummaryAPIView(APIView):
             shipping_amount = Decimal('0.00')
         vat_amount = ((subtotal * vat_percent) / Decimal('100')).quantize(Decimal('0.01'))
         base_total = (subtotal + vat_amount + shipping_amount).quantize(Decimal('0.01'))
+        product_details = {
+            item['name']: {
+                'count': item['quantity'],
+                'price': float((item['unit_price'] * item['quantity']).quantize(Decimal('0.01')))
+            }
+            for item in cart_items
+            if item.get('name')
+        }
         breakdown = [
             {'label': 'Subtotal', 'value': subtotal},
             {'label': f'VAT ({vat_percent})', 'value': vat_amount},
@@ -81,6 +89,7 @@ class OrderSummaryAPIView(APIView):
                         'coupon_discount': Decimal('0.00'),
                         'total': base_total,
                         'breakdown': breakdown,
+                        'product_details': product_details,
                     },
                     status=status.HTTP_200_OK,
                 )
@@ -100,6 +109,7 @@ class OrderSummaryAPIView(APIView):
                     'coupon_discount': Decimal('0.00'),
                     'total': base_total,
                     'breakdown': breakdown + [{'label': 'Total', 'value': base_total}],
+                    'product_details': product_details,
                 },
                 status=status.HTTP_200_OK,
             )
@@ -118,6 +128,7 @@ class OrderSummaryAPIView(APIView):
                     'coupon_discount': Decimal('0.00'),
                     'total': base_total,
                     'breakdown': breakdown + [{'label': 'Total', 'value': base_total}],
+                    'product_details': product_details,
                 },
                 status=status.HTTP_200_OK,
             )
@@ -155,11 +166,23 @@ class OrderSummaryAPIView(APIView):
                 break
         else:
             discount = calculate_coupon_discount(coupon, cart_items, subtotal, shipping_amount, 'AED')
-        final_total = (base_total - discount).quantize(Decimal('0.01'))
-        if final_total < Decimal('0'):
-            final_total = Decimal('0.00')
-        breakdown.append({'label': f'Coupon Discount ({coupon.coupon_code})', 'value': -discount})
-        breakdown.append({'label': 'Total', 'value': final_total})
+        if discount > Decimal('0.00'):
+            taxable_amount = subtotal - discount
+            vat_amount = (taxable_amount * vat_percent / Decimal('100')).quantize(Decimal('0.01'))
+            final_total = (taxable_amount + vat_amount + shipping_amount).quantize(Decimal('0.01'))
+            if final_total < Decimal('0'):
+                final_total = Decimal('0.00')
+        else:
+            final_total = (base_total - discount).quantize(Decimal('0.01'))
+            if final_total < Decimal('0'):
+                final_total = Decimal('0.00')
+        breakdown = [
+            {'label': 'Subtotal', 'value': subtotal},
+            {'label': f'Coupon Discount ({coupon.coupon_code})', 'value': -discount},
+            {'label': f'VAT ({vat_percent})', 'value': vat_amount},
+            {'label': 'Shipping', 'value': shipping_amount},
+            {'label': 'Total', 'value': final_total},
+        ]
         response_data = {
             'coupon_applied': True,
             'valid': True,
@@ -173,6 +196,7 @@ class OrderSummaryAPIView(APIView):
             'coupon_discount': discount,
             'total': final_total,
             'breakdown': breakdown,
+            'product_details': product_details,
         }
         if bxgy_get_item is not None:
             response_data['bxgy_get_item'] = bxgy_get_item
