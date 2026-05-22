@@ -1799,10 +1799,38 @@ class MultiAccountZohoBestDealsAPIView(APIView):
         limit: int,
     ):
         collection_id = (request.GET.get("collection_id") or "").strip()
+        collection_name_query = (request.GET.get("collection_name") or "").strip()
+        if not collection_id and collection_name_query:
+            try:
+                admin_rows = list_zoho_commerce_collections(
+                    organization_id,
+                    store=store,
+                )
+                collection_id, _resolved_name = resolve_collection_id_by_name(
+                    admin_rows,
+                    collection_name_query,
+                )
+            except ZohoCommerceError as exc:
+                return Response(
+                    {"status": "error", "message": str(exc)},
+                    status=400,
+                )
+            if not collection_id:
+                return Response(
+                    {
+                        "status": "error",
+                        "message": (
+                            f'No collection named "{collection_name_query}" found for '
+                            f'organization_id={organization_id}. '
+                            'Use GET /zoho/multi/collections/ to list available collections.'
+                        ),
+                    },
+                    status=404,
+                )
+
         if not collection_id:
             collection_id = str(getattr(settings, "ZOHO_BEST_DEALS_COLLECTION_ID", "") or "").strip()
 
-        collection_name_query = (request.GET.get("collection_name") or "").strip()
         if not collection_name_query:
             collection_name_query = str(
                 getattr(settings, "ZOHO_BEST_DEALS_COLLECTION_NAME", "") or ""
@@ -2312,7 +2340,7 @@ class MultiAccountZohoCollectionListQueryAPIView(APIView):
         account_id_raw = (request.GET.get("account_id") or "").strip()
         organization_id = (request.GET.get("organization_id") or "").strip()
         store_id_raw = (request.GET.get("store_id") or "").strip()
-        collection_name = (request.GET.get("collection_name") or "").strip()
+        collection_name = "Best Deals"
         list_all = _as_bool(request.GET.get("all"), default=False)
 
         if store_id_raw:
