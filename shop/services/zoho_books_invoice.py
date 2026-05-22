@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from decimal import Decimal
 
 from django.conf import settings
@@ -17,6 +18,7 @@ from shop.services.zoho_books import (
     books_create_invoice,
     books_find_contact_id_by_email,
     books_get_contact,
+    books_mark_invoice_sent,
     store_has_books_config,
     zoho_books_enabled,
     zoho_books_vat_tax_id,
@@ -157,6 +159,22 @@ def _build_invoice_payload(order: Order, customer_id: str) -> dict:
         'notes': _invoice_summary_notes(order),
     }
 
+    from shop.services.zoho_books_payment import is_pay_on_delivery_payment_method
+
+    if is_pay_on_delivery_payment_method(order.payment_method):
+        # Zoho defaults due_date = invoice date when unset → shows "Due Today".
+        # COD / card-on-delivery is collected at delivery, not at checkout.
+        raw_due_days = getattr(settings, 'ZOHO_BOOKS_PAY_ON_DELIVERY_DUE_DAYS', 7)
+        try:
+            due_days = int(raw_due_days)
+        except (TypeError, ValueError):
+            due_days = 7
+        due_days = max(0, min(due_days, 100))
+        invoice_date = order.created_at.date()
+        payload['payment_terms'] = due_days
+        payload['payment_terms_label'] = 'Due on Delivery'
+        payload['due_date'] = (invoice_date + timedelta(days=due_days)).isoformat()
+
     coupon_discount = _order_coupon_discount(order)
     loyalty_discount = Decimal(str(order.loyalty_discount or 0))
     total_discount = (coupon_discount + loyalty_discount).quantize(Decimal('0.01'))
@@ -248,9 +266,28 @@ def create_zoho_books_invoice_for_order(order: Order) -> bool:
     if not invoice_id:
         raise ZohoBooksError('Zoho Books invoice_id missing in response.')
 
+    invoice_error = ''
+    from shop.services.zoho_books_payment import is_pay_on_delivery_payment_method
+
+    if is_pay_on_delivery_payment_method(order.payment_method):
+        try:
+            books_mark_invoice_sent(invoice_id, store=order.store)
+            logger.info(
+                'zoho-books: invoice marked sent order=%s invoice_id=%s',
+                order.pk,
+                invoice_id,
+            )
+        except ZohoBooksError as exc:
+            logger.exception(
+                'zoho-books: mark sent failed order=%s invoice_id=%s',
+                order.pk,
+                invoice_id,
+            )
+            invoice_error = f'Invoice created but could not mark sent: {exc}'[:5000]
+
     order.zoho_books_invoice_id = invoice_id[:64]
     order.zoho_books_invoice_number = invoice_number[:64]
-    order.zoho_books_invoice_error = ''
+    order.zoho_books_invoice_error = invoice_error
     order.zoho_books_invoiced_at = dj_tz.now()
     order.save(
         update_fields=[

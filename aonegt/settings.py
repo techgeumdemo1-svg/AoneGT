@@ -229,6 +229,8 @@ ZOHO_BOOKS_CREATE_INVOICE_ENABLED = os.getenv(
 ZOHO_BOOKS_ORGANIZATION_ID = os.getenv('ZOHO_BOOKS_ORGANIZATION_ID', '').strip()
 ZOHO_BOOKS_CREATE_INVOICE_ON = os.getenv('ZOHO_BOOKS_CREATE_INVOICE_ON', 'placed').strip().lower()
 ZOHO_BOOKS_VAT_TAX_ID = os.getenv('ZOHO_BOOKS_VAT_TAX_ID', '').strip()
+# Days until due date for cash/card on delivery invoices (Zoho default without this is due same day).
+ZOHO_BOOKS_PAY_ON_DELIVERY_DUE_DAYS = int(os.getenv('ZOHO_BOOKS_PAY_ON_DELIVERY_DUE_DAYS', '7') or '7')
 
 # Optional image fallback used by /api/shop/zoho-products/<id>/image/ when Zoho has no image URL.
 ZOHO_IMAGE_PLACEHOLDER_URL = os.getenv(

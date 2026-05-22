@@ -1482,8 +1482,14 @@ class CheckoutAPIView(APIView):
                 uearn.save(update_fields=['points_balance'])
 
         from shop.services.zoho_books_invoice import maybe_create_zoho_books_invoice
+        from shop.services.zoho_books_payment import (
+            is_prepaid_at_checkout_payment_method,
+            maybe_record_zoho_books_payment_for_order,
+        )
 
         maybe_create_zoho_books_invoice(order.pk, trigger='placed')
+        if is_prepaid_at_checkout_payment_method(order.payment_method):
+            maybe_record_zoho_books_payment_for_order(order.pk)
 
         order = Order.objects.prefetch_related(
             'items', 'returns__lines__order_item',
@@ -1736,8 +1742,10 @@ class OrderRecordPaymentAPIView(APIView):
     """
     Record a Zoho Books customer payment against the order invoice.
 
-    Staff only. Call after payment is confirmed (pay link, card, cash on delivery, etc.).
-    Maps ``payment_method`` to Zoho ``payment_mode`` automatically.
+    Authenticated order owner only. For cash on delivery and card on delivery,
+    the Zoho invoice is marked **sent** at checkout; call this after payment
+    is collected to mark it **paid**. Pay by link, Geidea, and credit/debit
+    card are marked paid automatically at checkout.
 
     POST /api/shop/orders/record-payment/?order_id=<order_id>
     """
@@ -1745,12 +1753,6 @@ class OrderRecordPaymentAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        if not (request.user.is_staff or request.user.is_superuser):
-            return Response(
-                {'detail': 'Staff access is required to record payments.'},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
         raw_order_id = (request.query_params.get('order_id') or '').strip()
         if not raw_order_id:
             return Response(
@@ -1771,6 +1773,7 @@ class OrderRecordPaymentAPIView(APIView):
         order = get_object_or_404(
             Order.objects.select_related('user', 'store'),
             pk=order_id,
+            user=request.user,
         )
 
         from shop.services.zoho_books import ZohoBooksError
