@@ -202,6 +202,16 @@ def books_create_invoice(invoice_body: dict[str, Any], *, store=None) -> dict[st
     return invoice
 
 
+def books_mark_invoice_sent(invoice_id: str, *, store=None) -> dict[str, Any]:
+    """Mark a Zoho Books invoice as sent (POST .../invoices/{id}/status/sent)."""
+    invoice_id = (invoice_id or '').strip()
+    if not invoice_id:
+        raise ZohoBooksError('invoice_id is required to mark invoice sent.')
+    payload = _books_request('POST', f'invoices/{invoice_id}/status/sent', store=store)
+    invoice = payload.get('invoice')
+    return invoice if isinstance(invoice, dict) else payload
+
+
 def books_create_customer_payment(payment_body: dict[str, Any], *, store=None) -> dict[str, Any]:
     payload = _books_request('POST', 'customerpayments', store=store, json_data=payment_body)
     payment = payload.get('payment')

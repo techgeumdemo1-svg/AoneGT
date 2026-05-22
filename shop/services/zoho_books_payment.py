@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from decimal import Decimal
 
+from django.db import transaction
 from django.utils import timezone as dj_tz
 
 from shop.models import Order
@@ -27,6 +28,27 @@ BOOKS_PAYMENT_MODE_BY_METHOD = {
     Order.PaymentMethod.GEIDEA: 'creditcard',
     Order.PaymentMethod.PAY_BY_LINK: 'banktransfer',
 }
+
+# Paid online at checkout — invoice marked paid in Zoho Books after invoice creation.
+PREPAID_AT_CHECKOUT_PAYMENT_METHODS = frozenset({
+    Order.PaymentMethod.PAY_BY_LINK.value,
+    Order.PaymentMethod.GEIDEA.value,
+    Order.PaymentMethod.CREDIT_DEBIT_CARD.value,
+})
+
+
+def is_prepaid_at_checkout_payment_method(payment_method: str) -> bool:
+    return (payment_method or '').strip() in PREPAID_AT_CHECKOUT_PAYMENT_METHODS
+
+
+PAY_ON_DELIVERY_PAYMENT_METHODS = frozenset({
+    Order.PaymentMethod.CASH_ON_DELIVERY.value,
+    Order.PaymentMethod.CARD_ON_DELIVERY.value,
+})
+
+
+def is_pay_on_delivery_payment_method(payment_method: str) -> bool:
+    return (payment_method or '').strip() in PAY_ON_DELIVERY_PAYMENT_METHODS
 
 
 def books_payment_mode_for_order(order: Order, *, override: str = '') -> str:
@@ -129,3 +151,51 @@ def record_zoho_books_payment_for_order(
         pay_amount,
     )
     return order
+
+
+def maybe_record_zoho_books_payment_for_order(
+    order_id: int,
+    *,
+    gateway_reference: str = '',
+) -> None:
+    """
+    Best-effort Zoho Books payment recording; never raises (checkout / API safe).
+    """
+    try:
+        order = Order.objects.select_related('user', 'store').get(pk=order_id)
+    except Order.DoesNotExist:
+        return
+
+    ready, reason = order_ready_for_books_payment(order)
+    if not ready:
+        if reason != 'Payment was already recorded for this order.':
+            logger.info(
+                'zoho-books: skip payment order=%s (%s)',
+                order_id,
+                reason,
+            )
+        return
+
+    try:
+        with transaction.atomic():
+            locked = (
+                Order.objects.select_for_update()
+                .select_related('user', 'store')
+                .get(pk=order_id)
+            )
+            record_zoho_books_payment_for_order(
+                locked,
+                gateway_reference=gateway_reference,
+            )
+    except ZohoBooksError as exc:
+        logger.exception('zoho-books: payment failed order=%s (%s)', order_id, exc)
+        Order.objects.filter(pk=order_id).update(
+            zoho_books_payment_error=str(exc)[:5000],
+            updated_at=dj_tz.now(),
+        )
+    except Exception as exc:
+        logger.exception('zoho-books: unexpected payment error order=%s', order_id)
+        Order.objects.filter(pk=order_id).update(
+            zoho_books_payment_error=str(exc)[:5000],
+            updated_at=dj_tz.now(),
+        )
