@@ -338,3 +338,30 @@ def maybe_create_zoho_books_invoice(order_id: int, *, trigger: str = 'placed') -
             zoho_books_invoice_error=str(exc)[:5000],
             updated_at=dj_tz.now(),
         )
+
+
+def maybe_finalize_zoho_books_at_checkout(order_id: int) -> None:
+    """
+    Checkout hook: create Zoho Books invoice, then set status by payment method.
+
+    - payment_gateway, pay_by_link: record customer payment (invoice → paid in Zoho)
+    - cash_on_delivery, card_on_delivery: mark invoice sent (done during invoice creation)
+    """
+    from shop.services.zoho_books_payment import (
+        is_prepaid_at_checkout_payment_method,
+        maybe_record_zoho_books_payment_for_order,
+    )
+
+    maybe_create_zoho_books_invoice(order_id, trigger='placed')
+
+    order = (
+        Order.objects.filter(pk=order_id)
+        .only('pk', 'payment_method', 'zoho_books_invoice_id')
+        .first()
+    )
+    if not order or not (order.zoho_books_invoice_id or '').strip():
+        return
+
+    if is_prepaid_at_checkout_payment_method(order.payment_method):
+        maybe_record_zoho_books_payment_for_order(order_id)
+    # cash_on_delivery / card_on_delivery: invoice marked sent in create_zoho_books_invoice_for_order.

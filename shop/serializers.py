@@ -993,28 +993,6 @@ class CheckoutSerializer(serializers.Serializer):
         return attrs
 
 
-class OrderRecordPaymentSerializer(serializers.Serializer):
-    """Record a Zoho Books customer payment for an invoiced order."""
-
-    amount = serializers.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        required=False,
-        min_value=Decimal('0.01'),
-    )
-    payment_method = serializers.ChoiceField(
-        choices=Order.PaymentMethod.choices,
-        required=False,
-    )
-    gateway_reference = serializers.CharField(
-        max_length=255,
-        required=False,
-        allow_blank=True,
-        trim_whitespace=True,
-    )
-    paid_at = serializers.DateTimeField(required=False)
-
-
 class OrderReturnLineInputSerializer(serializers.Serializer):
     order_item_id = serializers.IntegerField(min_value=1)
     quantity = serializers.IntegerField(min_value=1)

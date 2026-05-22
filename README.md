@@ -1290,8 +1290,7 @@ If no default exists, the frontend must submit the full shipping address fields.
 
 `Order.PaymentMethod` includes:
 
-- `geidea`
-- `credit_debit_card`
+- `payment_gateway`
 - `card_on_delivery`
 - `cash_on_delivery`
 - `pay_by_link`
@@ -1306,8 +1305,7 @@ The checkout response includes the selected payment method label and a single-it
 
 ### 24.4 Unknowns
 
-- Geidea gateway integration.
-- Card gateway integration.
+- Payment gateway integration.
 - Pay-by-link flow.
 
 These are not verified in the backend code scanned here.

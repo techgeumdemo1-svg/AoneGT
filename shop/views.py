@@ -70,7 +70,6 @@ from .serializers import (
     CheckoutSerializer,
     LoyaltyIssueCouponSerializer,
     OrderSerializer,
-    OrderRecordPaymentSerializer,
     FCMDeviceTokenSerializer,
     PushSettingsSerializer,
     OrderReturnCreateSerializer,
@@ -1481,15 +1480,9 @@ class CheckoutAPIView(APIView):
                 uearn.points_balance = int(uearn.points_balance or 0) + points_awarded
                 uearn.save(update_fields=['points_balance'])
 
-        from shop.services.zoho_books_invoice import maybe_create_zoho_books_invoice
-        from shop.services.zoho_books_payment import (
-            is_prepaid_at_checkout_payment_method,
-            maybe_record_zoho_books_payment_for_order,
-        )
+        from shop.services.zoho_books_invoice import maybe_finalize_zoho_books_at_checkout
 
-        maybe_create_zoho_books_invoice(order.pk, trigger='placed')
-        if is_prepaid_at_checkout_payment_method(order.payment_method):
-            maybe_record_zoho_books_payment_for_order(order.pk)
+        maybe_finalize_zoho_books_at_checkout(order.pk)
 
         order = Order.objects.prefetch_related(
             'items', 'returns__lines__order_item',
@@ -1735,82 +1728,6 @@ class OrderDetailAPIView(generics.RetrieveAPIView):
             Order.objects.filter(user=self.request.user, store=store)
             .select_related('store')
             .prefetch_related('items', 'returns__lines__order_item')
-        )
-
-
-class OrderRecordPaymentAPIView(APIView):
-    """
-    Record a Zoho Books customer payment against the order invoice.
-
-    Authenticated order owner only. For cash on delivery and card on delivery,
-    the Zoho invoice is marked **sent** at checkout; call this after payment
-    is collected to mark it **paid**. Pay by link, Geidea, and credit/debit
-    card are marked paid automatically at checkout.
-
-    POST /api/shop/orders/record-payment/?order_id=<order_id>
-    """
-
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        raw_order_id = (request.query_params.get('order_id') or '').strip()
-        if not raw_order_id:
-            return Response(
-                {'detail': 'order_id query parameter is required.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        try:
-            order_id = int(raw_order_id)
-        except (TypeError, ValueError):
-            return Response(
-                {'detail': 'order_id must be an integer.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        ser = OrderRecordPaymentSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-
-        order = get_object_or_404(
-            Order.objects.select_related('user', 'store'),
-            pk=order_id,
-            user=request.user,
-        )
-
-        from shop.services.zoho_books import ZohoBooksError
-        from shop.services.zoho_books_payment import (
-            books_payment_mode_for_order,
-            record_zoho_books_payment_for_order,
-        )
-
-        try:
-            order = record_zoho_books_payment_for_order(
-                order,
-                amount=ser.validated_data.get('amount'),
-                payment_method=(ser.validated_data.get('payment_method') or '').strip(),
-                gateway_reference=(ser.validated_data.get('gateway_reference') or '').strip(),
-                paid_at=ser.validated_data.get('paid_at'),
-            )
-        except ZohoBooksError as exc:
-            Order.objects.filter(pk=order.pk).update(
-                zoho_books_payment_error=str(exc)[:5000],
-            )
-            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-
-        zoho_payment_mode = books_payment_mode_for_order(
-            order,
-            override=(ser.validated_data.get('payment_method') or '').strip(),
-        )
-
-        return Response(
-            {
-                'status': 'success',
-                'message': 'Payment recorded in Zoho Books.',
-                'order': OrderSerializer(order).data,
-                'zoho_books_payment_id': order.zoho_books_payment_id,
-                'zoho_books_paid_at': order.zoho_books_paid_at,
-                'zoho_payment_mode': zoho_payment_mode,
-            },
-            status=status.HTTP_200_OK,
         )
 
 

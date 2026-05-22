@@ -24,16 +24,14 @@ logger = logging.getLogger(__name__)
 BOOKS_PAYMENT_MODE_BY_METHOD = {
     Order.PaymentMethod.CASH_ON_DELIVERY: 'cash',
     Order.PaymentMethod.CARD_ON_DELIVERY: 'creditcard',
-    Order.PaymentMethod.CREDIT_DEBIT_CARD: 'creditcard',
-    Order.PaymentMethod.GEIDEA: 'creditcard',
+    Order.PaymentMethod.PAYMENT_GATEWAY: 'creditcard',
     Order.PaymentMethod.PAY_BY_LINK: 'banktransfer',
 }
 
-# Paid online at checkout — invoice marked paid in Zoho Books after invoice creation.
+# Prepaid at checkout: customer payment recorded after invoice → Zoho invoice status paid.
 PREPAID_AT_CHECKOUT_PAYMENT_METHODS = frozenset({
     Order.PaymentMethod.PAY_BY_LINK.value,
-    Order.PaymentMethod.GEIDEA.value,
-    Order.PaymentMethod.CREDIT_DEBIT_CARD.value,
+    Order.PaymentMethod.PAYMENT_GATEWAY.value,
 })
 
 

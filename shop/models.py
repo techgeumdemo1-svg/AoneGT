@@ -101,8 +101,7 @@ class Order(models.Model):
         CANCELLED = 'cancelled', 'Cancelled'
 
     class PaymentMethod(models.TextChoices):
-        GEIDEA = 'geidea', 'Geidea'
-        CREDIT_DEBIT_CARD = 'credit_debit_card', 'Credit / Debit Card'
+        PAYMENT_GATEWAY = 'payment_gateway', 'Payment gateway'
         CARD_ON_DELIVERY = 'card_on_delivery', 'Card on Delivery'
         CASH_ON_DELIVERY = 'cash_on_delivery', 'Cash on Delivery'
         PAY_BY_LINK = 'pay_by_link', 'Pay by Link'
