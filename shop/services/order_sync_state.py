@@ -65,7 +65,9 @@ def apply_order_sync_transition(
         order.zoho_synced_at = dj_tz.now()
         update_fields.extend(['zoho_sync_error', 'zoho_synced_at'])
         if not (order.customer_tracking_stage or '').strip():
-            order.customer_tracking_stage = Order.CustomerTrackingStage.CONFIRMED
+            from shop.models import Order as OrderModel
+
+            order.customer_tracking_stage = OrderModel.CustomerTrackingStage.CONFIRMED
             update_fields.append('customer_tracking_stage')
     elif clear_error:
         order.zoho_sync_error = ''
@@ -85,3 +87,8 @@ def apply_order_sync_transition(
 
     with transaction.atomic():
         order.save(update_fields=list(dict.fromkeys(update_fields)))
+
+    if new_status == S.SYNCED:
+        from shop.services.zoho_books_invoice import maybe_finalize_zoho_books_invoice_for_order
+
+        maybe_finalize_zoho_books_invoice_for_order(order.pk, trigger='synced')

@@ -221,13 +221,24 @@ ZOHO_CLIENT_ID = os.getenv('ZOHO_CLIENT_ID', '').strip()
 ZOHO_CLIENT_SECRET = os.getenv('ZOHO_CLIENT_SECRET', '').strip()
 ZOHO_REFRESH_TOKEN = os.getenv('ZOHO_REFRESH_TOKEN', '').strip()
 ZOHO_ACCESS_TOKEN = os.getenv('ZOHO_ACCESS_TOKEN', '').strip()
+# Push local orders to Zoho Commerce sales orders at checkout / order edit (shop.services.zoho_sales_order).
+ZOHO_COMMERCE_CREATE_SALES_ORDER_ENABLED = os.getenv(
+    'ZOHO_COMMERCE_CREATE_SALES_ORDER_ENABLED', 'False',
+).strip().lower() in ('true', '1', 'yes')
 
 # Zoho Books invoices (per-store zoho_books_org_id on catalog.Store; see shop.services.zoho_books)
 ZOHO_BOOKS_CREATE_INVOICE_ENABLED = os.getenv(
     'ZOHO_BOOKS_CREATE_INVOICE_ENABLED', 'False',
 ).strip().lower() in ('true', '1', 'yes')
 ZOHO_BOOKS_ORGANIZATION_ID = os.getenv('ZOHO_BOOKS_ORGANIZATION_ID', '').strip()
-ZOHO_BOOKS_CREATE_INVOICE_ON = os.getenv('ZOHO_BOOKS_CREATE_INVOICE_ON', 'placed').strip().lower()
+ZOHO_BOOKS_CREATE_INVOICE_ON = os.getenv('ZOHO_BOOKS_CREATE_INVOICE_ON', 'synced').strip().lower()
+ZOHO_BOOKS_CREATE_SALES_ORDER_ENABLED = os.getenv(
+    'ZOHO_BOOKS_CREATE_SALES_ORDER_ENABLED', 'False',
+).strip().lower() in ('true', '1', 'yes')
+ZOHO_BOOKS_CREATE_SALES_ORDER_ON = os.getenv('ZOHO_BOOKS_CREATE_SALES_ORDER_ON', 'synced').strip().lower()
+ZOHO_BOOKS_INVOICE_FROM_SALES_ORDER = os.getenv(
+    'ZOHO_BOOKS_INVOICE_FROM_SALES_ORDER', 'True',
+).strip().lower() in ('true', '1', 'yes')
 ZOHO_BOOKS_VAT_TAX_ID = os.getenv('ZOHO_BOOKS_VAT_TAX_ID', '').strip()
 # Days until due date for cash/card on delivery invoices (Zoho default without this is due same day).
 ZOHO_BOOKS_PAY_ON_DELIVERY_DUE_DAYS = int(os.getenv('ZOHO_BOOKS_PAY_ON_DELIVERY_DUE_DAYS', '7') or '7')

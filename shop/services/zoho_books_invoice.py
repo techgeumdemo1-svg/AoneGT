@@ -16,7 +16,9 @@ from shop.services.zoho_books import (
     ZohoBooksError,
     books_create_contact,
     books_create_invoice,
+    books_create_invoice_from_sales_order,
     books_find_contact_id_by_email,
+    books_find_contact_id_by_name,
     books_get_contact,
     books_mark_invoice_sent,
     store_has_books_config,
@@ -230,6 +232,11 @@ def _resolve_customer_id(order: Order) -> str:
     if not name:
         name = email or f'Customer {user.pk}'
 
+    existing_by_name = books_find_contact_id_by_name(name, store=store)
+    if existing_by_name:
+        _persist_user_books_contact_id(user, existing_by_name)
+        return existing_by_name
+
     billing_address = {
         'attention': name[:100],
         'address': (order.billing_address or order.shipping_address or '')[:500],
@@ -240,13 +247,21 @@ def _resolve_customer_id(order: Order) -> str:
         'phone': (order.billing_phone or order.shipping_phone or '')[:50],
     }
     phone = (getattr(user, 'phone', '') or order.shipping_phone or '')[:50]
-    contact_id = books_create_contact(
-        contact_name=name,
-        email=email,
-        phone=phone,
-        billing_address=billing_address,
-        store=store,
-    )
+    try:
+        contact_id = books_create_contact(
+            contact_name=name,
+            email=email,
+            phone=phone,
+            billing_address=billing_address,
+            store=store,
+        )
+    except ZohoBooksError as exc:
+        if 'already exists' in str(exc).lower():
+            existing_by_name = books_find_contact_id_by_name(name, store=store)
+            if existing_by_name:
+                _persist_user_books_contact_id(user, existing_by_name)
+                return existing_by_name
+        raise
     _persist_user_books_contact_id(user, contact_id)
     return contact_id
 
@@ -257,9 +272,19 @@ def create_zoho_books_invoice_for_order(order: Order) -> bool:
     Returns True on success. Raises ZohoBooksError on API failure.
     """
     order = Order.objects.select_related('user', 'store').prefetch_related('items').get(pk=order.pk)
-    customer_id = _resolve_customer_id(order)
-    invoice_body = _build_invoice_payload(order, customer_id)
-    invoice = books_create_invoice(invoice_body, store=order.store)
+    salesorder_id = (order.zoho_books_salesorder_id or '').strip()
+    invoice_from_sales_order = getattr(settings, 'ZOHO_BOOKS_INVOICE_FROM_SALES_ORDER', True)
+
+    if salesorder_id and invoice_from_sales_order:
+        invoice = books_create_invoice_from_sales_order(
+            salesorder_id,
+            store=order.store,
+            json_data={'date': order.created_at.date().isoformat()},
+        )
+    else:
+        customer_id = _resolve_customer_id(order)
+        invoice_body = _build_invoice_payload(order, customer_id)
+        invoice = books_create_invoice(invoice_body, store=order.store)
 
     invoice_id = str(invoice.get('invoice_id') or '').strip()
     invoice_number = str(invoice.get('invoice_number') or '').strip()
@@ -340,19 +365,22 @@ def maybe_create_zoho_books_invoice(order_id: int, *, trigger: str = 'placed') -
         )
 
 
-def maybe_finalize_zoho_books_at_checkout(order_id: int) -> None:
+def maybe_finalize_zoho_books_invoice_for_order(order_id: int, *, trigger: str = 'synced') -> None:
     """
-    Checkout hook: create Zoho Books invoice, then set status by payment method.
+    After order is confirmed (``trigger='synced'``): create Zoho Books sales order (if enabled),
+    then invoice, then:
 
-    - payment_gateway, pay_by_link: record customer payment (invoice → paid in Zoho)
-    - cash_on_delivery, card_on_delivery: mark invoice sent (done during invoice creation)
+    - payment_gateway, pay_by_link: record customer payment (invoice → paid)
+    - cash_on_delivery, card_on_delivery: mark invoice sent (during invoice creation)
     """
     from shop.services.zoho_books_payment import (
         is_prepaid_at_checkout_payment_method,
         maybe_record_zoho_books_payment_for_order,
     )
+    from shop.services.zoho_books_sales_order import maybe_create_zoho_books_sales_order_for_order
 
-    maybe_create_zoho_books_invoice(order_id, trigger='placed')
+    maybe_create_zoho_books_sales_order_for_order(order_id, trigger=trigger)
+    maybe_create_zoho_books_invoice(order_id, trigger=trigger)
 
     order = (
         Order.objects.filter(pk=order_id)

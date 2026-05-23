@@ -70,6 +70,7 @@ from .serializers import (
     CheckoutSerializer,
     LoyaltyIssueCouponSerializer,
     OrderSerializer,
+    OrderEditSerializer,
     FCMDeviceTokenSerializer,
     PushSettingsSerializer,
     OrderReturnCreateSerializer,
@@ -147,6 +148,25 @@ def _required_store_for_user_scope(request):
             status=status.HTTP_404_NOT_FOUND,
         )
     return store, None
+
+
+def _resolve_order_pk(request, pk=None):
+    """Path ``pk`` or query ``order_id`` (used by confirm / detail query-style URLs)."""
+    if pk is not None:
+        return pk, None
+    raw = (request.query_params.get('order_id') or '').strip()
+    if not raw:
+        return None, Response(
+            {'detail': 'order_id query parameter is required.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    try:
+        return int(raw), None
+    except (TypeError, ValueError):
+        return None, Response(
+            {'detail': 'order_id must be an integer.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
 
 def _as_decimal(raw, default='0'):
@@ -1480,9 +1500,9 @@ class CheckoutAPIView(APIView):
                 uearn.points_balance = int(uearn.points_balance or 0) + points_awarded
                 uearn.save(update_fields=['points_balance'])
 
-        from shop.services.zoho_books_invoice import maybe_finalize_zoho_books_at_checkout
+        from shop.services.zoho_sales_order import maybe_create_zoho_sales_order_for_order
 
-        maybe_finalize_zoho_books_at_checkout(order.pk)
+        maybe_create_zoho_sales_order_for_order(order.pk)
 
         order = Order.objects.prefetch_related(
             'items', 'returns__lines__order_item',
@@ -1709,12 +1729,18 @@ class OrderListAPIView(generics.ListAPIView):
         )
 
 
-class OrderDetailAPIView(generics.RetrieveAPIView):
+class OrderDetailAPIView(APIView):
     permission_classes = [IsAuthenticated]
-    serializer_class = OrderSerializer
 
-    def get_queryset(self):
-        raw = (self.request.query_params.get('store_id') or '').strip()
+    def _order_queryset(self, user, store):
+        return (
+            Order.objects.filter(user=user, store=store)
+            .select_related('store')
+            .prefetch_related('items', 'returns__lines__order_item')
+        )
+
+    def _resolve_store(self, request):
+        raw = (request.query_params.get('store_id') or '').strip()
         if not raw:
             raise ValidationError({'detail': 'store_id query parameter is required.'})
         try:
@@ -1724,10 +1750,185 @@ class OrderDetailAPIView(generics.RetrieveAPIView):
         store = Store.objects.filter(pk=store_id, is_active=True).first()
         if not store:
             raise ValidationError({'detail': 'Store not found.'})
-        return (
-            Order.objects.filter(user=self.request.user, store=store)
+        return store
+
+    def get(self, request, pk=None):
+        store = self._resolve_store(request)
+        pk, err = _resolve_order_pk(request, pk)
+        if err:
+            return err
+        qs = Order.objects.filter(store=store).select_related('store').prefetch_related(
+            'items', 'returns__lines__order_item',
+        )
+        if not (request.user.is_staff or request.user.is_superuser):
+            qs = qs.filter(user=request.user)
+        order = get_object_or_404(qs, pk=pk)
+        return Response(OrderSerializer(order).data)
+
+    def patch(self, request, pk=None):
+        store = self._resolve_store(request)
+        pk, err = _resolve_order_pk(request, pk)
+        if err:
+            return err
+        qs = Order.objects.select_related('store').prefetch_related('items')
+        if request.user.is_staff or request.user.is_superuser:
+            order = get_object_or_404(qs, pk=pk, store=store)
+        else:
+            order = get_object_or_404(qs, pk=pk, store=store, user=request.user)
+
+        if order.status not in ORDER_EDITABLE_STATUSES:
+            return Response(
+                {'detail': 'Only pending orders can be edited.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ser = OrderEditSerializer(data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        data = ser.validated_data
+        if not data:
+            return Response({'detail': 'No fields to update.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        update_fields: list[str] = ['updated_at']
+        simple_fields = (
+            'payment_method',
+            'shipping_name', 'shipping_phone', 'shipping_address', 'shipping_city',
+            'shipping_state', 'shipping_postal_code', 'shipping_country',
+            'billing_same_as_shipping',
+            'billing_name', 'billing_phone', 'billing_address', 'billing_city',
+            'billing_state', 'billing_postal_code', 'billing_country',
+        )
+        for field in simple_fields:
+            if field in data:
+                setattr(order, field, data[field])
+                update_fields.append(field)
+
+        if data.get('billing_same_as_shipping'):
+            order.billing_name = order.shipping_name
+            order.billing_phone = order.shipping_phone
+            order.billing_address = order.shipping_address
+            order.billing_city = order.shipping_city
+            order.billing_state = order.shipping_state
+            order.billing_postal_code = order.shipping_postal_code
+            order.billing_country = order.shipping_country
+            update_fields.extend([
+                'billing_name', 'billing_phone', 'billing_address', 'billing_city',
+                'billing_state', 'billing_postal_code', 'billing_country',
+            ])
+
+        if 'shipping_amount' in data:
+            shipping_amount = Decimal(data['shipping_amount']).quantize(Decimal('0.01'))
+            totals = _checkout_totals(
+                Decimal(str(order.subtotal or 0)),
+                Decimal(str(order.vat_percent or 0)),
+                shipping_amount,
+                loyalty_discount=Decimal(str(order.loyalty_discount or 0)),
+            )
+            order.shipping_amount = shipping_amount
+            order.vat_amount = totals['vat_amount']
+            order.total = totals['total']
+            update_fields.extend(['shipping_amount', 'vat_amount', 'total'])
+
+        order.save(update_fields=list(dict.fromkeys(update_fields)))
+
+        from shop.services.zoho_sales_order import maybe_update_zoho_sales_order_for_order
+
+        maybe_update_zoho_sales_order_for_order(order.pk)
+
+        order = (
+            Order.objects.filter(pk=pk, store=store)
             .select_related('store')
             .prefetch_related('items', 'returns__lines__order_item')
+            .first()
+        )
+        return Response(
+            {
+                'status': 'success',
+                'message': 'Order updated.',
+                'order': OrderSerializer(order).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+ORDER_EDITABLE_STATUSES = frozenset({
+    Order.Status.PENDING_ZOHO_SYNC,
+    Order.Status.SYNC_FAILED,
+})
+
+
+class OrderConfirmAPIView(APIView):
+    """
+    Confirm order after customer/admin review: mark synced, create Zoho Books invoice.
+
+    POST /api/shop/orders/<pk>/confirm/?store_id=<store_id>
+    POST /api/shop/orders/confirm/?order_id=<order_id>&store_id=<store_id>
+    Staff only. Invoice + paid/sent handling runs when status becomes ``synced``.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk=None):
+        if not (request.user.is_staff or request.user.is_superuser):
+            return Response(
+                {'detail': 'Staff access is required to confirm orders.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        pk, err = _resolve_order_pk(request, pk)
+        if err:
+            return err
+
+        raw_store_id = (request.query_params.get('store_id') or '').strip()
+        if not raw_store_id:
+            return Response(
+                {'detail': 'store_id query parameter is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            store_id = int(raw_store_id)
+        except (TypeError, ValueError):
+            return Response(
+                {'detail': 'store_id must be an integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        store = Store.objects.filter(pk=store_id, is_active=True).first()
+        if not store:
+            return Response({'detail': 'Store not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        order = get_object_or_404(
+            Order.objects.select_related('store').prefetch_related('items', 'returns__lines__order_item'),
+            pk=pk,
+            store=store,
+        )
+
+        from shop.services.order_sync_state import apply_order_sync_transition
+        from shop.services.zoho_books_invoice import maybe_finalize_zoho_books_invoice_for_order
+
+        already_synced = order.status == Order.Status.SYNCED
+        if already_synced:
+            maybe_finalize_zoho_books_invoice_for_order(order.pk, trigger='synced')
+            message = 'Order was already confirmed; retried Zoho Books sync.'
+        else:
+            try:
+                apply_order_sync_transition(order, Order.Status.SYNCED)
+            except ValueError as exc:
+                return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            message = 'Order confirmed.'
+
+        order = (
+            Order.objects.filter(pk=order.pk)
+            .select_related('store')
+            .prefetch_related('items', 'returns__lines__order_item')
+            .first()
+        )
+        return Response(
+            {
+                'status': 'success',
+                'message': message,
+                'order': OrderSerializer(order).data,
+            },
+            status=status.HTTP_200_OK,
         )
 
 

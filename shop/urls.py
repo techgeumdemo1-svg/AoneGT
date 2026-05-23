@@ -15,6 +15,7 @@ from .views import (
     RewardPointsAPIView,
     OrderListAPIView,
     OrderDetailAPIView,
+    OrderConfirmAPIView,
     OrderReturnFlowMetaAPIView,
     OrderReturnListCreateAPIView,
     OrderReorderAPIView,
@@ -49,6 +50,9 @@ urlpatterns = [
     path('orders/<int:pk>/returns/', OrderReturnListCreateAPIView.as_view(), name='shop-order-returns'),
     path('orders/reorder/', OrderReorderAPIView.as_view(), name='shop-order-reorder-by-query'),
     path('orders/', OrderListAPIView.as_view(), name='shop-order-list'),
+    path('orders/confirm/', OrderConfirmAPIView.as_view(), name='shop-order-confirm-by-query'),
+    path('orders/detail/', OrderDetailAPIView.as_view(), name='shop-order-detail-by-query'),
+    path('orders/<int:pk>/confirm/', OrderConfirmAPIView.as_view(), name='shop-order-confirm'),
     path('orders/<int:pk>/', OrderDetailAPIView.as_view(), name='shop-order-detail'),
 
     path('notifications/unread-count/', NotificationUnreadCountAPIView.as_view(), name='shop-notifications-unread-count'),

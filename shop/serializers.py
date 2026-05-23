@@ -665,6 +665,8 @@ class OrderSerializer(serializers.ModelSerializer):
             'zoho_sync_error', 'zoho_synced_at',
             'zoho_books_invoice_id', 'zoho_books_invoice_number',
             'zoho_books_invoiced_at', 'zoho_books_invoice_error',
+            'zoho_books_salesorder_id', 'zoho_books_salesorder_number',
+            'zoho_books_salesordered_at', 'zoho_books_salesorder_error',
             'zoho_books_payment_id', 'zoho_books_paid_at', 'zoho_books_payment_error',
             'customer_tracking_stage', 'out_for_delivery_email_sent_at',
             'returned_total', 'balance_remaining', 'refunded_amount', 'net_paid',
@@ -677,6 +679,8 @@ class OrderSerializer(serializers.ModelSerializer):
             'zoho_sync_error', 'zoho_synced_at',
             'zoho_books_invoice_id', 'zoho_books_invoice_number',
             'zoho_books_invoiced_at', 'zoho_books_invoice_error',
+            'zoho_books_salesorder_id', 'zoho_books_salesorder_number',
+            'zoho_books_salesordered_at', 'zoho_books_salesorder_error',
             'zoho_books_payment_id', 'zoho_books_paid_at', 'zoho_books_payment_error',
             'order_code', 'display_status', 'tracking', 'items_count',
             'can_reorder', 'can_return', 'return_status', 'order_date',
@@ -991,6 +995,36 @@ class CheckoutSerializer(serializers.Serializer):
                 {'loyalty_coupon_code': 'Use either loyalty coupon code or points_to_redeem, not both.'},
             )
         return attrs
+
+
+class OrderEditSerializer(serializers.Serializer):
+    """Edit a pending order before confirm (shipping, billing, payment, shipping fee)."""
+
+    payment_method = serializers.ChoiceField(
+        choices=Order.PaymentMethod.choices,
+        required=False,
+    )
+    shipping_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        required=False,
+        min_value=Decimal('0'),
+    )
+    shipping_name = serializers.CharField(max_length=255, required=False)
+    shipping_phone = serializers.CharField(max_length=50, required=False)
+    shipping_address = serializers.CharField(max_length=500, required=False)
+    shipping_city = serializers.CharField(max_length=120, required=False)
+    shipping_state = serializers.CharField(max_length=120, required=False, allow_blank=True)
+    shipping_postal_code = serializers.CharField(max_length=32, required=False, allow_blank=True)
+    shipping_country = serializers.CharField(max_length=120, required=False)
+    billing_same_as_shipping = serializers.BooleanField(required=False)
+    billing_name = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    billing_phone = serializers.CharField(max_length=50, required=False, allow_blank=True)
+    billing_address = serializers.CharField(max_length=500, required=False, allow_blank=True)
+    billing_city = serializers.CharField(max_length=120, required=False, allow_blank=True)
+    billing_state = serializers.CharField(max_length=120, required=False, allow_blank=True)
+    billing_postal_code = serializers.CharField(max_length=32, required=False, allow_blank=True)
+    billing_country = serializers.CharField(max_length=120, required=False, allow_blank=True)
 
 
 class OrderReturnLineInputSerializer(serializers.Serializer):

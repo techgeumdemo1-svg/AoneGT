@@ -166,6 +166,38 @@ def books_find_contact_id_by_email(email: str, *, store=None) -> str | None:
     return None
 
 
+def books_find_contact_id_by_name(contact_name: str, *, store=None) -> str | None:
+    normalized = (contact_name or '').strip()
+    if not normalized:
+        return None
+    normalized_lower = normalized.lower()
+
+    def _match_from_payload(payload: dict) -> str | None:
+        contacts = payload.get('contacts') or []
+        for row in contacts:
+            if not isinstance(row, dict):
+                continue
+            name = (row.get('contact_name') or '').strip()
+            if name.lower() == normalized_lower:
+                return str(row.get('contact_id') or '').strip() or None
+        if len(contacts) == 1 and isinstance(contacts[0], dict):
+            return str(contacts[0].get('contact_id') or '').strip() or None
+        return None
+
+    for query in (
+        {'contact_name': normalized, 'contact_type': 'customer'},
+        {'search_text': normalized, 'contact_type': 'customer'},
+    ):
+        try:
+            payload = _books_request('GET', 'contacts', store=store, query=query)
+        except ZohoBooksError:
+            continue
+        contact_id = _match_from_payload(payload)
+        if contact_id:
+            return contact_id
+    return None
+
+
 def books_create_contact(
     *,
     contact_name: str,
@@ -194,11 +226,42 @@ def books_create_contact(
     return contact_id
 
 
+def books_create_sales_order(salesorder_body: dict[str, Any], *, store=None) -> dict[str, Any]:
+    payload = _books_request('POST', 'salesorders', store=store, json_data=salesorder_body)
+    salesorder = payload.get('salesorder')
+    if not isinstance(salesorder, dict):
+        raise ZohoBooksError('Zoho Books did not return salesorder payload.')
+    return salesorder
+
+
 def books_create_invoice(invoice_body: dict[str, Any], *, store=None) -> dict[str, Any]:
     payload = _books_request('POST', 'invoices', store=store, json_data=invoice_body)
     invoice = payload.get('invoice')
     if not isinstance(invoice, dict):
         raise ZohoBooksError('Zoho Books did not return invoice payload.')
+    return invoice
+
+
+def books_create_invoice_from_sales_order(
+    salesorder_id: str,
+    *,
+    store=None,
+    json_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Create a Zoho Books invoice from an existing sales order."""
+    salesorder_id = (salesorder_id or '').strip()
+    if not salesorder_id:
+        raise ZohoBooksError('salesorder_id is required to create invoice from sales order.')
+    payload = _books_request(
+        'POST',
+        'invoices/fromsalesorder',
+        store=store,
+        query={'salesorder_id': salesorder_id},
+        json_data=json_data or {},
+    )
+    invoice = payload.get('invoice')
+    if not isinstance(invoice, dict):
+        raise ZohoBooksError('Zoho Books did not return invoice payload from sales order.')
     return invoice
 
 

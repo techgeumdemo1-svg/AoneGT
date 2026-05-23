@@ -169,6 +169,22 @@ class Order(models.Model):
         blank=True,
         help_text='When the Zoho Books invoice was created for this order.',
     )
+    zoho_books_salesorder_id = models.CharField(
+        max_length=64,
+        blank=True,
+        help_text='Zoho Books salesorder_id after successful sales order creation.',
+    )
+    zoho_books_salesorder_number = models.CharField(
+        max_length=64,
+        blank=True,
+        help_text='Human-readable sales order number from Zoho Books.',
+    )
+    zoho_books_salesorder_error = models.TextField(blank=True)
+    zoho_books_salesordered_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text='When the Zoho Books sales order was created for this order.',
+    )
     zoho_books_payment_id = models.CharField(
         max_length=64,
         blank=True,

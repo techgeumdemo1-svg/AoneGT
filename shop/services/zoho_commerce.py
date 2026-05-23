@@ -277,6 +277,75 @@ class ZohoCommerceService:
         return {'domain-name': domain}
 
     @classmethod
+    def admin_request(
+        cls,
+        method: str,
+        resource: str,
+        *,
+        store: Store | None = None,
+        json_data: dict[str, Any] | list[Any] | None = None,
+        query: dict[str, Any] | None = None,
+        timeout: int = 60,
+    ) -> tuple[int, Any]:
+        """Authenticated Commerce store admin API (``/store/api/v1/...``)."""
+        resource = (resource or '').strip().lstrip('/')
+        url = f'{settings.ZOHO_COMMERCE_BASE_URL}{STORE_API_PREFIX}/{resource}'
+        try:
+            response = requests.request(
+                (method or 'GET').upper(),
+                url,
+                headers=cls.admin_headers(store),
+                params=query or None,
+                json=json_data,
+                timeout=timeout,
+            )
+        except requests.RequestException as exc:
+            raise ZohoCommerceError(f'Zoho Commerce request failed: {exc}') from exc
+
+        try:
+            body = response.json()
+        except ValueError:
+            body = response.text
+
+        if response.status_code >= 400:
+            message = body
+            if isinstance(body, dict):
+                message = body.get('message') or body
+            raise ZohoCommerceError(f'Zoho Commerce HTTP {response.status_code}: {message}')
+
+        return response.status_code, body
+
+    @classmethod
+    def admin_post(
+        cls,
+        resource: str,
+        json_data: dict[str, Any] | list[Any],
+        *,
+        store: Store | None = None,
+        query: dict[str, Any] | None = None,
+        timeout: int = 60,
+    ) -> Any:
+        _status, body = cls.admin_request(
+            'POST', resource, store=store, json_data=json_data, query=query, timeout=timeout,
+        )
+        return body
+
+    @classmethod
+    def admin_put(
+        cls,
+        resource: str,
+        json_data: dict[str, Any] | list[Any],
+        *,
+        store: Store | None = None,
+        query: dict[str, Any] | None = None,
+        timeout: int = 60,
+    ) -> Any:
+        _status, body = cls.admin_request(
+            'PUT', resource, store=store, json_data=json_data, query=query, timeout=timeout,
+        )
+        return body
+
+    @classmethod
     def get_products_storefront(
         cls,
         product_type: str | None = None,
