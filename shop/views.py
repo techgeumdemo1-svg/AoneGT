@@ -2345,17 +2345,46 @@ class NotificationPagination(PageNumberPagination):
     max_page_size = 50
 
 
+def _apply_notification_store_filter(request, qs):
+    """Optional ``store_id`` query param — filter notifications by ``payload.store_id``."""
+    raw = (request.query_params.get('store_id') or '').strip()
+    if not raw:
+        return qs, None
+    try:
+        store_id = int(raw)
+    except (TypeError, ValueError):
+        return None, Response(
+            {'detail': 'store_id must be an integer.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    store = Store.objects.filter(pk=store_id, is_active=True).first()
+    if not store:
+        return None, Response(
+            {'detail': 'Store not found.'},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    return qs.filter(payload__store_id=store_id), None
+
+
+def _user_notifications_queryset(user, request, *, offers_only=False):
+    if offers_only:
+        qs = UserNotification.objects.filter(user=user, kind=UserNotification.Kind.OFFER)
+    else:
+        qs = UserNotification.objects.filter(user=user).exclude(kind=UserNotification.Kind.OFFER)
+    return _apply_notification_store_filter(request, qs)
+
+
 class NotificationListAPIView(generics.ListAPIView):
-    """GET — paginated in-app notifications. PATCH — mark one read via ?id=<pk>."""
+    """GET — paginated in-app notifications. PATCH — mark one read via ?id=<pk>&store_id=."""
 
     permission_classes = [IsAuthenticated]
     serializer_class = UserNotificationSerializer
     pagination_class = NotificationPagination
 
     def get_queryset(self):
-        qs = UserNotification.objects.filter(user=self.request.user).exclude(
-            kind=UserNotification.Kind.OFFER
-        )
+        qs, err = _user_notifications_queryset(self.request.user, self.request)
+        if err is not None:
+            return UserNotification.objects.none()
         raw = (self.request.query_params.get('unread') or '').strip().lower()
         if raw in ('1', 'true', 'yes'):
             qs = qs.filter(read_at__isnull=True)
@@ -2363,6 +2392,12 @@ class NotificationListAPIView(generics.ListAPIView):
         if kind:
             qs = qs.filter(kind=kind)
         return qs
+
+    def list(self, request, *args, **kwargs):
+        _, err = _user_notifications_queryset(request.user, request)
+        if err is not None:
+            return err
+        return super().list(request, *args, **kwargs)
 
     def patch(self, request):
         raw_id = (request.query_params.get('id') or '').strip()
@@ -2375,7 +2410,10 @@ class NotificationListAPIView(generics.ListAPIView):
             pk = int(raw_id)
         except ValueError:
             return Response({'detail': 'Invalid id.'}, status=status.HTTP_400_BAD_REQUEST)
-        n = get_object_or_404(UserNotification, pk=pk, user=request.user)
+        qs, err = _user_notifications_queryset(request.user, request)
+        if err is not None:
+            return err
+        n = get_object_or_404(qs, pk=pk)
         if n.read_at is None:
             n.read_at = timezone.now()
             n.save(update_fields=['read_at'])
@@ -2405,7 +2443,13 @@ class NotificationUnreadCountAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        c = UserNotification.objects.filter(user=request.user, read_at__isnull=True).count()
+        qs, err = _apply_notification_store_filter(
+            request,
+            UserNotification.objects.filter(user=request.user),
+        )
+        if err is not None:
+            return err
+        c = qs.filter(read_at__isnull=True).count()
         return Response({'unread_count': c})
 
 
@@ -2414,9 +2458,13 @@ class NotificationMarkAllReadAPIView(APIView):
 
     def post(self, request):
         now = timezone.now()
-        n = UserNotification.objects.filter(user=request.user, read_at__isnull=True).update(
-            read_at=now,
+        qs, err = _apply_notification_store_filter(
+            request,
+            UserNotification.objects.filter(user=request.user),
         )
+        if err is not None:
+            return err
+        n = qs.filter(read_at__isnull=True).update(read_at=now)
         return Response({'marked': n})
 
 class NotificationDetailAPIView(APIView):
