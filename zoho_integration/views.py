@@ -1799,7 +1799,7 @@ class MultiAccountZohoBestDealsAPIView(APIView):
         limit: int,
     ):
         collection_id = (request.GET.get("collection_id") or "").strip()
-        collection_name_query = (request.GET.get("collection_name") or "").strip()
+        collection_name_query = "Best Deals"
         if not collection_id and collection_name_query:
             try:
                 admin_rows = list_zoho_commerce_collections(
@@ -1818,14 +1818,12 @@ class MultiAccountZohoBestDealsAPIView(APIView):
             if not collection_id:
                 return Response(
                     {
-                        "status": "error",
-                        "message": (
-                            f'No collection named "{collection_name_query}" found for '
-                            f'organization_id={organization_id}. '
-                            'Use GET /zoho/multi/collections/ to list available collections.'
-                        ),
+                        "status": "success",
+                        "message": "No Best Deals collection found for this store.",
+                        "count": 0,
+                        "products": [],
                     },
-                    status=404,
+                    status=200,
                 )
 
         if not collection_id:
@@ -1854,14 +1852,12 @@ class MultiAccountZohoBestDealsAPIView(APIView):
             if not collection_id:
                 return Response(
                     {
-                        "status": "error",
-                        "message": (
-                            f'No collection named "{collection_name_query}" found for '
-                            f'organization_id={organization_id}. '
-                            'Use GET /zoho/multi/collections/ to list available collections.'
-                        ),
+                        "status": "success",
+                        "message": "No Best Deals collection found for this store.",
+                        "count": 0,
+                        "products": [],
                     },
-                    status=404,
+                    status=200,
                 )
 
         if not collection_id:
