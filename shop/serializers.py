@@ -651,7 +651,9 @@ class OrderSerializer(serializers.ModelSerializer):
     class Meta:
         model = Order
         fields = (
-            'order_id', 'store', 'status', 'currency', 'payment_method',
+            'order_id', 'store', 'status', 'currency', 'payment_method', 'payment_status',
+            'gateway_reference', 'prepaid_credited_amount', 'credit_applied_on_invoice',
+            'credit_refunded_remainder',
             'subtotal', 'vat_percent', 'vat_amount', 'shipping_amount', 'total',
             'order_code', 'display_status', 'tracking', 'items_count',
             'can_reorder', 'can_return', 'return_status', 'order_date',
@@ -675,6 +677,8 @@ class OrderSerializer(serializers.ModelSerializer):
         )
         read_only_fields = (
             'order_id', 'status', 'subtotal', 'vat_percent', 'vat_amount', 'total',
+            'payment_status', 'gateway_reference', 'prepaid_credited_amount',
+            'credit_applied_on_invoice', 'credit_refunded_remainder',
             'zoho_checkout_id', 'zoho_salesorder_id',
             'zoho_sync_error', 'zoho_synced_at',
             'zoho_books_invoice_id', 'zoho_books_invoice_number',
@@ -913,6 +917,26 @@ class CheckoutSerializer(serializers.Serializer):
         required=False,
         min_value=Decimal('0'),
     )
+    payment_success = serializers.BooleanField(
+        required=False,
+        allow_null=True,
+        default=None,
+        help_text='Required true for payment_gateway / pay_by_link after gateway confirms payment.',
+    )
+    gateway_reference = serializers.CharField(
+        max_length=255,
+        required=False,
+        allow_blank=True,
+        trim_whitespace=True,
+        help_text='Gateway or pay-by-link transaction id after successful payment.',
+    )
+    payment_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        required=False,
+        min_value=Decimal('0'),
+        help_text='Optional; defaults to order total. Must match order total when provided.',
+    )
 
     def validate(self, attrs):
         store = get_object_or_404(Store, pk=attrs['store_id'], is_active=True)
@@ -994,6 +1018,48 @@ class CheckoutSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 {'loyalty_coupon_code': 'Use either loyalty coupon code or points_to_redeem, not both.'},
             )
+
+        from shop.services.zoho_books_payment import is_prepaid_at_checkout_payment_method
+
+        payment_method = attrs.get('payment_method', Order.PaymentMethod.CASH_ON_DELIVERY)
+        raw_success = attrs.get('payment_success')
+        if raw_success is None:
+            payment_success = False
+        elif isinstance(raw_success, str):
+            payment_success = raw_success.strip().lower() in ('true', '1', 'yes')
+        else:
+            payment_success = bool(raw_success)
+        attrs['payment_success'] = payment_success
+
+        gateway_reference = (attrs.get('gateway_reference') or '').strip()
+        attrs['gateway_reference'] = gateway_reference
+
+        require_prepaid_payment = getattr(
+            settings,
+            'CHECKOUT_REQUIRE_PREPAID_PAYMENT_SUCCESS',
+            True,
+        )
+
+        if is_prepaid_at_checkout_payment_method(payment_method):
+            if require_prepaid_payment and not payment_success:
+                raise serializers.ValidationError({
+                    'payment_success': (
+                        'Payment must be successful before checkout for '
+                        'payment_gateway or pay_by_link orders. '
+                        'Send payment_success: true and gateway_reference in JSON body.'
+                    ),
+                })
+            if payment_success and not gateway_reference:
+                raise serializers.ValidationError({
+                    'gateway_reference': (
+                        'Transaction reference is required after successful payment.'
+                    ),
+                })
+
+        payment_amount = attrs.get('payment_amount')
+        if payment_amount is not None:
+            attrs['payment_amount'] = Decimal(payment_amount).quantize(Decimal('0.01'))
+
         return attrs
 
 

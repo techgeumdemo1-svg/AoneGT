@@ -234,6 +234,52 @@ def books_create_sales_order(salesorder_body: dict[str, Any], *, store=None) -> 
     return salesorder
 
 
+def books_get_sales_order(salesorder_id: str, *, store=None) -> dict[str, Any]:
+    salesorder_id = (salesorder_id or '').strip()
+    if not salesorder_id:
+        raise ZohoBooksError('salesorder_id is required.')
+    payload = _books_request('GET', f'salesorders/{salesorder_id}', store=store)
+    salesorder = payload.get('salesorder')
+    if not isinstance(salesorder, dict):
+        raise ZohoBooksError('Zoho Books did not return salesorder payload.')
+    return salesorder
+
+
+def books_update_sales_order(
+    salesorder_id: str,
+    salesorder_body: dict[str, Any],
+    *,
+    store=None,
+) -> dict[str, Any]:
+    salesorder_id = (salesorder_id or '').strip()
+    if not salesorder_id:
+        raise ZohoBooksError('salesorder_id is required to update sales order.')
+    payload = _books_request(
+        'PUT',
+        f'salesorders/{salesorder_id}',
+        store=store,
+        json_data=salesorder_body,
+    )
+    salesorder = payload.get('salesorder')
+    if not isinstance(salesorder, dict):
+        raise ZohoBooksError('Zoho Books did not return salesorder payload after update.')
+    return salesorder
+
+
+def books_void_sales_order(salesorder_id: str, *, store=None) -> dict[str, Any]:
+    """Mark a Zoho Books sales order as void."""
+    salesorder_id = (salesorder_id or '').strip()
+    if not salesorder_id:
+        raise ZohoBooksError('salesorder_id is required to void sales order.')
+    payload = _books_request(
+        'POST',
+        f'salesorders/{salesorder_id}/status/void',
+        store=store,
+    )
+    salesorder = payload.get('salesorder')
+    return salesorder if isinstance(salesorder, dict) else payload
+
+
 def books_create_invoice(invoice_body: dict[str, Any], *, store=None) -> dict[str, Any]:
     payload = _books_request('POST', 'invoices', store=store, json_data=invoice_body)
     invoice = payload.get('invoice')

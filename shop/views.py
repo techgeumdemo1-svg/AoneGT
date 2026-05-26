@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 from urllib.parse import quote, urlparse
 
 from django.conf import settings
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import Sum
@@ -1391,6 +1392,14 @@ class CheckoutAPIView(APIView):
                 status=Order.Status.PENDING_ZOHO_SYNC,
                 currency=currency,
                 payment_method=ser.validated_data['payment_method'],
+                payment_status=(
+                    Order.PaymentStatus.PENDING
+                    if ser.validated_data['payment_method'] in (
+                        Order.PaymentMethod.PAYMENT_GATEWAY.value,
+                        Order.PaymentMethod.PAY_BY_LINK.value,
+                    )
+                    else Order.PaymentStatus.NOT_REQUIRED
+                ),
                 subtotal=subtotal,
                 vat_percent=vat_percent,
                 vat_amount=vat_amount,
@@ -1500,9 +1509,35 @@ class CheckoutAPIView(APIView):
                 uearn.points_balance = int(uearn.points_balance or 0) + points_awarded
                 uearn.save(update_fields=['points_balance'])
 
+            from shop.services.account_credit import credit_user_for_prepaid_order, get_user_credit_balance
+            from shop.services.zoho_books_payment import is_prepaid_at_checkout_payment_method
+
+            gateway_reference = (ser.validated_data.get('gateway_reference') or '').strip()
+            if gateway_reference:
+                order.gateway_reference = gateway_reference[:255]
+                order.save(update_fields=['gateway_reference', 'updated_at'])
+
+            if is_prepaid_at_checkout_payment_method(order.payment_method):
+                if ser.validated_data.get('payment_success'):
+                    pay_amount = ser.validated_data.get('payment_amount')
+                    if pay_amount is not None and pay_amount != final_total:
+                        raise ValidationError({
+                            'payment_amount': f'Must match order total ({final_total}).',
+                        })
+                    credit_user_for_prepaid_order(
+                        order,
+                        amount=pay_amount if pay_amount is not None else final_total,
+                        gateway_reference=gateway_reference,
+                    )
+                    order.refresh_from_db()
+
+        from shop.services.zoho_books_sales_order import maybe_create_zoho_books_sales_order_for_order
         from shop.services.zoho_sales_order import maybe_create_zoho_sales_order_for_order
 
-        maybe_create_zoho_sales_order_for_order(order.pk)
+        if getattr(settings, 'ZOHO_BOOKS_MANUAL_WORKFLOW', False):
+            maybe_create_zoho_books_sales_order_for_order(order.pk, trigger='placed')
+        else:
+            maybe_create_zoho_sales_order_for_order(order.pk)
 
         order = Order.objects.prefetch_related(
             'items', 'returns__lines__order_item',
@@ -1569,8 +1604,12 @@ class CheckoutAPIView(APIView):
         order_data['coupon_discount'] = str(coupon_discount)
         order_data['discount_amount'] = str(discount_amount)
         order_data['taxable_subtotal'] = str(taxable_subtotal)
+        from shop.services.account_credit import get_user_credit_balance
+
+        request.user.refresh_from_db(fields=['credit_balance_aed'])
         response_payload = {
             'order': order_data,
+            'credit_balance_aed': str(get_user_credit_balance(request.user)),
             'checkout_view': {
                 'delivery_address': {
                     'name': order.shipping_name,
@@ -1624,12 +1663,16 @@ class RewardPointsAPIView(APIView):
         ledger_awarded_all_stores = int(ledger_awarded_all_stores)
         request.user.refresh_from_db(fields=['points_balance'])
         wallet = int(request.user.points_balance or 0)
+        credit_balance = Decimal(str(getattr(request.user, 'credit_balance_aed', 0) or 0)).quantize(
+            Decimal('0.01'),
+        )
         return Response(
             {
                 # Redeemable balance for checkout / issue-coupon — one wallet for the whole account.
                 'wallet_balance': wallet,
                 # Backwards compatibility (same value as wallet_balance).
                 'points_balance': wallet,
+                'credit_balance_aed': str(credit_balance),
                 'wallet_scope': 'account_wide',
                 'store_id': store.pk,
                 # Sum of ledger rows for orders placed at this store only (subset of lifetime earn).
@@ -1830,9 +1873,13 @@ class OrderDetailAPIView(APIView):
 
         order.save(update_fields=list(dict.fromkeys(update_fields)))
 
+        from shop.services.zoho_books_sales_order import maybe_update_zoho_books_sales_order_for_order
         from shop.services.zoho_sales_order import maybe_update_zoho_sales_order_for_order
 
-        maybe_update_zoho_sales_order_for_order(order.pk)
+        if getattr(settings, 'ZOHO_BOOKS_MANUAL_WORKFLOW', False):
+            maybe_update_zoho_books_sales_order_for_order(order.pk)
+        else:
+            maybe_update_zoho_sales_order_for_order(order.pk)
 
         order = (
             Order.objects.filter(pk=pk, store=store)
@@ -1858,11 +1905,13 @@ ORDER_EDITABLE_STATUSES = frozenset({
 
 class OrderConfirmAPIView(APIView):
     """
-    Confirm order after customer/admin review: mark synced, create Zoho Books invoice.
+    Confirm order after staff review: mark synced (local approval).
 
     POST /api/shop/orders/<pk>/confirm/?store_id=<store_id>
     POST /api/shop/orders/confirm/?order_id=<order_id>&store_id=<store_id>
-    Staff only. Invoice + paid/sent handling runs when status becomes ``synced``.
+
+    With ``ZOHO_BOOKS_MANUAL_WORKFLOW=True`` (default), confirm does not create invoice or
+    payment — staff use ``/zoho-books/invoice/`` and ``/zoho-books/payment/`` separately.
     """
 
     permission_classes = [IsAuthenticated]
@@ -1903,12 +1952,18 @@ class OrderConfirmAPIView(APIView):
         )
 
         from shop.services.order_sync_state import apply_order_sync_transition
-        from shop.services.zoho_books_invoice import maybe_finalize_zoho_books_invoice_for_order
+        from shop.services.zoho_books_invoice import (
+            maybe_finalize_zoho_books_invoice_for_order,
+            zoho_books_manual_workflow,
+        )
 
         already_synced = order.status == Order.Status.SYNCED
         if already_synced:
-            maybe_finalize_zoho_books_invoice_for_order(order.pk, trigger='synced')
-            message = 'Order was already confirmed; retried Zoho Books sync.'
+            if not zoho_books_manual_workflow():
+                maybe_finalize_zoho_books_invoice_for_order(order.pk, trigger='synced')
+                message = 'Order was already confirmed; retried Zoho Books sync.'
+            else:
+                message = 'Order was already confirmed.'
         else:
             try:
                 apply_order_sync_transition(order, Order.Status.SYNCED)
@@ -1929,6 +1984,239 @@ class OrderConfirmAPIView(APIView):
                 'order': OrderSerializer(order).data,
             },
             status=status.HTTP_200_OK,
+        )
+
+
+def _staff_order_for_books_action(request, pk=None):
+    """Resolve store + order for staff-only Zoho Books actions."""
+    if not (request.user.is_staff or request.user.is_superuser):
+        return None, None, Response(
+            {'detail': 'Staff access is required.'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    pk, err = _resolve_order_pk(request, pk)
+    if err:
+        return None, None, err
+
+    raw_store_id = (request.query_params.get('store_id') or '').strip()
+    if not raw_store_id:
+        return None, None, Response(
+            {'detail': 'store_id query parameter is required.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    try:
+        store_id = int(raw_store_id)
+    except (TypeError, ValueError):
+        return None, None, Response(
+            {'detail': 'store_id must be an integer.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    store = Store.objects.filter(pk=store_id, is_active=True).first()
+    if not store:
+        return None, None, Response({'detail': 'Store not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    order = get_object_or_404(
+        Order.objects.select_related('store').prefetch_related('items', 'returns__lines__order_item'),
+        pk=pk,
+        store=store,
+    )
+    return store, order, None
+
+
+def _order_for_owner_or_staff_action(request, pk=None):
+    """Resolve store + order; staff may act on any order, customers only their own."""
+    pk, err = _resolve_order_pk(request, pk)
+    if err:
+        return None, None, err
+
+    raw_store_id = (request.query_params.get('store_id') or '').strip()
+    if not raw_store_id:
+        return None, None, Response(
+            {'detail': 'store_id query parameter is required.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    try:
+        store_id = int(raw_store_id)
+    except (TypeError, ValueError):
+        return None, None, Response(
+            {'detail': 'store_id must be an integer.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    store = Store.objects.filter(pk=store_id, is_active=True).first()
+    if not store:
+        return None, None, Response({'detail': 'Store not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    qs = Order.objects.select_related('store').prefetch_related('items', 'returns__lines__order_item')
+    if not (request.user.is_staff or request.user.is_superuser):
+        qs = qs.filter(user=request.user)
+    order = get_object_or_404(qs, pk=pk, store=store)
+    return store, order, None
+
+
+class OrderZohoBooksInvoiceAPIView(APIView):
+    """
+    Staff: create Zoho Books invoice from the order's sales order.
+
+    POST /api/shop/orders/<pk>/zoho-books/invoice/?store_id=<store_id>
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk=None):
+        _, order, err = _staff_order_for_books_action(request, pk)
+        if err:
+            return err
+
+        from shop.services.zoho_books_invoice import staff_create_zoho_books_invoice_for_order
+
+        ok, message = staff_create_zoho_books_invoice_for_order(order.pk)
+        order = (
+            Order.objects.filter(pk=order.pk)
+            .select_related('store')
+            .prefetch_related('items', 'returns__lines__order_item')
+            .first()
+        )
+        return Response(
+            {
+                'status': 'success' if ok else 'error',
+                'message': message,
+                'order': OrderSerializer(order).data,
+            },
+            status=status.HTTP_200_OK if ok else status.HTTP_400_BAD_REQUEST,
+        )
+
+
+class OrderZohoBooksPaymentAPIView(APIView):
+    """
+    Staff: record Zoho Books customer payment against the order invoice.
+
+    POST /api/shop/orders/<pk>/zoho-books/payment/?store_id=<store_id>
+    Optional body: ``amount``, ``payment_method``, ``gateway_reference``.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk=None):
+        _, order, err = _staff_order_for_books_action(request, pk)
+        if err:
+            return err
+
+        amount = None
+        raw_amount = request.data.get('amount')
+        if raw_amount is not None and str(raw_amount).strip() != '':
+            amount = Decimal(str(raw_amount)).quantize(Decimal('0.01'))
+
+        payment_method = (request.data.get('payment_method') or '').strip()
+        gateway_reference = (request.data.get('gateway_reference') or '').strip()
+
+        from shop.services.zoho_books_payment import staff_record_zoho_books_payment_for_order
+
+        ok, message = staff_record_zoho_books_payment_for_order(
+            order.pk,
+            amount=amount,
+            payment_method=payment_method,
+            gateway_reference=gateway_reference,
+        )
+        order = (
+            Order.objects.filter(pk=order.pk)
+            .select_related('store')
+            .prefetch_related('items', 'returns__lines__order_item')
+            .first()
+        )
+        return Response(
+            {
+                'status': 'success' if ok else 'error',
+                'message': message,
+                'order': OrderSerializer(order).data,
+            },
+            status=status.HTTP_200_OK if ok else status.HTTP_400_BAD_REQUEST,
+        )
+
+
+class OrderPaymentSuccessAPIView(APIView):
+    """
+    Record successful gateway / pay-by-link payment and credit user account.
+
+    POST /api/shop/orders/<pk>/payment-success/?store_id=<store_id>
+    Body (optional): ``amount``, ``gateway_reference``
+
+    Callable by the order owner or staff (simulates gateway webhook until integrated).
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk=None):
+        _, order, err = _order_for_owner_or_staff_action(request, pk)
+        if err:
+            return err
+
+        amount = None
+        raw_amount = request.data.get('amount')
+        if raw_amount is not None and str(raw_amount).strip() != '':
+            amount = Decimal(str(raw_amount)).quantize(Decimal('0.01'))
+
+        gateway_reference = (request.data.get('gateway_reference') or '').strip()
+
+        from shop.services.account_credit import get_user_credit_balance, record_prepaid_payment_success
+
+        ok, message, order = record_prepaid_payment_success(
+            order.pk,
+            amount=amount,
+            gateway_reference=gateway_reference,
+        )
+        if order is None:
+            return Response({'status': 'error', 'message': message}, status=status.HTTP_400_BAD_REQUEST)
+
+        order = (
+            Order.objects.filter(pk=order.pk)
+            .select_related('store', 'user')
+            .prefetch_related('items', 'returns__lines__order_item')
+            .first()
+        )
+        return Response(
+            {
+                'status': 'success' if ok else 'error',
+                'message': message,
+                'credit_balance_aed': str(get_user_credit_balance(order.user)),
+                'order': OrderSerializer(order).data,
+            },
+            status=status.HTTP_200_OK if ok else status.HTTP_400_BAD_REQUEST,
+        )
+
+
+class OrderZohoBooksCancelAPIView(APIView):
+    """
+    Staff: void Zoho Books sales order and cancel local order.
+
+    POST /api/shop/orders/<pk>/zoho-books/cancel/?store_id=<store_id>
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk=None):
+        _, order, err = _staff_order_for_books_action(request, pk)
+        if err:
+            return err
+
+        from shop.services.zoho_books_sales_order import staff_cancel_zoho_books_order
+
+        ok, message = staff_cancel_zoho_books_order(order.pk)
+        order = (
+            Order.objects.filter(pk=order.pk)
+            .select_related('store')
+            .prefetch_related('items', 'returns__lines__order_item')
+            .first()
+        )
+        return Response(
+            {
+                'status': 'success' if ok else 'error',
+                'message': message,
+                'order': OrderSerializer(order).data,
+            },
+            status=status.HTTP_200_OK if ok else status.HTTP_400_BAD_REQUEST,
         )
 
 

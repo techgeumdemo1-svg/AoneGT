@@ -29,12 +29,19 @@ from shop.services.zoho_books import (
 logger = logging.getLogger(__name__)
 
 
+def zoho_books_manual_workflow() -> bool:
+    """Staff-driven Books flow: SO at checkout, invoice + payment via staff endpoints."""
+    return getattr(settings, 'ZOHO_BOOKS_MANUAL_WORKFLOW', False)
+
+
 def _should_create_on_placed() -> bool:
     mode = (getattr(settings, 'ZOHO_BOOKS_CREATE_INVOICE_ON', 'placed') or 'placed').strip().lower()
     return mode in ('placed', 'both', 'checkout', 'confirmed')
 
 
 def _should_create_on_synced() -> bool:
+    if zoho_books_manual_workflow():
+        return False
     mode = (getattr(settings, 'ZOHO_BOOKS_CREATE_INVOICE_ON', 'placed') or 'placed').strip().lower()
     return mode in ('synced', 'both')
 
@@ -367,12 +374,14 @@ def maybe_create_zoho_books_invoice(order_id: int, *, trigger: str = 'placed') -
 
 def maybe_finalize_zoho_books_invoice_for_order(order_id: int, *, trigger: str = 'synced') -> None:
     """
-    After order is confirmed (``trigger='synced'``): create Zoho Books sales order (if enabled),
-    then invoice, then:
+    Legacy automatic pipeline on order confirm (``trigger='synced'``): create Books SO (if enabled),
+    invoice, then prepaid payment or mark sent for COD.
 
-    - payment_gateway, pay_by_link: record customer payment (invoice → paid)
-    - cash_on_delivery, card_on_delivery: mark invoice sent (during invoice creation)
+    Skipped when ``ZOHO_BOOKS_MANUAL_WORKFLOW`` is enabled — staff create invoice and payment separately.
     """
+    if zoho_books_manual_workflow():
+        return
+
     from shop.services.zoho_books_payment import (
         is_prepaid_at_checkout_payment_method,
         maybe_record_zoho_books_payment_for_order,
@@ -393,3 +402,81 @@ def maybe_finalize_zoho_books_invoice_for_order(order_id: int, *, trigger: str =
     if is_prepaid_at_checkout_payment_method(order.payment_method):
         maybe_record_zoho_books_payment_for_order(order_id)
     # cash_on_delivery / card_on_delivery: invoice marked sent in create_zoho_books_invoice_for_order.
+
+
+def staff_create_zoho_books_invoice_for_order(order_id: int) -> tuple[bool, str]:
+    """
+    Staff-triggered invoice creation from an existing Books sales order.
+    Returns (success, message). Raises ZohoBooksError only when called outside try/except.
+    """
+    if not zoho_books_enabled():
+        return False, 'Zoho Books is disabled.'
+    try:
+        order = Order.objects.select_related('store').get(pk=order_id)
+    except Order.DoesNotExist:
+        return False, 'Order not found.'
+    if order.status == Order.Status.CANCELLED:
+        return False, 'Cancelled orders cannot be invoiced.'
+    if not store_has_books_config(order.store):
+        return False, 'Store is missing Zoho Books org configuration.'
+    if not (order.zoho_books_salesorder_id or '').strip():
+        return False, 'Order has no Zoho Books sales order yet.'
+    if (order.zoho_books_invoice_id or '').strip():
+        return False, 'Invoice already exists for this order.'
+
+    from shop.services.zoho_books_payment import (
+        is_pay_on_delivery_payment_method,
+        is_prepaid_at_checkout_payment_method,
+        record_zoho_books_payment_for_order,
+    )
+
+    if is_prepaid_at_checkout_payment_method(order.payment_method):
+        if order.payment_status != Order.PaymentStatus.PAID:
+            return False, 'Prepaid order must be paid before creating an invoice.'
+
+    try:
+        with transaction.atomic():
+            locked = (
+                Order.objects.select_for_update()
+                .select_related('store', 'user')
+                .get(pk=order_id)
+            )
+            if (locked.zoho_books_invoice_id or '').strip():
+                return False, 'Invoice already exists for this order.'
+            create_zoho_books_invoice_for_order(locked)
+            locked.refresh_from_db()
+
+            credit_msg = ''
+            if is_prepaid_at_checkout_payment_method(locked.payment_method):
+                from shop.services.account_credit import apply_prepaid_credit_on_invoice
+
+                applied, remainder = apply_prepaid_credit_on_invoice(locked)
+                locked.refresh_from_db()
+                if applied > 0 and not (locked.zoho_books_payment_id or '').strip():
+                    record_zoho_books_payment_for_order(
+                        locked,
+                        amount=applied,
+                        gateway_reference=locked.gateway_reference,
+                    )
+                credit_msg = (
+                    f' Credit applied: {applied} AED; '
+                    f'{remainder} AED remains on user account.'
+                )
+            elif is_pay_on_delivery_payment_method(locked.payment_method):
+                credit_msg = ' Record payment when delivered via the payment endpoint.'
+    except ZohoBooksError as exc:
+        logger.exception('zoho-books: staff invoice failed order=%s (%s)', order_id, exc)
+        Order.objects.filter(pk=order_id).update(
+            zoho_books_invoice_error=str(exc)[:5000],
+            updated_at=dj_tz.now(),
+        )
+        return False, str(exc)
+    except Exception as exc:
+        logger.exception('zoho-books: staff invoice unexpected error order=%s', order_id)
+        Order.objects.filter(pk=order_id).update(
+            zoho_books_invoice_error=str(exc)[:5000],
+            updated_at=dj_tz.now(),
+        )
+        return False, str(exc)
+
+    return True, f'Zoho Books invoice created.{credit_msg}'

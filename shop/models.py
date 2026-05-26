@@ -106,6 +106,11 @@ class Order(models.Model):
         CASH_ON_DELIVERY = 'cash_on_delivery', 'Cash on Delivery'
         PAY_BY_LINK = 'pay_by_link', 'Pay by Link'
 
+    class PaymentStatus(models.TextChoices):
+        PENDING = 'pending', 'Awaiting payment'
+        PAID = 'paid', 'Paid'
+        NOT_REQUIRED = 'not_required', 'Pay on delivery'
+
     class CustomerTrackingStage(models.TextChoices):
         PENDING = 'pending', 'Pending'
         CONFIRMED = 'confirmed', 'Confirmed'
@@ -125,6 +130,35 @@ class Order(models.Model):
         max_length=32,
         choices=PaymentMethod.choices,
         default=PaymentMethod.CASH_ON_DELIVERY,
+    )
+    payment_status = models.CharField(
+        max_length=32,
+        choices=PaymentStatus.choices,
+        default=PaymentStatus.NOT_REQUIRED,
+        help_text='Gateway/paylink: pending until paid, then paid. COD/card-on-delivery: not_required.',
+    )
+    gateway_reference = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text='Payment gateway or pay-by-link transaction reference.',
+    )
+    prepaid_credited_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0'),
+        help_text='AED credited to user account when prepaid checkout payment succeeded.',
+    )
+    credit_applied_on_invoice = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0'),
+        help_text='AED deducted from user credit when invoice was created.',
+    )
+    credit_refunded_remainder = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0'),
+        help_text='Prepaid amount not used on invoice (remains on user credit balance).',
     )
     subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0'))
     vat_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('5.00'))
@@ -228,6 +262,46 @@ class Order(models.Model):
 
     def __str__(self):
         return f'Order {self.pk} ({self.status})'
+
+
+class AccountCreditLedger(models.Model):
+    """Audit trail for prepaid AED account credit (gateway/paylink, invoice, cancel)."""
+
+    class Kind(models.TextChoices):
+        GATEWAY_PAYMENT = 'gateway_payment', 'Payment gateway'
+        PAYLINK_PAYMENT = 'paylink_payment', 'Pay by link'
+        INVOICE_APPLICATION = 'invoice_application', 'Applied on invoice'
+        ORDER_CANCEL = 'order_cancel', 'Order cancelled'
+        ADMIN_ADJUSTMENT = 'admin_adjustment', 'Admin adjustment'
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='account_credit_entries',
+    )
+    order = models.ForeignKey(
+        'Order',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='credit_ledger_entries',
+    )
+    kind = models.CharField(max_length=32, choices=Kind.choices)
+    amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        help_text='Positive = credit in, negative = debit out.',
+    )
+    balance_after = models.DecimalField(max_digits=12, decimal_places=2)
+    reference = models.CharField(max_length=255, blank=True)
+    note = models.CharField(max_length=500, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.user_id} {self.kind} {self.amount}'
 
 
 class LoyaltyIssuedCoupon(models.Model):

@@ -190,6 +190,10 @@ LOYALTY_COUPON_EXPIRY_DAYS = int(os.getenv('LOYALTY_COUPON_EXPIRY_DAYS', '90'))
 CHECKOUT_TRUST_CLIENT_SHIPPING = os.getenv(
     'CHECKOUT_TRUST_CLIENT_SHIPPING', 'False',
 ).strip().lower() in ('true', '1', 'yes')
+# When True, prepaid checkout requires payment_success + gateway_reference (production).
+CHECKOUT_REQUIRE_PREPAID_PAYMENT_SUCCESS = os.getenv(
+    'CHECKOUT_REQUIRE_PREPAID_PAYMENT_SUCCESS', 'True',
+).strip().lower() in ('true', '1', 'yes')
 try:
     DEFAULT_SHIPPING_AMOUNT = Decimal(os.getenv('DEFAULT_SHIPPING_AMOUNT', '0'))
 except Exception:
@@ -235,7 +239,10 @@ ZOHO_BOOKS_CREATE_INVOICE_ON = os.getenv('ZOHO_BOOKS_CREATE_INVOICE_ON', 'synced
 ZOHO_BOOKS_CREATE_SALES_ORDER_ENABLED = os.getenv(
     'ZOHO_BOOKS_CREATE_SALES_ORDER_ENABLED', 'False',
 ).strip().lower() in ('true', '1', 'yes')
-ZOHO_BOOKS_CREATE_SALES_ORDER_ON = os.getenv('ZOHO_BOOKS_CREATE_SALES_ORDER_ON', 'synced').strip().lower()
+ZOHO_BOOKS_CREATE_SALES_ORDER_ON = os.getenv('ZOHO_BOOKS_CREATE_SALES_ORDER_ON', 'placed').strip().lower()
+ZOHO_BOOKS_MANUAL_WORKFLOW = os.getenv(
+    'ZOHO_BOOKS_MANUAL_WORKFLOW', 'True',
+).strip().lower() in ('true', '1', 'yes')
 ZOHO_BOOKS_INVOICE_FROM_SALES_ORDER = os.getenv(
     'ZOHO_BOOKS_INVOICE_FROM_SALES_ORDER', 'True',
 ).strip().lower() in ('true', '1', 'yes')

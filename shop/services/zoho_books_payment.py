@@ -151,6 +151,56 @@ def record_zoho_books_payment_for_order(
     return order
 
 
+def staff_record_zoho_books_payment_for_order(
+    order_id: int,
+    *,
+    amount=None,
+    payment_method: str = '',
+    gateway_reference: str = '',
+) -> tuple[bool, str]:
+    """Staff-triggered payment recording against the order invoice."""
+    if not zoho_books_enabled():
+        return False, 'Zoho Books is disabled.'
+    try:
+        order = Order.objects.select_related('user', 'store').get(pk=order_id)
+    except Order.DoesNotExist:
+        return False, 'Order not found.'
+
+    ready, reason = order_ready_for_books_payment(order)
+    if not ready:
+        return False, reason
+
+    try:
+        with transaction.atomic():
+            locked = (
+                Order.objects.select_for_update()
+                .select_related('user', 'store')
+                .get(pk=order_id)
+            )
+            record_zoho_books_payment_for_order(
+                locked,
+                amount=amount,
+                payment_method=payment_method,
+                gateway_reference=gateway_reference,
+            )
+    except ZohoBooksError as exc:
+        logger.exception('zoho-books: staff payment failed order=%s (%s)', order_id, exc)
+        Order.objects.filter(pk=order_id).update(
+            zoho_books_payment_error=str(exc)[:5000],
+            updated_at=dj_tz.now(),
+        )
+        return False, str(exc)
+    except Exception as exc:
+        logger.exception('zoho-books: staff payment unexpected error order=%s', order_id)
+        Order.objects.filter(pk=order_id).update(
+            zoho_books_payment_error=str(exc)[:5000],
+            updated_at=dj_tz.now(),
+        )
+        return False, str(exc)
+
+    return True, 'Zoho Books payment recorded.'
+
+
 def maybe_record_zoho_books_payment_for_order(
     order_id: int,
     *,
