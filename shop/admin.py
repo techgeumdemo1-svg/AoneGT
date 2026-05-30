@@ -1,8 +1,10 @@
 from django.contrib import admin
+from django import forms as django_forms
 
 from .models import (
     Cart,
     CartItem,
+    DeliveryZone,
     FCMDeviceToken,
     Order,
     OrderItem,
@@ -168,3 +170,56 @@ class OrderAdmin(admin.ModelAdmin):
 
 
 admin.site.register(FCMDeviceToken)
+
+
+class DeliveryZoneAdminForm(django_forms.ModelForm):
+    cities_text = django_forms.CharField(
+        widget=django_forms.Textarea(attrs={'rows': 12, 'cols': 50}),
+        help_text=(
+            'Enter one city or area name per line. '
+            'Matching is case-insensitive. '
+            'Add as many sub-areas as needed - e.g. Dubai, Deira, Al Barsha, JVC.'
+        ),
+        label='Cities / Areas',
+        required=False,
+    )
+
+    class Meta:
+        model = DeliveryZone
+        fields = '__all__'
+        exclude = ['cities']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.instance and self.instance.pk:
+            self.fields['cities_text'].initial = '\n'.join(self.instance.cities or [])
+
+    def save(self, commit=True):
+        instance = super().save(commit=False)
+        raw = self.cleaned_data.get('cities_text', '')
+        instance.cities = [line.strip() for line in raw.splitlines() if line.strip()]
+        if commit:
+            instance.save()
+        return instance
+
+
+@admin.register(DeliveryZone)
+class DeliveryZoneAdmin(admin.ModelAdmin):
+    form = DeliveryZoneAdminForm
+    list_display = (
+        'name',
+        'cities_display',
+        'free_delivery_threshold',
+        'delivery_fee',
+        'cod_surcharge',
+        'estimated_delivery_label',
+        'is_active',
+    )
+    list_filter = ('is_active',)
+    search_fields = ('name',)
+    list_editable = ('is_active',)
+
+    def cities_display(self, obj):
+        return ', '.join(obj.cities) if obj.cities else '-'
+
+    cities_display.short_description = 'Cities / Areas'

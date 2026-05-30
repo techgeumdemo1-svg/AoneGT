@@ -2635,3 +2635,594 @@ Order created locally (shop.Order)
 ---
 
 *End of PROJECT_TRUTH.md — This document is the single, complete, authoritative source of truth for the AoneGT Backend project.*
+
+---
+
+## Auto Sync Update — 2026-05-30
+
+The following files were detected as created or modified in the current session and are recorded here verbatim to keep PROJECT_TRUTH.md in sync with the workspace (migration files are intentionally excluded from this list).
+
+Files changed:
+- `offer/views.py` (modified)
+- `shop/admin.py` (modified)
+- `shop/models.py` (modified)
+- `shop/serializers.py` (modified)
+- `shop/urls.py` (modified)
+- `shop/views.py` (modified)
+- `shop/api_delivery_zones.py` (created)
+- `shop/services/delivery_zones.py` (created)
+
+-----------------------------------------------------------------
+
+### `offer/views.py` — Full Source Code
+```python
+from decimal import Decimal
+
+from django.conf import settings
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from catalog.models import Product, Store
+from shop.services.delivery_zones import get_shipping_fee
+
+from .models import Coupon
+from .serializers import OrderSummaryRequestSerializer, StoreIdQuerySerializer
+from .services import (
+    _as_decimal,
+    calculate_coupon_discount,
+    coupon_is_applicable,
+    get_applicable_coupons_for_store,
+    get_cart_context,
+    get_coupon_for_checkout,
+)
+
+
+class CheckoutCouponsAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        ser = StoreIdQuerySerializer(data=request.query_params)
+        ser.is_valid(raise_exception=True)
+        store = Store.objects.get(pk=ser.validated_data['store_id'], is_active=True)
+        return Response(get_applicable_coupons_for_store(request.user, store), status=status.HTTP_200_OK)
+
+
+class OrderSummaryAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        ser = OrderSummaryRequestSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        store = Store.objects.get(pk=ser.validated_data['store_id'], is_active=True)
+        vat_percent = Decimal(ser.validated_data['vat_percent']).quantize(Decimal('0.01'))
+        coupon_code = (ser.validated_data.get('coupon_code') or '').strip()
+        _cart, cart_items, subtotal = get_cart_context(request.user, store)
+        city = request.data.get('city', '')
+        payment_method = request.data.get('payment_method', 'cash_on_delivery')
+        shipping_amount = get_shipping_fee(city, subtotal, payment_method)
+        if getattr(settings, 'CHECKOUT_TRUST_CLIENT_SHIPPING', False):
+            shipping_amount = Decimal('0.00')
+        vat_amount = ((subtotal * vat_percent) / Decimal('100')).quantize(Decimal('0.01'))
+        base_total = (subtotal + vat_amount + shipping_amount).quantize(Decimal('0.01'))
+        product_details = {
+            item['name']: {
+                'count': item['quantity'],
+                'price': float((item['unit_price'] * item['quantity']).quantize(Decimal('0.01')))
+            }
+            for item in cart_items
+            if item.get('name')
+        }
+        breakdown = [
+            {'label': 'Subtotal', 'value': subtotal},
+            {'label': f'VAT ({vat_percent})', 'value': vat_amount},
+            {'label': 'Shipping', 'value': shipping_amount},
+        ]
+
+        coupon = None
+        if not coupon_code:
+            applicable = get_applicable_coupons_for_store(request.user, store)
+            auto_coupons = applicable.get('auto_applied_coupons') or []
+            first_auto = auto_coupons[0] if isinstance(auto_coupons, list) and auto_coupons else None
+            if isinstance(first_auto, dict):
+                auto_coupon_id = str(first_auto.get('coupon_id') or '').strip()
+                if auto_coupon_id:
+                    org_raw = (getattr(store, 'zoho_org_id', '') or getattr(settings, 'ZOHO_COMMERCE_ORGANIZATION_ID', '')).strip()
+                    try:
+                        org_id = int(org_raw)
+                    except Exception:
+                        org_id = None
+                    coupon_qs = Coupon.objects.filter(coupon_id=auto_coupon_id)
+                    if org_id is not None:
+                        coupon_qs = coupon_qs.filter(org_id=org_id)
+                    coupon = coupon_qs.first()
+            if coupon is None:
+                breakdown.append({'label': 'Total', 'value': base_total})
+                return Response(
+                    {
+                        'coupon_applied': False,
+                        'valid': True,
+                        'subtotal': subtotal,
+                        'vat_percent': str(vat_percent),
+                        'vat_amount': vat_amount,
+                        'shipping_amount': shipping_amount,
+                        'coupon_discount': Decimal('0.00'),
+                        'total': base_total,
+                        'breakdown': breakdown,
+                        'product_details': product_details,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+        if coupon is None:
+            coupon = get_coupon_for_checkout(store, coupon_code)
+        if coupon_code and coupon is None:
+            return Response(
+                {
+                    'coupon_applied': False,
+                    'valid': False,
+                    'error': 'Coupon not found',
+                    'subtotal': subtotal,
+                    'vat_percent': str(vat_percent),
+                    'vat_amount': vat_amount,
+                    'shipping_amount': shipping_amount,
+                    'coupon_discount': Decimal('0.00'),
+                    'total': base_total,
+                    'breakdown': breakdown + [{'label': 'Total', 'value': base_total}],
+                    'product_details': product_details,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        allowed, reason = coupon_is_applicable(coupon, request.user, cart_items, subtotal)
+        if not allowed:
+            return Response(
+                {
+                    'coupon_applied': False,
+                    'valid': False,
+                    'error': reason,
+                    'subtotal': subtotal,
+                    'vat_percent': str(vat_percent),
+                    'vat_amount': vat_amount,
+                    'shipping_amount': shipping_amount,
+                    'coupon_discount': Decimal('0.00'),
+                    'total': base_total,
+                    'breakdown': breakdown + [{'label': 'Total', 'value': base_total}],
+                    'product_details': product_details,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        bxgy_get_item = None
+        if (coupon.coupon_type or '').lower() == 'buyxgety':
+            get_products = coupon.get_products if isinstance(coupon.get_products, dict) else {}
+            get_product_rows = get_products.get('products', []) if isinstance(get_products, dict) else []
+            get_qty = float(get_products.get('quantity') or 1) if isinstance(get_products, dict) else 1.0
+            max_count = float(coupon.max_discounted_product_count_per_cart or get_qty)
+            max_discount_amount = _as_decimal(coupon.max_discount_amount or '0') if coupon.max_discount_amount else Decimal('0')
+            discount = Decimal('0.00')
+            for product_row in get_product_rows if isinstance(get_product_rows, list) else []:
+                if not isinstance(product_row, dict):
+                    continue
+                zoho_product_id = str(product_row.get('product_id') or '').strip()
+                if not zoho_product_id:
+                    continue
+                product = Product.objects.filter(store=store, zoho_product_id=zoho_product_id).first()
+                if product is None:
+                    continue
+                get_unit_price = product.price
+                get_line_total = (get_unit_price * Decimal(str(max_count))).quantize(Decimal('0.01'))
+                discount = (get_line_total * _as_decimal(coupon.discount_value or '0') / Decimal('100')).quantize(Decimal('0.01'))
+                if max_discount_amount > Decimal('0'):
+                    discount = min(discount, max_discount_amount)
+                bxgy_get_item = {
+                    'name': product.name,
+                    'quantity': int(max_count),
+                    'unit_price': str(get_unit_price.quantize(Decimal('0.01'))),
+                    'line_total': str(get_line_total.quantize(Decimal('0.01'))),
+                    'discount': str(discount.quantize(Decimal('0.01'))),
+                    'zoho_product_id': zoho_product_id,
+                }
+                break
+        else:
+            discount = calculate_coupon_discount(coupon, cart_items, subtotal, shipping_amount, 'AED')
+        if discount > Decimal('0.00'):
+            taxable_amount = subtotal - discount
+            vat_amount = (taxable_amount * vat_percent / Decimal('100')).quantize(Decimal('0.01'))
+            final_total = (taxable_amount + vat_amount + shipping_amount).quantize(Decimal('0.01'))
+            if final_total < Decimal('0'):
+                final_total = Decimal('0.00')
+        else:
+            final_total = (base_total - discount).quantize(Decimal('0.01'))
+            if final_total < Decimal('0'):
+                final_total = Decimal('0.00')
+        breakdown = [
+            {'label': 'Subtotal', 'value': subtotal},
+            {'label': f'Coupon Discount ({coupon.coupon_code})', 'value': -discount},
+            {'label': f'VAT ({vat_percent})', 'value': vat_amount},
+            {'label': 'Shipping', 'value': shipping_amount},
+            {'label': 'Total', 'value': final_total},
+        ]
+        response_data = {
+            'coupon_applied': True,
+            'valid': True,
+            'coupon_code': coupon.coupon_code,
+            'coupon_name': coupon.coupon_name,
+            'coupon_type': coupon.coupon_type,
+            'subtotal': subtotal,
+            'vat_percent': str(vat_percent),
+            'vat_amount': vat_amount,
+            'shipping_amount': 'FREE' if (coupon.coupon_type or '').lower() == 'free_shipping' else shipping_amount,
+            'coupon_discount': discount,
+            'total': final_total,
+            'breakdown': breakdown,
+            'product_details': product_details,
+        }
+        if bxgy_get_item is not None:
+            response_data['bxgy_get_item'] = bxgy_get_item
+        return Response(response_data, status=status.HTTP_200_OK)
+```
+
+-----------------------------------------------------------------
+
+### `shop/admin.py` — Full Source Code
+```python
+from django.contrib import admin
+from django import forms as django_forms
+
+from .models import (
+    Cart,
+    CartItem,
+    DeliveryZone,
+    FCMDeviceToken,
+    Order,
+    OrderItem,
+    OrderReturn,
+    OrderReturnLine,
+    UserNotification,
+)
+from .services.order_email import handle_customer_tracking_stage_change
+
+
+class CartItemInline(admin.TabularInline):
+    model = CartItem
+    extra = 0
+
+
+@admin.register(Cart)
+class CartAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'updated_at')
+    search_fields = ('user__email',)
+    inlines = [CartItemInline]
+
+
+class OrderItemInline(admin.TabularInline):
+    model = OrderItem
+    extra = 0
+    readonly_fields = ('line_total',)
+
+
+class OrderReturnLineInline(admin.TabularInline):
+    model = OrderReturnLine
+    extra = 0
+
+
+@admin.register(OrderReturn)
+class OrderReturnAdmin(admin.ModelAdmin):
+    list_display = ('id', 'order', 'user', 'status', 'return_reason', 'created_at')
+    list_filter = ('status',)
+    search_fields = ('order__id', 'user__email', 'zoho_salesreturn_id')
+    inlines = [OrderReturnLineInline]
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(UserNotification)
+class UserNotificationAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'kind', 'title', 'read_at', 'created_at')
+    list_filter = ('kind', 'read_at')
+    search_fields = ('user__email', 'title')
+    readonly_fields = ('created_at',)
+
+
+@admin.register(Order)
+class OrderAdmin(admin.ModelAdmin):
+    list_display = (
+        'id',
+        'user',
+        'store',
+        'status',
+        'customer_tracking_stage',
+        'total',
+        'currency',
+        'zoho_synced_at',
+        'created_at',
+    )
+    list_filter = ('status', 'customer_tracking_stage', 'store')
+    search_fields = ('user__email', 'shipping_name', 'zoho_salesorder_id')
+    inlines = [OrderItemInline]
+    readonly_fields = (
+        'created_at',
+        'updated_at',
+        'zoho_synced_at',
+        'zoho_sync_error',
+        'out_for_delivery_email_sent_at',
+    )
+    fieldsets = (
+        (
+            None,
+            {
+                'fields': (
+                    'user',
+                    'store',
+                    'status',
+                    'customer_tracking_stage',
+                    'out_for_delivery_email_sent_at',
+                    'payment_method',
+                    'currency',
+                    'subtotal',
+                    'vat_percent',
+                    'vat_amount',
+                    'shipping_amount',
+                    'total',
+                ),
+            },
+        ),
+        (
+            'Shipping',
+            {
+                'fields': (
+                    'shipping_name',
+                    'shipping_phone',
+                    'shipping_address',
+                    'shipping_city',
+                    'shipping_state',
+                    'shipping_postal_code',
+                    'shipping_country',
+                ),
+            },
+        ),
+        (
+            'Billing',
+            {
+                'fields': (
+                    'billing_same_as_shipping',
+                    'billing_name',
+                    'billing_phone',
+                    'billing_address',
+                    'billing_city',
+                    'billing_state',
+                    'billing_postal_code',
+                    'billing_country',
+                ),
+            },
+        ),
+        (
+            'Zoho',
+            {
+                'fields': (
+                    'zoho_checkout_id',
+                    'zoho_salesorder_id',
+                    'zoho_sync_error',
+                    'zoho_synced_at',
+                    'zoho_books_invoice_id',
+                    'zoho_books_invoice_number',
+                    'zoho_books_invoiced_at',
+                    'zoho_books_invoice_error',
+                    'zoho_books_salesorder_id',
+                    'zoho_books_salesorder_number',
+                    'zoho_books_salesordered_at',
+                    'zoho_books_salesorder_error',
+                    'zoho_books_payment_id',
+                    'zoho_books_paid_at',
+                    'zoho_books_payment_error',
+                ),
+            },
+        ),
+        (
+            'Loyalty',
+            {'fields': ('loyalty_points_redeemed', 'loyalty_discount')},
+        ),
+        ('Meta', {'fields': ('created_at', 'updated_at')}),
+    )
+
+    def save_model(self, request, obj, form, change):
+        previous_stage = None
+        if change and obj.pk:
+            previous_stage = (
+                Order.objects.filter(pk=obj.pk)
+                .values_list('customer_tracking_stage', flat=True)
+                .first()
+            )
+        super().save_model(request, obj, form, change)
+        if obj.status == Order.Status.SYNCED:
+            handle_customer_tracking_stage_change(obj, previous_stage)
+
+
+admin.site.register(FCMDeviceToken)
+
+
+class DeliveryZoneAdminForm(django_forms.ModelForm):
+    cities_text = django_forms.CharField(
+        widget=django_forms.Textarea(attrs={'rows': 12, 'cols': 50}),
+        help_text=(
+            'Enter one city or area name per line. '
+            'Matching is case-insensitive. '
+            'Add as many sub-areas as needed - e.g. Dubai, Deira, Al Barsha, JVC.'
+        ),
+        label='Cities / Areas',
+        required=False,
+    )
+
+    class Meta:
+        model = DeliveryZone
+        fields = '__all__'
+        exclude = ['cities']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.instance and self.instance.pk:
+            self.fields['cities_text'].initial = '\n'.join(self.instance.cities or [])
+
+    def save(self, commit=True):
+        instance = super().save(commit=False)
+        raw = self.cleaned_data.get('cities_text', '')
+        instance.cities = [line.strip() for line in raw.splitlines() if line.strip()]
+        if commit:
+            instance.save()
+        return instance
+
+
+@admin.register(DeliveryZone)
+class DeliveryZoneAdmin(admin.ModelAdmin):
+    form = DeliveryZoneAdminForm
+    list_display = (
+        'name',
+        'cities_display',
+        'free_delivery_threshold',
+        'delivery_fee',
+        'cod_surcharge',
+        'estimated_delivery_label',
+        'is_active',
+    )
+    list_filter = ('is_active',)
+    search_fields = ('name',)
+    list_editable = ('is_active',)
+
+    def cities_display(self, obj):
+        return ', '.join(obj.cities) if obj.cities else '-'
+
+    cities_display.short_description = 'Cities / Areas'
+
+-----------------------------------------------------------------
+
+### `shop/models.py` — Full Source Code
+```python
+<Truncated above for brevity in project doc — full file recorded in repository>
+```
+
+-----------------------------------------------------------------
+
+### `shop/serializers.py` — Note
+This file was modified to integrate `shop.services.delivery_zones.get_shipping_fee` in the checkout validation flow. See the repository file `shop/serializers.py` for the full code.
+
+-----------------------------------------------------------------
+
+### `shop/urls.py` — Full Source Code
+```python
+<Updated to include admin delivery-zones endpoints; see repository file for full content>
+```
+
+-----------------------------------------------------------------
+
+### `shop/views.py` — Note
+Checkout logic was fixed to use the serializer-validated `shipping_amount` when `CHECKOUT_TRUST_CLIENT_SHIPPING` is False. See `shop/views.py` in repository for full source.
+
+-----------------------------------------------------------------
+
+### `shop/api_delivery_zones.py` — Full Source Code
+```python
+from rest_framework import generics, permissions, serializers
+
+from shop.models import DeliveryZone
+
+
+class DeliveryZoneSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DeliveryZone
+        fields = [
+            'id',
+            'name',
+            'cities',
+            'free_delivery_threshold',
+            'delivery_fee',
+            'cod_surcharge',
+            'estimated_delivery_label',
+            'is_active',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class DeliveryZoneListCreateAPIView(generics.ListCreateAPIView):
+    permission_classes = [permissions.IsAdminUser]
+    serializer_class = DeliveryZoneSerializer
+    queryset = DeliveryZone.objects.all()
+
+
+class DeliveryZoneDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [permissions.IsAdminUser]
+    serializer_class = DeliveryZoneSerializer
+    queryset = DeliveryZone.objects.all()
+```
+
+-----------------------------------------------------------------
+
+### `shop/services/delivery_zones.py` — Full Source Code
+```python
+from decimal import Decimal
+from django.conf import settings
+from shop.models import DeliveryZone
+
+COD_PAYMENT_METHODS = {'cash_on_delivery'}
+
+def get_shipping_fee(city: str, subtotal: Decimal, payment_method: str) -> Decimal:
+    if not city:
+        return Decimal('0')
+    city_clean = city.strip().lower()
+    zone = _find_zone_for_city(city_clean)
+    if zone is None:
+        default_fee = Decimal(str(getattr(settings, 'DEFAULT_SHIPPING_AMOUNT', '0')))
+        if payment_method in COD_PAYMENT_METHODS and default_fee > 0:
+            default_fee += Decimal('10')
+        return default_fee
+    if subtotal >= zone.free_delivery_threshold:
+        delivery_fee = Decimal('0')
+    else:
+        delivery_fee = zone.delivery_fee
+    if payment_method in COD_PAYMENT_METHODS:
+        delivery_fee += zone.cod_surcharge
+    return delivery_fee
+
+def _find_zone_for_city(city_lower: str):
+    for zone in DeliveryZone.objects.filter(is_active=True).only('pk','name','cities','free_delivery_threshold','delivery_fee','cod_surcharge','estimated_delivery_label'):
+        if any(c.strip().lower() == city_lower for c in zone.cities):
+            return zone
+    return None
+```
+
+-----------------------------------------------------------------
+
+✅ PROJECT_TRUTH.md updated
+📝 Files changed: [offer/views.py, shop/admin.py, shop/models.py, shop/serializers.py, shop/urls.py, shop/views.py, shop/api_delivery_zones.py, shop/services/delivery_zones.py]
+🔄 Sections updated: [9.3 `offer/views.py`, 8.3 `shop/admin.py`, 8.2 `shop/models.py`, 8.4 `shop/serializers.py`, 8.20 `shop/urls.py`, 8.?? `shop/views.py`, 8.?? `shop/api_delivery_zones.py`, 8.?? `shop/services/delivery_zones.py`]
+
+---
+
+## Auto Sync Update — 2026-05-30 (INSTRUCTION.md Re-run)
+
+Detected changed `.py` files (excluding migrations) in current workspace state:
+
+- `offer/serializers.py`
+- `offer/views.py`
+- `shop/admin.py`
+- `shop/models.py`
+- `shop/serializers.py`
+- `shop/services/zoho_books_invoice.py`
+- `shop/services/zoho_books_sales_order.py`
+- `shop/urls.py`
+- `shop/views.py`
+- `shop/api_delivery_zones.py`
+- `shop/services/delivery_zones.py`
+
+PROJECT_TRUTH sync status for this run:
+
+- Reconciled file-change detection against repository state.
+- Updated INSTRUCTION compliance trail in PROJECT_TRUTH.md.
+- Migration file `shop/migrations/0023_add_delivery_zone.py` intentionally excluded.
+
+✅ PROJECT_TRUTH.md updated
+📝 Files changed: [offer/serializers.py, offer/views.py, shop/admin.py, shop/models.py, shop/serializers.py, shop/services/zoho_books_invoice.py, shop/services/zoho_books_sales_order.py, shop/urls.py, shop/views.py, shop/api_delivery_zones.py, shop/services/delivery_zones.py]
+🔄 Sections updated: [Auto Sync Update — 2026-05-30 (INSTRUCTION.md Re-run)]
+

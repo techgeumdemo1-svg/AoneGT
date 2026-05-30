@@ -158,12 +158,23 @@ def _build_invoice_payload(order: Order, customer_id: str) -> dict:
             'quantity': 1.0,
         })
 
+    # Zoho Books rejects the top-level 'shipping_charge' field for VAT-registered orgs
+    # (HTTP 400: "Shipping and miscellaneous charges cannot be applied when registered for VAT.").
+    # Always add shipping as a dedicated line item so the request succeeds regardless of whether
+    # ZOHO_BOOKS_VAT_TAX_ID is configured.
+    shipping_amount = Decimal(str(order.shipping_amount or 0))
+    if shipping_amount > 0:
+        line_items.append({
+            'name': 'Shipping',
+            'rate': float(shipping_amount),
+            'quantity': 1.0,
+        })
+
     payload: dict = {
         'customer_id': customer_id,
         'reference_number': order_code_for_order(order),
         'date': order.created_at.date().isoformat(),
         'line_items': line_items,
-        'shipping_charge': float(Decimal(str(order.shipping_amount or 0))),
         'currency_code': (order.currency or 'AED').strip() or 'AED',
         'notes': _invoice_summary_notes(order),
     }
@@ -194,8 +205,10 @@ def _build_invoice_payload(order: Order, customer_id: str) -> dict:
 
     tax_id = zoho_books_vat_tax_id(store=order.store)
     if tax_id:
+        # Apply VAT tax to product line items only; shipping line item is VAT-exempt.
         for row in payload['line_items']:
-            row['tax_id'] = tax_id
+            if row.get('name') != 'Shipping':
+                row['tax_id'] = tax_id
 
     return payload
 

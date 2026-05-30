@@ -15,9 +15,27 @@ class StoreIdQuerySerializer(serializers.Serializer):
 
 
 class OrderSummaryRequestSerializer(serializers.Serializer):
+    PAYMENT_METHOD_CHOICES = [
+        'cash_on_delivery',
+        'card_on_delivery',
+        'payment_gateway',
+        'pay_by_link',
+    ]
+
     store_id = serializers.IntegerField(min_value=1)
     vat_percent = serializers.DecimalField(max_digits=5, decimal_places=2, min_value=Decimal('0'))
     coupon_code = serializers.CharField(max_length=120, required=False, allow_blank=True, trim_whitespace=True)
+    # Address resolution: provide address_id (preferred) OR city (fallback). Both optional.
+    address_id = serializers.IntegerField(min_value=1, required=False, allow_null=True)
+    city = serializers.CharField(max_length=120, required=False, allow_blank=True, trim_whitespace=True)
+    # Payment method is optional. When omitted, no payment-specific surcharges are applied.
+    payment_method = serializers.ChoiceField(
+        choices=PAYMENT_METHOD_CHOICES,
+        required=False,
+        allow_blank=True,
+        allow_null=True,
+        default=None,
+    )
 
     def validate_store_id(self, value):
         get_object_or_404(Store, pk=value, is_active=True)

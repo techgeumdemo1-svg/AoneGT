@@ -1,5 +1,6 @@
 from django.urls import path
 
+from .api_delivery_zones import DeliveryZoneDetailAPIView, DeliveryZoneListCreateAPIView
 from .views import (
     UserAddressListCreateAPIView,
     UserAddressDetailAPIView,
@@ -83,5 +84,7 @@ urlpatterns = [
         ZohoProductImageProxyAPIView.as_view(),
         name='zoho-product-image-proxy',
     ),
+    path('admin/delivery-zones/', DeliveryZoneListCreateAPIView.as_view()),
+    path('admin/delivery-zones/<int:pk>/', DeliveryZoneDetailAPIView.as_view()),
 
 ]

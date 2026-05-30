@@ -7,6 +7,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from catalog.models import Product, Store
+from shop.models import UserAddress
+from shop.services.delivery_zones import get_shipping_fee_breakdown
 
 from .models import Coupon
 from .serializers import OrderSummaryRequestSerializer, StoreIdQuerySerializer
@@ -40,11 +42,62 @@ class OrderSummaryAPIView(APIView):
         vat_percent = Decimal(ser.validated_data['vat_percent']).quantize(Decimal('0.01'))
         coupon_code = (ser.validated_data.get('coupon_code') or '').strip()
         _cart, cart_items, subtotal = get_cart_context(request.user, store)
-        shipping_amount = Decimal(getattr(settings, 'DEFAULT_SHIPPING_AMOUNT', Decimal('0'))).quantize(Decimal('0.01'))
+        # Use serializer-validated payment_method. None/blank = no method selected yet
+        # → no COD surcharge applied (surcharge only activates when explicitly 'cash_on_delivery').
+        payment_method = (ser.validated_data.get('payment_method') or '').strip()
+
+        # Resolve city: address_id (preferred) → city field (fallback) → empty string
+        address_id = ser.validated_data.get('address_id')
+        resolved_address = None
+        city = ''
+        if address_id:
+            resolved_address = (
+                UserAddress.objects.filter(pk=address_id, user=request.user).first()
+            )
+            if resolved_address is None:
+                return Response(
+                    {'detail': 'Address not found or does not belong to you.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            city = (resolved_address.city or '').strip()
+        else:
+            city = (ser.validated_data.get('city') or request.data.get('city') or '').strip()
+
+        address_details = None
+        if resolved_address:
+            address_details = {
+                'id': resolved_address.pk,
+                'full_name': resolved_address.full_name,
+                'phone_number': resolved_address.phone_number,
+                'address': resolved_address.address,
+                'city': resolved_address.city,
+                'state': resolved_address.state,
+                'address_type': resolved_address.address_type,
+            }
+
+        # Get detailed shipping breakdown (delivery_fee + cod_surcharge separately)
         if getattr(settings, 'CHECKOUT_TRUST_CLIENT_SHIPPING', False):
-            shipping_amount = Decimal('0.00')
+            shipping_info = {
+                'total': Decimal('0.00'),
+                'delivery_fee': Decimal('0.00'),
+                'cod_surcharge': Decimal('0.00'),
+                'is_free': False,
+                'zone_name': None,
+                'estimated_delivery_label': '',
+            }
+        else:
+            shipping_info = get_shipping_fee_breakdown(city, subtotal, payment_method)
+
+        shipping_amount = shipping_info['total']
+        delivery_fee = shipping_info['delivery_fee']
+        cod_surcharge = shipping_info['cod_surcharge']
+        is_free_delivery = shipping_info['is_free']
+        zone_name = shipping_info['zone_name']
+        estimated_delivery_label = shipping_info['estimated_delivery_label']
+
         vat_amount = ((subtotal * vat_percent) / Decimal('100')).quantize(Decimal('0.01'))
         base_total = (subtotal + vat_amount + shipping_amount).quantize(Decimal('0.01'))
+
         product_details = {
             item['name']: {
                 'count': item['quantity'],
@@ -53,11 +106,42 @@ class OrderSummaryAPIView(APIView):
             for item in cart_items
             if item.get('name')
         }
-        breakdown = [
-            {'label': 'Subtotal', 'value': subtotal},
-            {'label': f'VAT ({vat_percent})', 'value': vat_amount},
-            {'label': 'Shipping', 'value': shipping_amount},
-        ]
+
+        def _build_shipping_breakdown_lines(delivery_fee, cod_surcharge, is_free, shipping_amount):
+            """Build shipping-related lines for the breakdown list."""
+            lines = []
+            if is_free:
+                lines.append({'label': 'Delivery (Free)', 'value': Decimal('0.00')})
+            elif delivery_fee > 0:
+                lines.append({'label': 'Delivery Charge', 'value': delivery_fee})
+            if cod_surcharge > 0:
+                lines.append({'label': 'COD Surcharge', 'value': cod_surcharge})
+            # If no individual lines but there is a shipping total (unknown zone fallback)
+            if not lines and shipping_amount > 0:
+                lines.append({'label': 'Shipping', 'value': shipping_amount})
+            return lines
+
+        shipping_lines = _build_shipping_breakdown_lines(
+            delivery_fee, cod_surcharge, is_free_delivery, shipping_amount
+        )
+
+        base_breakdown = (
+            [{'label': 'Subtotal', 'value': subtotal}]
+            + shipping_lines
+            + [{'label': f'VAT ({vat_percent}%)', 'value': vat_amount}]
+        )
+
+        # Shared shipping + address metadata included in every response path
+        shipping_meta = {
+            'payment_method': payment_method or None,  # None when not yet selected
+            'shipping_amount': shipping_amount,
+            'delivery_fee': delivery_fee,
+            'cod_surcharge': cod_surcharge,
+            'is_free_delivery': is_free_delivery,
+            'delivery_zone': zone_name,
+            'estimated_delivery_label': estimated_delivery_label,
+            'address_details': address_details,  # None if city was passed directly
+        }
 
         coupon = None
         if not coupon_code:
@@ -77,7 +161,7 @@ class OrderSummaryAPIView(APIView):
                         coupon_qs = coupon_qs.filter(org_id=org_id)
                     coupon = coupon_qs.first()
             if coupon is None:
-                breakdown.append({'label': 'Total', 'value': base_total})
+                breakdown = base_breakdown + [{'label': 'Total', 'value': base_total}]
                 return Response(
                     {
                         'coupon_applied': False,
@@ -85,7 +169,7 @@ class OrderSummaryAPIView(APIView):
                         'subtotal': subtotal,
                         'vat_percent': str(vat_percent),
                         'vat_amount': vat_amount,
-                        'shipping_amount': shipping_amount,
+                        **shipping_meta,
                         'coupon_discount': Decimal('0.00'),
                         'total': base_total,
                         'breakdown': breakdown,
@@ -97,6 +181,7 @@ class OrderSummaryAPIView(APIView):
         if coupon is None:
             coupon = get_coupon_for_checkout(store, coupon_code)
         if coupon_code and coupon is None:
+            breakdown = base_breakdown + [{'label': 'Total', 'value': base_total}]
             return Response(
                 {
                     'coupon_applied': False,
@@ -105,10 +190,10 @@ class OrderSummaryAPIView(APIView):
                     'subtotal': subtotal,
                     'vat_percent': str(vat_percent),
                     'vat_amount': vat_amount,
-                    'shipping_amount': shipping_amount,
+                    **shipping_meta,
                     'coupon_discount': Decimal('0.00'),
                     'total': base_total,
-                    'breakdown': breakdown + [{'label': 'Total', 'value': base_total}],
+                    'breakdown': breakdown,
                     'product_details': product_details,
                 },
                 status=status.HTTP_200_OK,
@@ -116,6 +201,7 @@ class OrderSummaryAPIView(APIView):
 
         allowed, reason = coupon_is_applicable(coupon, request.user, cart_items, subtotal)
         if not allowed:
+            breakdown = base_breakdown + [{'label': 'Total', 'value': base_total}]
             return Response(
                 {
                     'coupon_applied': False,
@@ -124,10 +210,10 @@ class OrderSummaryAPIView(APIView):
                     'subtotal': subtotal,
                     'vat_percent': str(vat_percent),
                     'vat_amount': vat_amount,
-                    'shipping_amount': shipping_amount,
+                    **shipping_meta,
                     'coupon_discount': Decimal('0.00'),
                     'total': base_total,
-                    'breakdown': breakdown + [{'label': 'Total', 'value': base_total}],
+                    'breakdown': breakdown,
                     'product_details': product_details,
                 },
                 status=status.HTTP_200_OK,
@@ -166,6 +252,7 @@ class OrderSummaryAPIView(APIView):
                 break
         else:
             discount = calculate_coupon_discount(coupon, cart_items, subtotal, shipping_amount, 'AED')
+
         if discount > Decimal('0.00'):
             taxable_amount = subtotal - discount
             vat_amount = (taxable_amount * vat_percent / Decimal('100')).quantize(Decimal('0.01'))
@@ -176,13 +263,20 @@ class OrderSummaryAPIView(APIView):
             final_total = (base_total - discount).quantize(Decimal('0.01'))
             if final_total < Decimal('0'):
                 final_total = Decimal('0.00')
-        breakdown = [
-            {'label': 'Subtotal', 'value': subtotal},
-            {'label': f'Coupon Discount ({coupon.coupon_code})', 'value': -discount},
-            {'label': f'VAT ({vat_percent})', 'value': vat_amount},
-            {'label': 'Shipping', 'value': shipping_amount},
-            {'label': 'Total', 'value': final_total},
-        ]
+
+        breakdown = (
+            [{'label': 'Subtotal', 'value': subtotal}]
+            + [{'label': f'Coupon Discount ({coupon.coupon_code})', 'value': -discount}]
+            + shipping_lines
+            + [
+                {'label': f'VAT ({vat_percent}%)', 'value': vat_amount},
+                {'label': 'Total', 'value': final_total},
+            ]
+        )
+
+        # For free_shipping coupon type: display shipping as FREE
+        is_free_shipping_coupon = (coupon.coupon_type or '').lower() == 'free_shipping'
+
         response_data = {
             'coupon_applied': True,
             'valid': True,
@@ -192,7 +286,8 @@ class OrderSummaryAPIView(APIView):
             'subtotal': subtotal,
             'vat_percent': str(vat_percent),
             'vat_amount': vat_amount,
-            'shipping_amount': 'FREE' if (coupon.coupon_type or '').lower() == 'free_shipping' else shipping_amount,
+            **shipping_meta,
+            'shipping_amount': 'FREE' if is_free_shipping_coupon else shipping_amount,
             'coupon_discount': discount,
             'total': final_total,
             'breakdown': breakdown,

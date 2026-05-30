@@ -1221,7 +1221,9 @@ class CheckoutAPIView(APIView):
             shipping_amount = ser.validated_data.get('shipping_amount') or Decimal('0')
             shipping_amount = Decimal(shipping_amount).quantize(Decimal('0.01'))
         else:
-            shipping_amount = Decimal(settings.DEFAULT_SHIPPING_AMOUNT).quantize(Decimal('0.01'))
+            shipping_amount = Decimal(ser.validated_data.get('shipping_amount') or Decimal('0')).quantize(
+                Decimal('0.01'),
+            )
         subtotal = sum((it.line_subtotal for it in items), Decimal('0'))
         subtotal = subtotal.quantize(Decimal('0.01'))
         vat_percent = Decimal(ser.validated_data.get('vat_percent') or '0').quantize(Decimal('0.01'))

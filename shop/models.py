@@ -502,3 +502,57 @@ class FCMDeviceToken(models.Model):
 
     def __str__(self):
         return f'{self.user_id}:{self.device_type}:{self.token[:24]}'
+
+
+class DeliveryZone(models.Model):
+    """
+    Defines a delivery zone with its coverage cities/areas and fee rules.
+    Used at checkout to calculate the correct delivery fee based on
+    the customer's shipping city. Cities list supports unlimited entries
+    so any UAE sub-area or neighbourhood can be added at any time from admin.
+
+    COD surcharge only applies when payment_method == 'cash_on_delivery'.
+    Other methods (card_on_delivery, pay_by_link, payment_gateway) do not
+    incur a surcharge.
+    """
+
+    name = models.CharField(max_length=100)
+    cities = models.JSONField(
+        default=list,
+        help_text=(
+            'List of city/area name strings covered by this zone (case-insensitive match). '
+            'e.g. ["Dubai", "Deira", "Al Barsha"]. Add as many sub-areas as needed.'
+        )
+    )
+    free_delivery_threshold = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        help_text='Order subtotal at or above which delivery is free (AED).',
+    )
+    delivery_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        help_text='Standard delivery fee when subtotal is below threshold (AED).',
+    )
+    cod_surcharge = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        help_text='Extra charge added ONLY when payment method is cash_on_delivery (AED).',
+    )
+    estimated_delivery_label = models.CharField(
+        max_length=50,
+        blank=True,
+        help_text='Optional label shown to customer, e.g. "Same Day", "1-2 Days".',
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name

@@ -8,6 +8,7 @@ from rest_framework import serializers
 
 from catalog.models import Product, Store
 from offer.models import Coupon
+from shop.services.delivery_zones import get_shipping_fee
 from shop.services.zoho_commerce import ZohoCommerceError, ZohoCommerceService
 from zoho_integration.models import ZohoCommerceAccount
 from zoho_integration.services import ZohoCommerceService as ZohoAccountService
@@ -995,6 +996,20 @@ class CheckoutSerializer(serializers.Serializer):
                     raise serializers.ValidationError(
                         {f: 'This field is required unless address_id is provided.' for f in missing_ship},
                     )
+
+        # -- Zone-based shipping fee -----------------------------------------
+        # Overrides client-supplied shipping_amount when
+        # CHECKOUT_TRUST_CLIENT_SHIPPING is False (default).
+        # Falls back to DEFAULT_SHIPPING_AMOUNT for unrecognised cities.
+        # COD surcharge only applies to cash_on_delivery, NOT to
+        # card_on_delivery, pay_by_link, or payment_gateway.
+        subtotal = sum((i.line_subtotal for i in checkout_items), Decimal('0')).quantize(Decimal('0.01'))
+        if not getattr(settings, 'CHECKOUT_TRUST_CLIENT_SHIPPING', False):
+            attrs['shipping_amount'] = get_shipping_fee(
+                city=attrs.get('shipping_city', ''),
+                subtotal=subtotal,
+                payment_method=attrs.get('payment_method', 'cash_on_delivery'),
+            )
 
         if not attrs.get('billing_same_as_shipping'):
             required = [
