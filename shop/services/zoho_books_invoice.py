@@ -21,6 +21,7 @@ from shop.services.zoho_books import (
     books_find_contact_id_by_name,
     books_get_contact,
     books_mark_invoice_sent,
+    books_update_contact_name,
     store_has_books_config,
     zoho_books_enabled,
     zoho_books_vat_tax_id,
@@ -230,8 +231,17 @@ def _resolve_customer_id(order: Order) -> str:
     store = order.store
     email = (getattr(user, 'email', '') or '').strip().lower()
 
+    first = (getattr(user, 'first_name', '') or '').strip()
+    last = (getattr(user, 'last_name', '') or '').strip()
+    name = f'{first} {last}'.strip()
+    if not name:
+        name = (order.shipping_name or '').strip()
+    if not name:
+        name = email or f'Customer {user.pk}'
+
     stored = (getattr(user, 'zoho_books_contact_id', '') or '').strip()
     if stored and books_get_contact(stored, store=store):
+        books_update_contact_name(stored, name, store=store)
         return stored
     if stored:
         from accounts.models import User
@@ -242,15 +252,8 @@ def _resolve_customer_id(order: Order) -> str:
     existing = books_find_contact_id_by_email(email, store=store) if email else None
     if existing:
         _persist_user_books_contact_id(user, existing)
+        books_update_contact_name(existing, name, store=store)
         return existing
-
-    first = (getattr(user, 'first_name', '') or '').strip()
-    last = (getattr(user, 'last_name', '') or '').strip()
-    name = f'{first} {last}'.strip()
-    if not name:
-        name = (order.shipping_name or '').strip()
-    if not name:
-        name = email or f'Customer {user.pk}'
 
     existing_by_name = books_find_contact_id_by_name(name, store=store)
     if existing_by_name:

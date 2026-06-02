@@ -226,6 +226,22 @@ def books_create_contact(
     return contact_id
 
 
+def books_update_contact_name(contact_id: str, contact_name: str, *, store=None) -> None:
+    contact_id = (contact_id or '').strip()
+    contact_name = (contact_name or '').strip()
+    if not contact_id or not contact_name:
+        return
+    try:
+        _books_request(
+            'PUT',
+            f'contacts/{contact_id}',
+            store=store,
+            json_data={'contact_name': contact_name},
+        )
+    except ZohoBooksError:
+        pass
+
+
 def books_create_sales_order(salesorder_body: dict[str, Any], *, store=None) -> dict[str, Any]:
     payload = _books_request('POST', 'salesorders', store=store, json_data=salesorder_body)
     salesorder = payload.get('salesorder')
