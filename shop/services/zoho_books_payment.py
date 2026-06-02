@@ -247,3 +247,114 @@ def maybe_record_zoho_books_payment_for_order(
             zoho_books_payment_error=str(exc)[:5000],
             updated_at=dj_tz.now(),
         )
+
+
+def create_zoho_books_advance_payment_for_order(order) -> None:
+    """
+    Create a standalone advance payment received in Zoho Books for a prepaid order.
+    This payment is NOT linked to any invoice - Zoho staff will apply it manually
+    when they create the invoice against the confirmed sales order.
+    Called automatically at checkout for pay_by_link and payment_gateway orders.
+    """
+    from shop.services.zoho_books import (
+        ZohoBooksError,
+        _books_request,
+        store_has_books_config,
+        zoho_books_enabled,
+    )
+
+    order = Order.objects.select_related('user', 'store').get(pk=order.pk)
+    store = order.store
+
+    if not zoho_books_enabled():
+        logger.info("Zoho Books disabled, skipping advance payment for order %s", order.pk)
+        return
+
+    if not store_has_books_config(store):
+        logger.info("Store has no Books config, skipping advance payment for order %s", order.pk)
+        return
+
+    if (order.zoho_books_payment_id or '').strip():
+        logger.info("Advance payment already recorded for order %s, skipping", order.pk)
+        return
+
+    if not (order.zoho_books_salesorder_id or '').strip():
+        logger.warning("No sales order id on order %s, skipping advance payment", order.pk)
+        return
+
+    try:
+        customer_id = _resolve_customer_id(order)
+    except Exception as exc:
+        logger.error("Could not resolve customer id for order %s: %s", order.pk, exc, exc_info=True)
+        return
+
+    pay_amount = order.total
+    if not pay_amount or pay_amount <= 0:
+        logger.warning("Order %s has zero/negative total, skipping advance payment", order.pk)
+        return
+
+    gateway_reference = (order.gateway_reference or '').strip()
+    payment_method = (order.payment_method or '').strip()
+
+    payment_mode_map = {
+        'pay_by_link': 'banktransfer',
+        'payment_gateway': 'creditcard',
+    }
+    payment_mode = payment_mode_map.get(payment_method, 'banktransfer')
+
+    description = f'AoneGT order #{order.pk} - advance payment ({payment_method})'
+    if gateway_reference:
+        description += f' ref {gateway_reference}'
+
+    body = {
+        'customer_id': customer_id,
+        'payment_mode': payment_mode,
+        'amount': float(pay_amount),
+        'date': order.created_at.date().isoformat(),
+        'reference_number': order_code_for_order(order)[:100],
+        'description': description,
+    }
+
+    try:
+        payload = _books_request('POST', 'customerpayments', store=store, json_data=body)
+        payment = payload.get('payment') or {}
+        payment_id = str(payment.get('payment_id') or '').strip()
+        if not payment_id:
+            raise ZohoBooksError('Zoho Books did not return payment_id after creating advance payment.')
+
+        order.__class__.objects.filter(pk=order.pk).update(
+            zoho_books_payment_id=payment_id,
+            zoho_books_paid_at=dj_tz.now(),
+            zoho_books_payment_error='',
+        )
+        order.zoho_books_payment_id = payment_id
+        logger.info("Advance payment %s created in Zoho Books for order %s", payment_id, order.pk)
+
+    except ZohoBooksError as exc:
+        logger.error("Zoho Books advance payment failed for order %s: %s", order.pk, exc, exc_info=True)
+        order.__class__.objects.filter(pk=order.pk).update(
+            zoho_books_payment_error=str(exc)[:500],
+        )
+
+
+def maybe_create_zoho_books_advance_payment_for_order(order) -> None:
+    """
+    Best-effort wrapper. Swallows all exceptions so checkout is never blocked.
+    Only runs for pay_by_link and payment_gateway orders.
+    """
+    prepaid_methods = {'pay_by_link', 'payment_gateway'}
+    if (order.payment_method or '') not in prepaid_methods:
+        logger.info(
+            "Order %s payment method %s is not prepaid, skipping advance payment",
+            order.pk, order.payment_method,
+        )
+        return
+
+    try:
+        create_zoho_books_advance_payment_for_order(order)
+    except Exception as exc:
+        logger.error(
+            "Unexpected error creating advance payment for order %s: %s",
+            order.pk, exc,
+            exc_info=True,
+        )

@@ -1538,6 +1538,8 @@ class CheckoutAPIView(APIView):
 
         if getattr(settings, 'ZOHO_BOOKS_MANUAL_WORKFLOW', False):
             maybe_create_zoho_books_sales_order_for_order(order.pk, trigger='placed')
+            from shop.services.zoho_books_payment import maybe_create_zoho_books_advance_payment_for_order
+            maybe_create_zoho_books_advance_payment_for_order(order)
         else:
             maybe_create_zoho_sales_order_for_order(order.pk)
 
