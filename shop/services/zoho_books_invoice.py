@@ -231,6 +231,7 @@ def _resolve_customer_id(order: Order) -> str:
     store = order.store
     email = (getattr(user, 'email', '') or '').strip().lower()
 
+    # Compute display name early — used in all branches
     first = (getattr(user, 'first_name', '') or '').strip()
     last = (getattr(user, 'last_name', '') or '').strip()
     name = f'{first} {last}'.strip()
@@ -239,27 +240,31 @@ def _resolve_customer_id(order: Order) -> str:
     if not name:
         name = email or f'Customer {user.pk}'
 
+    # Branch 1 — stored contact id: validate it still exists in Zoho Books
     stored = (getattr(user, 'zoho_books_contact_id', '') or '').strip()
     if stored and books_get_contact(stored, store=store):
         books_update_contact_name(stored, name, store=store)
         return stored
     if stored:
-        from accounts.models import User
-
-        User.objects.filter(pk=user.pk).update(zoho_books_contact_id='')
+        from accounts.models import User as UserModel
+        UserModel.objects.filter(pk=user.pk).update(zoho_books_contact_id='')
         user.zoho_books_contact_id = ''
 
+    # Branch 2 — search by email (most reliable, exact match)
     existing = books_find_contact_id_by_email(email, store=store) if email else None
     if existing:
         _persist_user_books_contact_id(user, existing)
         books_update_contact_name(existing, name, store=store)
         return existing
 
-    existing_by_name = books_find_contact_id_by_name(name, store=store)
+    # Branch 3 — search by name + email composite (both must match)
+    existing_by_name = books_find_contact_id_by_name(name, store=store, email=email)
     if existing_by_name:
         _persist_user_books_contact_id(user, existing_by_name)
+        books_update_contact_name(existing_by_name, name, store=store)
         return existing_by_name
 
+    # Branch 4 — create new contact
     billing_address = {
         'attention': name[:100],
         'address': (order.billing_address or order.shipping_address or '')[:500],
@@ -270,6 +275,7 @@ def _resolve_customer_id(order: Order) -> str:
         'phone': (order.billing_phone or order.shipping_phone or '')[:50],
     }
     phone = (getattr(user, 'phone', '') or order.shipping_phone or '')[:50]
+
     try:
         contact_id = books_create_contact(
             contact_name=name,
@@ -278,15 +284,57 @@ def _resolve_customer_id(order: Order) -> str:
             billing_address=billing_address,
             store=store,
         )
+        _persist_user_books_contact_id(user, contact_id)
+        return contact_id
+
     except ZohoBooksError as exc:
-        if 'already exists' in str(exc).lower():
-            existing_by_name = books_find_contact_id_by_name(name, store=store)
-            if existing_by_name:
-                _persist_user_books_contact_id(user, existing_by_name)
-                return existing_by_name
-        raise
-    _persist_user_books_contact_id(user, contact_id)
-    return contact_id
+        if 'already exists' not in str(exc).lower():
+            raise
+
+        # Step A — retry email search: handles concurrent checkout race
+        if email:
+            retry_email = books_find_contact_id_by_email(email, store=store)
+            if retry_email:
+                _persist_user_books_contact_id(user, retry_email)
+                books_update_contact_name(retry_email, name, store=store)
+                return retry_email
+
+        # Step B — same name, different user: create with unique name
+        unique_name = f'{name} ({email})' if email else f'{name} ({user.pk})'
+        unique_name = unique_name[:200]
+
+        try:
+            contact_id = books_create_contact(
+                contact_name=unique_name,
+                email=email,
+                phone=phone,
+                billing_address={**billing_address, 'attention': unique_name[:100]},
+                store=store,
+            )
+            _persist_user_books_contact_id(user, contact_id)
+            return contact_id
+
+        except ZohoBooksError as exc2:
+            if 'already exists' not in str(exc2).lower():
+                raise
+
+            # Step C — unique name also exists: retry email search one final time
+            if email:
+                final_retry = books_find_contact_id_by_email(email, store=store)
+                if final_retry:
+                    _persist_user_books_contact_id(user, final_retry)
+                    books_update_contact_name(final_retry, name, store=store)
+                    return final_retry
+
+            # Step D — search by unique name as last resort
+            final_by_name = books_find_contact_id_by_name(
+                unique_name, store=store, email=email
+            )
+            if final_by_name:
+                _persist_user_books_contact_id(user, final_by_name)
+                return final_by_name
+
+            raise
 
 
 def create_zoho_books_invoice_for_order(order: Order) -> bool:

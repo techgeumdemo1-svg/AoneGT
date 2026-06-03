@@ -52,20 +52,30 @@ def _books_base_url() -> str:
 
 
 def _access_token(*, store=None) -> str:
+    # Hardcoded token in .env — only use if explicitly set (not recommended for production)
     token = (getattr(settings, 'ZOHO_ACCESS_TOKEN', '') or '').strip()
     if token:
         return token
-    # Per-store cached tokens are often Commerce-only; Books scopes live on .env OAuth.
+
+    # Priority 1 — store-level credentials (most specific, correct org)
+    if store is not None:
+        try:
+            return ZohoCommerceService.refresh_access_token(store)
+        except ZohoCommerceError:
+            pass
+
+    # Priority 2 — global .env credentials (fallback only)
     global_refresh = (getattr(settings, 'ZOHO_REFRESH_TOKEN', '') or '').strip()
     if global_refresh:
         try:
             return ZohoCommerceService.refresh_access_token(None)
         except ZohoCommerceError:
             pass
-    try:
-        return ZohoCommerceService.refresh_access_token(store)
-    except ZohoCommerceError as exc:
-        raise ZohoBooksError(str(exc)) from exc
+
+    raise ZohoBooksError(
+        'Could not obtain Zoho Books access token. '
+        'Set store-level OAuth credentials or ZOHO_REFRESH_TOKEN in .env.'
+    )
 
 
 def _books_request(
@@ -166,11 +176,34 @@ def books_find_contact_id_by_email(email: str, *, store=None) -> str | None:
     return None
 
 
-def books_find_contact_id_by_name(contact_name: str, *, store=None) -> str | None:
+def books_find_contact_id_by_name(
+    contact_name: str,
+    *,
+    store=None,
+    email: str = '',
+) -> str | None:
     normalized = (contact_name or '').strip()
     if not normalized:
         return None
     normalized_lower = normalized.lower()
+    email_normalized = (email or '').strip().lower()
+
+    def _email_matches_contact(row: dict) -> bool:
+        if not email_normalized:
+            return False
+        row_email = (row.get('email') or '').strip().lower()
+        contact_persons = row.get('contact_persons') or []
+        person_emails = []
+        if isinstance(contact_persons, list):
+            for cp in contact_persons:
+                if isinstance(cp, dict):
+                    ce = (cp.get('email') or '').strip().lower()
+                    if ce:
+                        person_emails.append(ce)
+        all_emails = ([row_email] if row_email else []) + person_emails
+        if not all_emails:
+            return False
+        return email_normalized in all_emails
 
     def _match_from_payload(payload: dict) -> str | None:
         contacts = payload.get('contacts') or []
@@ -178,10 +211,11 @@ def books_find_contact_id_by_name(contact_name: str, *, store=None) -> str | Non
             if not isinstance(row, dict):
                 continue
             name = (row.get('contact_name') or '').strip()
-            if name.lower() == normalized_lower:
-                return str(row.get('contact_id') or '').strip() or None
-        if len(contacts) == 1 and isinstance(contacts[0], dict):
-            return str(contacts[0].get('contact_id') or '').strip() or None
+            if name.lower() != normalized_lower:
+                continue
+            if not _email_matches_contact(row):
+                continue
+            return str(row.get('contact_id') or '').strip() or None
         return None
 
     for query in (
