@@ -589,7 +589,7 @@ class OrderItemSerializer(serializers.ModelSerializer):
 ORDER_CUSTOMER_TRACKING_PIPELINE = (
     ('pending', 'Pending'),
     ('confirmed', 'Confirmed'),
-    ('under_processing', 'Under Processing'),
+    ('packed', 'Packed'),
     ('out_for_delivery', 'Out for Delivery'),
     ('delivered', 'Delivered'),
 )

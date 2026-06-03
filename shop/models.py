@@ -114,7 +114,7 @@ class Order(models.Model):
     class CustomerTrackingStage(models.TextChoices):
         PENDING = 'pending', 'Pending'
         CONFIRMED = 'confirmed', 'Confirmed'
-        UNDER_PROCESSING = 'under_processing', 'Under Processing'
+        PACKED = 'packed', 'Packed'
         OUT_FOR_DELIVERY = 'out_for_delivery', 'Out for Delivery'
         DELIVERED = 'delivered', 'Delivered'
 

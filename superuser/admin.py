@@ -1,3 +1,3 @@
 from django.contrib import admin
 
-# Register your models here.
+# Admin models registered in admin_dashboard app.

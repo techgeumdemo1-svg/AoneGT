@@ -33,7 +33,7 @@ INSTALLED_APPS = [
     'offer',
     # 'offers',
     'superuser',
-    
+    'admin_dashboard',
 ]
 
 MIDDLEWARE = [
@@ -130,6 +130,7 @@ REST_FRAMEWORK = {
         'delete_account_otp': os.getenv('DELETE_ACCOUNT_OTP_THROTTLE_RATE', '5/hour'),
         'reactivate_account_otp': os.getenv('REACTIVATE_ACCOUNT_OTP_THROTTLE_RATE', '5/hour'),
         'change_password_otp': os.getenv('CHANGE_PASSWORD_OTP_THROTTLE_RATE', '5/hour'),
+        'admin_login_otp': os.getenv('ADMIN_LOGIN_OTP_THROTTLE_RATE', '10/hour'),
     },
 }
 

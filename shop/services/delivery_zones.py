@@ -8,6 +8,8 @@ COD surcharge ONLY applies to payment_method == 'cash_on_delivery'.
 All other payment methods (card_on_delivery, pay_by_link, payment_gateway)
 do NOT get the surcharge.
 """
+from __future__ import annotations
+
 from decimal import Decimal
 
 from django.conf import settings

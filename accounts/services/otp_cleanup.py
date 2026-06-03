@@ -1,7 +1,12 @@
 """Remove stale OTP rows from the database."""
 
+import logging
+
+from django.db import connection
 from django.db.models import Q
 from django.utils import timezone
+
+logger = logging.getLogger(__name__)
 
 from accounts.models import (
     AccountDeactivateOTP,
@@ -11,6 +16,7 @@ from accounts.models import (
     PasswordResetOTP,
     RegistrationOTP,
 )
+from admin_dashboard.models import AdminLoginOTP
 
 OTP_MODELS = (
     PasswordResetOTP,
@@ -19,6 +25,7 @@ OTP_MODELS = (
     AccountDeleteOTP,
     AccountReactivateOTP,
     ChangePasswordOTP,
+    AdminLoginOTP,
 )
 
 
@@ -33,6 +40,11 @@ def purge_otps(*, include_used=False, dry_run=False):
     counts = {}
 
     for model in OTP_MODELS:
+        table = model._meta.db_table
+        if table not in connection.introspection.table_names():
+            logger.warning('otp-purge: skip %s (table %s missing)', model.__name__, table)
+            counts[model.__name__] = 0
+            continue
         if include_used:
             qs = model.objects.filter(Q(expires_at__lt=now) | Q(is_used=True))
         else:

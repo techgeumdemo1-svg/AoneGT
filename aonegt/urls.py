@@ -16,7 +16,8 @@ urlpatterns = [
     path('api/offer/', include('offer.urls')),
     path("zoho/", include("zoho_integration.urls")),
     # path("api/offers/", include("offers.urls"), name='offers'),
-     path('api/admin/', include('superuser.urls')),
+    path('api/admin/', include('admin_dashboard.urls')),
+    path('api/admin/', include('superuser.urls')),
      
 ]
 

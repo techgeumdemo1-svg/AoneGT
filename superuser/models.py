@@ -1,3 +1,3 @@
 from django.db import models
 
-# Create your models here.
+# AdminLoginOTP moved to admin_dashboard.models (table: superuser_adminloginotp).
