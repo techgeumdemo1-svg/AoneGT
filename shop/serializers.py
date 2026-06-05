@@ -1055,12 +1055,19 @@ class CheckoutSerializer(serializers.Serializer):
             True,
         )
 
-        if is_prepaid_at_checkout_payment_method(payment_method):
+        # payment_gateway: payment has NOT happened yet at checkout time.
+        # Payment is initiated after checkout via POST /api/shop/geidea/initiate/
+        # and confirmed via the Geidea server-to-server callback.
+        # Do NOT require payment_success here for payment_gateway.
+        #
+        # pay_by_link: unchanged — payment_success + gateway_reference
+        # must still be sent at checkout time.
+        if payment_method == Order.PaymentMethod.PAY_BY_LINK:
             if require_prepaid_payment and not payment_success:
                 raise serializers.ValidationError({
                     'payment_success': (
                         'Payment must be successful before checkout for '
-                        'payment_gateway or pay_by_link orders. '
+                        'pay_by_link orders. '
                         'Send payment_success: true and gateway_reference in JSON body.'
                     ),
                 })

@@ -1512,14 +1512,21 @@ class CheckoutAPIView(APIView):
                 uearn.save(update_fields=['points_balance'])
 
             from shop.services.account_credit import credit_user_for_prepaid_order, get_user_credit_balance
-            from shop.services.zoho_books_payment import is_prepaid_at_checkout_payment_method
 
             gateway_reference = (ser.validated_data.get('gateway_reference') or '').strip()
             if gateway_reference:
                 order.gateway_reference = gateway_reference[:255]
                 order.save(update_fields=['gateway_reference', 'updated_at'])
 
-            if is_prepaid_at_checkout_payment_method(order.payment_method):
+            # payment_gateway: DO NOT credit user at checkout.
+            # Credit is applied in the Geidea callback view when Geidea confirms
+            # payment (Phase 3). payment_success is always False here for
+            # payment_gateway so this block would never execute anyway, but
+            # the explicit check makes the intent unambiguous and safe.
+            #
+            # pay_by_link: unchanged — credit user immediately when
+            # payment_success=True is sent at checkout.
+            if order.payment_method == Order.PaymentMethod.PAY_BY_LINK:
                 if ser.validated_data.get('payment_success'):
                     pay_amount = ser.validated_data.get('payment_amount')
                     if pay_amount is not None and pay_amount != final_total:
@@ -1538,8 +1545,15 @@ class CheckoutAPIView(APIView):
 
         if getattr(settings, 'ZOHO_BOOKS_MANUAL_WORKFLOW', False):
             maybe_create_zoho_books_sales_order_for_order(order.pk, trigger='placed')
-            from shop.services.zoho_books_payment import maybe_create_zoho_books_advance_payment_for_order
-            maybe_create_zoho_books_advance_payment_for_order(order)
+            # payment_gateway: advance payment is created by the Geidea callback (Phase 3)
+            # after Geidea confirms the payment. DO NOT create it here — the user has
+            # not paid yet at this point in the flow.
+            #
+            # pay_by_link: payment_success=True was already confirmed and
+            # credit_user_for_prepaid_order() was called above, so create it now.
+            if order.payment_method != Order.PaymentMethod.PAYMENT_GATEWAY:
+                from shop.services.zoho_books_payment import maybe_create_zoho_books_advance_payment_for_order
+                maybe_create_zoho_books_advance_payment_for_order(order)
         else:
             maybe_create_zoho_sales_order_for_order(order.pk)
 
