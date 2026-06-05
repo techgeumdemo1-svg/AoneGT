@@ -14,6 +14,18 @@ from .orders import (
     AdminOrderTimelineAPIView,
     AdminOrderVerifyPaymentAPIView,
 )
+from .returns import (
+    AdminReturnApproveAPIView,
+    AdminReturnDetailAPIView,
+    AdminReturnListAPIView,
+    AdminReturnRefundAPIView,
+    AdminReturnRejectAPIView,
+)
+from .stores import (
+    AdminStoreListAPIView,
+    AdminStoreReorderAPIView,
+    AdminStoreVisibilityUpdateAPIView,
+)
 from .views import (
     AdminDashboardChartsAPIView,
     AdminDashboardSummaryAPIView,
@@ -45,4 +57,12 @@ urlpatterns = [
     path('customers/<int:pk>/status/', AdminCustomerStatusUpdateAPIView.as_view(), name='admin-customers-status'),
     path('customers/<int:pk>/orders/', AdminCustomerOrdersAPIView.as_view(), name='admin-customers-orders'),
     path('customers/<int:pk>/super-coins/', AdminCustomerSuperCoinsAPIView.as_view(), name='admin-customers-super-coins'),
+    path('returns/', AdminReturnListAPIView.as_view(), name='admin-returns-list'),
+    path('returns/<int:pk>/', AdminReturnDetailAPIView.as_view(), name='admin-returns-detail'),
+    path('returns/<int:pk>/approve/', AdminReturnApproveAPIView.as_view(), name='admin-returns-approve'),
+    path('returns/<int:pk>/reject/', AdminReturnRejectAPIView.as_view(), name='admin-returns-reject'),
+    path('returns/<int:pk>/refund/', AdminReturnRefundAPIView.as_view(), name='admin-returns-refund'),
+    path('stores/', AdminStoreListAPIView.as_view(), name='admin-stores-list'),
+    path('stores/reorder/', AdminStoreReorderAPIView.as_view(), name='admin-stores-reorder'),
+    path('stores/<int:pk>/visibility/', AdminStoreVisibilityUpdateAPIView.as_view(), name='admin-stores-visibility'),
 ]

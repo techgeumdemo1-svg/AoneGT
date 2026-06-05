@@ -75,7 +75,7 @@ class AdminCustomerListSerializer(serializers.ModelSerializer):
 
 class AdminCustomerDetailSerializer(AdminCustomerListSerializer):
     zoho_books_contact_id = serializers.CharField(read_only=True)
-    last_login = serializers.DateTimeField(source="last_login", read_only=True, allow_null=True)
+    last_login = serializers.DateTimeField(read_only=True, allow_null=True)
 
     class Meta(AdminCustomerListSerializer.Meta):
         fields = AdminCustomerListSerializer.Meta.fields + (
