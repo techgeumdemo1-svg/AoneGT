@@ -35,6 +35,7 @@ from .views import (
     ZohoProductListAPIView,
     ZohoProductDetailAPIView,
     ZohoProductImageProxyAPIView,
+    GeideaInitiateView,
 )
 
 urlpatterns = [
@@ -86,5 +87,7 @@ urlpatterns = [
     ),
     path('admin/delivery-zones/', DeliveryZoneListCreateAPIView.as_view()),
     path('admin/delivery-zones/<int:pk>/', DeliveryZoneDetailAPIView.as_view()),
+
+    path('geidea/initiate/', GeideaInitiateView.as_view(), name='geidea-initiate'),
 
 ]

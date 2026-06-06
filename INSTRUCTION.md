@@ -1,107 +1,126 @@
 # INSTRUCTION.md
-# Auto-Sync Rule — Project Source of Truth
 
-This instruction applies to ALL AI models, agents, CLI tools, 
-and IDE assistants working in this project.
-This is a standing order — it never expires, it applies to 
-every single session, every single task, without exception.
+# PROJECT_TRUTH.md Synchronization Mode
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RULE — AFTER EVERY TASK
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-After completing ANY task or process in this project:
+When this instruction file is invoked, your only objective is to synchronize PROJECT_TRUTH.md with the current repository state.
 
-STEP 1 — DETECT CHANGES
-Check if any .py file or related config/schema file 
-was created, modified, or deleted during this session.
-Skip migration files.
-
-STEP 2 — IF NO CHANGES DETECTED
-Do nothing. Task is complete.
-
-STEP 3 — IF ANY CHANGES ARE DETECTED
-Do NOT consider the task complete yet.
-You must update PROJECT_TRUTH.md before finishing.
+PROJECT_TRUTH.md is the project's permanent source of truth and must accurately represent the codebase exactly as it exists right now.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-HOW TO UPDATE PROJECT_TRUTH.md
+SYNC PROCESS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-For every changed file, go to its section in 
-PROJECT_TRUTH.md and update:
 
-**If a .py file was MODIFIED:**
-- Replace the Full Source Code block with the 
-  new complete updated code — every line
-- Update Purpose if the responsibility changed
-- Update Key Classes / Functions if any were 
-  added, removed, or changed
-- Update Imports / Dependencies if changed
-- Update Data Models / Schemas if changed
-- Update Serializers if changed
-- Update URL Patterns & API Endpoints if changed
-- Update Signals / Middleware / Permissions if changed
-- Update Business Logic Notes if logic changed
-- Update the file's Status in Phase 5 if applicable
+1. Read the entire PROJECT_TRUTH.md.
 
-**If a .py file was CREATED:**
-- Add a new section for it in Phase 4 in the correct 
-  directory order
-- Document it fully using the exact Phase 4 template:
-  - Purpose
-  - Full Source Code (complete, every line)
-  - Responsibility
-  - Key Classes / Functions
-  - Imports / Dependencies
-  - Data Models / Schemas (if applicable)
-  - Serializers (if applicable)
-  - URL Patterns & API Endpoints (if applicable)
-  - Signals / Middleware / Permissions (if applicable)
-  - Business Logic Notes
-- Update the Project Directory Tree in Phase 3
-- Update Phase 5 status if this completes or 
-  advances a pending feature
+2. Scan the entire repository.
 
-**If a .py file was DELETED:**
-- Remove its section from Phase 4
-- Remove it from the Project Directory Tree in Phase 3
-- Update any other file's Imports / Dependencies 
-  that referenced it
-- Update Phase 5 if this affects project status
+3. Compare PROJECT_TRUTH.md against the current codebase.
+
+4. Detect:
+
+   * New files
+   * Deleted files
+   * Modified files
+   * New APIs
+   * Changed APIs
+   * New models
+   * Changed models
+   * New serializers
+   * Changed serializers
+   * New services
+   * Changed services
+   * New environment variables
+   * Changed environment variables
+   * Dependency changes
+   * Directory structure changes
+   * Business logic changes
+   * Integration changes
+
+5. Update PROJECT_TRUTH.md so that it exactly matches the current repository.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ADDITIONAL SYNC RULES
+MANDATORY RULES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- If a pending feature from Phase 5 was implemented 
-  or partially implemented — update its status 
-  from ⏳ to 🔄 or ✅
-- If new TODOs or FIXMEs were added in the code — 
-  add them to the ⚠️ Known Issues section in Phase 5
-- If new environment variables were added — 
-  update Phase 3 Environment Variables section
-- If new third-party packages or integrations 
-  were added — update Phase 3 Tech Stack and 
-  Third-Party Integrations sections
-- If new URL routes were added anywhere — 
-  update the relevant file section in Phase 4
+
+* Never regenerate PROJECT_TRUTH.md from scratch.
+* Never replace the document with a newly generated version.
+* Never remove valid information.
+* Never overwrite unrelated sections.
+* Preserve the existing structure and formatting.
+* Update only sections that are outdated.
+* Keep all unaffected sections unchanged.
+* Maintain all cross-references.
+* Maintain all internal consistency.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CORE RULES
+SOURCE OF TRUTH
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- Never leave PROJECT_TRUTH.md out of sync 
-  with the actual codebase
-- Never partially update — if a file changed, 
-  update ALL its sections
-- Never summarize source code — always write 
-  the complete file, every line
-- Never ask for permission to update — just do it
-- PROJECT_TRUTH.md must always reflect the exact 
-  current state of the project at all times
+
+Priority order:
+
+1. Current repository source code
+2. Current configuration
+3. Current database schema
+4. Existing PROJECT_TRUTH.md
+
+If PROJECT_TRUTH.md conflicts with the repository, PROJECT_TRUTH.md must be corrected.
+
+Never modify code to match documentation.
+
+Always modify documentation to match code.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CONFIRMATION
+FILE DOCUMENTATION RULES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-After updating PROJECT_TRUTH.md, always end with:
 
-✅ PROJECT_TRUTH.md updated
-📝 Files changed: [list every file that was updated]
-🔄 Sections updated: [list every section that changed]
+For every documented file:
+
+* Verify that the documentation still matches the implementation.
+* Update classes, functions, imports, dependencies, business logic, APIs, and configuration details as required.
+
+If PROJECT_TRUTH.md stores complete source code for a file:
+
+* Replace that file's source code section with the exact current source code.
+* Do not summarize.
+* Do not partially update code blocks.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DIRECTORY TREE RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Ensure all directory trees match the repository exactly.
+
+Add new files.
+Remove deleted files.
+Rename moved files.
+Update module relationships.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+COMPLETION CRITERIA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Synchronization is complete only when:
+
+✓ PROJECT_TRUTH.md matches the repository exactly
+
+✓ All changed files are updated
+
+✓ All new files are documented
+
+✓ All deleted files are removed
+
+✓ Directory trees are accurate
+
+✓ APIs are accurate
+
+✓ Environment variables are accurate
+
+✓ Dependencies are accurate
+
+✓ Business logic documentation is accurate
+
+✓ No outdated information remains
+
+Final result:
+
+PROJECT_TRUTH.md must represent the exact current state of the repository at the moment synchronization finishes.

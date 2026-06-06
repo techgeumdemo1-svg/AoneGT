@@ -52,6 +52,7 @@ from .models import (
     WishlistItem,
 )
 from .services.zoho_commerce import ZohoCommerceError, ZohoCommerceService
+from .services.geidea import GeideaSessionError, create_geidea_session
 from offer.models import Coupon
 from offer.services import (
     _as_decimal,
@@ -2784,3 +2785,83 @@ class NotificationDetailAPIView(APIView):
             n.read_at = timezone.now()
             n.save(update_fields=['read_at'])
         return Response(UserNotificationSerializer(n).data)
+
+
+class GeideaInitiateView(APIView):
+    """
+    POST /api/shop/geidea/initiate/
+    Body: { "order_id": <int> }
+
+    Creates a Geidea payment session server-to-server and returns the session_id
+    to the frontend. The frontend uses it to launch the Geidea hosted payment page.
+
+    Session expires in 15 minutes — frontend must call startPayment() immediately.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        order_id = request.data.get('order_id')
+        if not order_id:
+            return Response(
+                {'error': 'order_id is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Fetch the order and verify it belongs to the requesting user.
+        # Using user=request.user means even a valid JWT cannot access another
+        # user's order — it returns 404 rather than 403 so the order's existence
+        # is not revealed.
+        try:
+            order = Order.objects.get(pk=order_id, user=request.user)
+        except Order.DoesNotExist:
+            return Response(
+                {'error': 'Order not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Guard: only payment_gateway orders go through this flow.
+        # cash_on_delivery, card_on_delivery, and pay_by_link must never
+        # reach this endpoint.
+        if order.payment_method != Order.PaymentMethod.PAYMENT_GATEWAY:
+            return Response(
+                {'error': 'This order does not use the payment gateway.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Guard: order must still be in a payable state.
+        if order.payment_status == Order.PaymentStatus.PAID:
+            return Response(
+                {'error': 'Order already paid.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Note: PaymentStatus has no CANCELLED constant; cancellation is tracked
+        # on Order.Status. Check order.status instead.
+        if order.status == Order.Status.CANCELLED:
+            return Response(
+                {'error': 'Order cancelled.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Guard: Zoho Sales Order must exist.
+        # zoho_books_salesorder_id is the merchantReferenceId sent to Geidea.
+        # If it is null, the Zoho sync from Phase 1 failed and the frontend
+        # should offer a retry button that calls this endpoint again.
+        if not order.zoho_books_salesorder_id:
+            return Response(
+                {'error': 'Order saved, payment cannot start — Zoho sync pending.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Create the Geidea session server-to-server.
+        try:
+            session_id = create_geidea_session(order)
+        except GeideaSessionError as exc:
+            return Response(
+                {'error': str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response(
+            {'session_id': session_id},
+            status=status.HTTP_200_OK,
+        )
