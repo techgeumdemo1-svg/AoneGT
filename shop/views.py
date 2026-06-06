@@ -53,6 +53,7 @@ from .models import (
 )
 from .services.zoho_commerce import ZohoCommerceError, ZohoCommerceService
 from .services.geidea import GeideaSessionError, create_geidea_session
+from .services.geidea_callback import process_geidea_callback
 from offer.models import Coupon
 from offer.services import (
     _as_decimal,
@@ -2865,3 +2866,27 @@ class GeideaInitiateView(APIView):
             {'session_id': session_id},
             status=status.HTTP_200_OK,
         )
+
+
+class GeideaCallbackView(APIView):
+    """
+    POST /api/shop/geidea/callback/
+    Open endpoint — no JWT auth. Secured by HMAC signature only.
+
+    Geidea POSTs payment results here after the user completes or
+    abandons payment on the HPP. This is the authoritative payment confirmation.
+
+    Always returns HTTP 200 to Geidea except on signature mismatch (400).
+    Geidea retries on non-200 — returning 200 on failures prevents retry loops.
+    """
+    permission_classes = []   # No auth — open endpoint
+    authentication_classes = []  # No JWT parsing
+
+    def post(self, request):
+        try:
+            payload = request.data
+        except Exception:
+            return Response({"message": "Invalid payload"}, status=400)
+
+        http_status, message = process_geidea_callback(payload)
+        return Response({"message": message}, status=http_status)

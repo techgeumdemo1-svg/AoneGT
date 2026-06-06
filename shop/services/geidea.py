@@ -2,6 +2,7 @@ import base64
 import hashlib
 import hmac
 import logging
+import uuid as uuid_module
 from datetime import datetime
 
 import requests
@@ -19,9 +20,9 @@ def create_geidea_session(order):
     """
     Call the Geidea Create Session API server-to-server and return the session_id.
 
-    Uses order.zoho_books_salesorder_id as merchantReferenceId so every Geidea
-    transaction is directly traceable to the Zoho Books Sales Order — which
-    matters for refunds and reconciliation.
+    Uses order.geidea_merchant_ref (a UUID) as merchantReferenceId because
+    Geidea requires a valid UUID. The UUID is generated on the first call and
+    stored on the order so callbacks can look it up.
 
     Args:
         order: A fully saved Order instance with zoho_books_salesorder_id populated.
@@ -33,7 +34,14 @@ def create_geidea_session(order):
         GeideaSessionError: If the API call fails, times out, returns a
                             non-success response code, or returns malformed JSON.
     """
-    merchant_ref = order.zoho_books_salesorder_id
+    # Generate a UUID for Geidea if not already set.
+    # Geidea requires merchantReferenceId to be a valid UUID.
+    # We store it on the order so the callback can look it up.
+    if not order.geidea_merchant_ref:
+        order.geidea_merchant_ref = uuid_module.uuid4()
+        order.save(update_fields=['geidea_merchant_ref'])
+
+    merchant_ref = str(order.geidea_merchant_ref)
     amount_str   = f"{float(order.total):.2f}"
     currency     = order.currency
 
