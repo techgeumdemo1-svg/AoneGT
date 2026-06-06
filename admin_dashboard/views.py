@@ -53,6 +53,9 @@ class AdminLoginAPIView(APIView):
         serializer.is_valid(raise_exception=True)
         user = serializer.validated_data["user"]
 
+        if getattr(settings, "ADMIN_LOGIN_SKIP_OTP", False):
+            return Response(build_admin_login_response(user), status=status.HTTP_200_OK)
+
         to_email = (user.email or "").strip().lower()
         if not to_email or "@" not in to_email:
             return Response(

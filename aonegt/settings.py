@@ -5,8 +5,8 @@ from decimal import Decimal
 import dj_database_url
 from dotenv import load_dotenv
 
-load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / '.env')
 
 SUPERUSER_API_SECRET = os.environ.get("SUPERUSER_API_SECRET")
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY') or 'change-me-set-DJANGO_SECRET_KEY-in-env'
@@ -133,6 +133,14 @@ REST_FRAMEWORK = {
         'admin_login_otp': os.getenv('ADMIN_LOGIN_OTP_THROTTLE_RATE', '10/hour'),
     },
 }
+
+# Local testing only: skip admin login OTP and return JWT on email+password.
+# Never enable in production.
+ADMIN_LOGIN_SKIP_OTP = os.getenv('ADMIN_LOGIN_SKIP_OTP', 'false').strip().lower() in (
+    'true',
+    '1',
+    'yes',
+)
 
 if DEBUG:
     CORS_ALLOW_ALL_ORIGINS = True

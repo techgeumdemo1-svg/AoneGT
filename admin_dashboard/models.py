@@ -33,3 +33,37 @@ class AdminLoginOTP(models.Model):
     @property
     def is_expired(self):
         return timezone.now() > self.expires_at
+
+
+class FAQ(models.Model):
+    question = models.CharField(max_length=500)
+    answer = models.TextField()
+    sort_order = models.PositiveIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['sort_order', 'id']
+        verbose_name = 'FAQ'
+        verbose_name_plural = 'FAQs'
+
+    def __str__(self):
+        return self.question[:80]
+
+
+class CMSPage(models.Model):
+    slug = models.SlugField(max_length=64, unique=True)
+    title = models.CharField(max_length=255)
+    content = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['slug']
+        verbose_name = 'CMS page'
+        verbose_name_plural = 'CMS pages'
+
+    def __str__(self):
+        return self.title

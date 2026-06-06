@@ -21,10 +21,33 @@ from .returns import (
     AdminReturnRefundAPIView,
     AdminReturnRejectAPIView,
 )
+from .banners import (
+    AdminBannerDetailAPIView,
+    AdminBannerListCreateAPIView,
+    AdminBannerReorderAPIView,
+)
+from .cms import (
+    AdminCMSPageDetailAPIView,
+    AdminCMSPageListAPIView,
+    AdminFAQDetailAPIView,
+    AdminFAQListCreateAPIView,
+)
 from .stores import (
     AdminStoreListAPIView,
     AdminStoreReorderAPIView,
     AdminStoreVisibilityUpdateAPIView,
+)
+from .reports import (
+    AdminCartAbandonmentReportAPIView,
+    AdminRefundsReportAPIView,
+    AdminReportExcelExportAPIView,
+    AdminReportPdfExportAPIView,
+)
+from .users import (
+    AdminUserDeactivateAPIView,
+    AdminUserDetailAPIView,
+    AdminUserListCreateAPIView,
+    AdminUserReactivateAPIView,
 )
 from .views import (
     AdminDashboardChartsAPIView,
@@ -65,4 +88,19 @@ urlpatterns = [
     path('stores/', AdminStoreListAPIView.as_view(), name='admin-stores-list'),
     path('stores/reorder/', AdminStoreReorderAPIView.as_view(), name='admin-stores-reorder'),
     path('stores/<int:pk>/visibility/', AdminStoreVisibilityUpdateAPIView.as_view(), name='admin-stores-visibility'),
+    path('banners/', AdminBannerListCreateAPIView.as_view(), name='admin-banners-list-create'),
+    path('banners/reorder/', AdminBannerReorderAPIView.as_view(), name='admin-banners-reorder'),
+    path('banners/<int:pk>/', AdminBannerDetailAPIView.as_view(), name='admin-banners-detail'),
+    path('cms/faqs/', AdminFAQListCreateAPIView.as_view(), name='admin-cms-faqs-list-create'),
+    path('cms/faqs/<int:pk>/', AdminFAQDetailAPIView.as_view(), name='admin-cms-faqs-detail'),
+    path('cms/pages/', AdminCMSPageListAPIView.as_view(), name='admin-cms-pages-list'),
+    path('cms/pages/<int:pk>/', AdminCMSPageDetailAPIView.as_view(), name='admin-cms-pages-detail'),
+    path('users/', AdminUserListCreateAPIView.as_view(), name='admin-users-list-create'),
+    path('users/<int:pk>/deactivate/', AdminUserDeactivateAPIView.as_view(), name='admin-users-deactivate'),
+    path('users/<int:pk>/reactivate/', AdminUserReactivateAPIView.as_view(), name='admin-users-reactivate'),
+    path('users/<int:pk>/', AdminUserDetailAPIView.as_view(), name='admin-users-detail'),
+    path('reports/cart-abandonment/', AdminCartAbandonmentReportAPIView.as_view(), name='admin-reports-cart-abandonment'),
+    path('reports/refunds/', AdminRefundsReportAPIView.as_view(), name='admin-reports-refunds'),
+    path('reports/export/excel/', AdminReportExcelExportAPIView.as_view(), name='admin-reports-export-excel'),
+    path('reports/export/pdf/', AdminReportPdfExportAPIView.as_view(), name='admin-reports-export-pdf'),
 ]

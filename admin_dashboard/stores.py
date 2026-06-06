@@ -21,6 +21,7 @@ def _admin_stores_queryset():
 class AdminStoreListSerializer(serializers.ModelSerializer):
     store_id = serializers.IntegerField(source="id", read_only=True)
     is_visible = serializers.BooleanField(source="is_active", read_only=True)
+    products_count = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Store
