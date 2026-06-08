@@ -138,3 +138,149 @@ def create_geidea_session(order):
         order.pk, merchant_ref, session_id,
     )
     return session_id
+
+
+def fetch_geidea_orders_by_merchant_ref(merchant_ref):
+    """
+    Fetch all Geidea orders for a given merchantReferenceId.
+
+    Geidea returns an ARRAY — multiple entries exist when the user retried
+    payment (each retry = new Geidea order under the same merchantReferenceId).
+
+    Args:
+        merchant_ref: The UUID stored in order.geidea_merchant_ref
+
+    Returns:
+        list: List of order dicts from Geidea. Empty list on failure.
+    """
+    try:
+        response = requests.get(
+            settings.GEIDEA_FETCH_URL,
+            params={"MerchantReferenceId": str(merchant_ref)},
+            auth=(settings.GEIDEA_PUBLIC_KEY, settings.GEIDEA_API_PASSWORD),
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get("orders", [])
+
+    except requests.exceptions.Timeout:
+        logger.error(
+            "Geidea fetch by merchant ref timed out. merchant_ref=%s", merchant_ref
+        )
+        return []
+
+    except requests.exceptions.RequestException as exc:
+        logger.error(
+            "Geidea fetch by merchant ref failed. merchant_ref=%s error=%s",
+            merchant_ref, exc,
+        )
+        return []
+
+    except ValueError:
+        logger.error(
+            "Geidea fetch by merchant ref returned invalid JSON. merchant_ref=%s",
+            merchant_ref,
+        )
+        return []
+
+
+def reconcile_or_cancel_stale_order(order):
+    """
+    Called by the APScheduler stale order cleanup job.
+
+    Checks Geidea for payment status of a stale PENDING order and either:
+    - Reconciles it as PAID if Geidea has a successful payment (missed callback)
+    - Cancels it if Geidea has no successful payment
+
+    Args:
+        order: A stale Order instance (payment_gateway, PENDING, >2hrs old)
+    """
+    from decimal import Decimal
+    from django.db import transaction as db_transaction
+    from shop.services.account_credit import credit_user_for_prepaid_order
+    from shop.services.zoho_books_payment import maybe_create_zoho_books_advance_payment_for_order
+
+    logger.info(
+        "Stale order cleanup — checking order. order_pk=%s zoho_so=%s",
+        order.pk, order.zoho_books_salesorder_id,
+    )
+
+    # If initiate was never called, there is nothing to check on Geidea's side
+    if not order.geidea_merchant_ref:
+        logger.info(
+            "Stale order cleanup — no geidea_merchant_ref, cancelling. order_pk=%s",
+            order.pk,
+        )
+        _cancel_stale_order(order)
+        return
+
+    orders_list = fetch_geidea_orders_by_merchant_ref(order.geidea_merchant_ref)
+
+    paid_entry = next(
+        (o for o in orders_list
+         if o.get("status") == "Success" and o.get("detailedStatus") == "Paid"),
+        None
+    )
+
+    if paid_entry:
+        # Missed callback — reconcile
+        logger.warning(
+            "Stale order cleanup — missed callback detected. "
+            "order_pk=%s geidea_order_id=%s Reconciling.",
+            order.pk, paid_entry.get("orderId"),
+        )
+        try:
+            with db_transaction.atomic():
+                order = Order.objects.select_for_update().get(pk=order.pk)
+                if order.payment_status != Order.PaymentStatus.PAID:
+                    credit_user_for_prepaid_order(
+                        order,
+                        amount=Decimal(str(paid_entry["totalAmount"])),
+                        gateway_reference=paid_entry["orderId"],
+                    )
+            maybe_create_zoho_books_advance_payment_for_order(order)
+        except Exception as exc:
+            logger.critical(
+                "Stale order cleanup — reconciliation failed. order_pk=%s error=%s",
+                order.pk, exc,
+            )
+
+    else:
+        # No successful payment found — cancel
+        all_failed = all(
+            o.get("status") != "Success"
+            for o in orders_list
+        ) if orders_list else True
+
+        if all_failed:
+            logger.info(
+                "Stale order cleanup — no successful payment found, cancelling. "
+                "order_pk=%s geidea_entries=%d",
+                order.pk, len(orders_list),
+            )
+            _cancel_stale_order(order)
+
+
+def _cancel_stale_order(order):
+    """Cancel a stale order and void its Zoho Sales Order."""
+    from shop.services.order_sync_state import apply_order_sync_transition
+    from shop.services.zoho_books_sales_order import void_zoho_books_sales_order_for_order
+
+    try:
+        apply_order_sync_transition(order, Order.Status.CANCELLED)
+    except Exception as exc:
+        logger.error(
+            "Stale order cleanup — cancellation failed. order_pk=%s error=%s",
+            order.pk, exc,
+        )
+        return  # Don't try to void Zoho if status transition failed
+
+    try:
+        void_zoho_books_sales_order_for_order(order)
+    except Exception as exc:
+        logger.error(
+            "Stale order cleanup — Zoho void failed (order already cancelled). "
+            "order_pk=%s error=%s",
+            order.pk, exc,
+        )

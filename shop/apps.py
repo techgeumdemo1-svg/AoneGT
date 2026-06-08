@@ -8,3 +8,7 @@ class ShopConfig(AppConfig):
 
     def ready(self):
         import shop.signals  # noqa: F401
+
+        from shop.scheduler import start_geidea_cleanup_scheduler
+
+        start_geidea_cleanup_scheduler()

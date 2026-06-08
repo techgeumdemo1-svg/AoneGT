@@ -1,4 +1,5 @@
 .otp_purge_scheduler.lock
+.geidea_cleanup_scheduler.lock
 
 __pycache__/
 *.pyc

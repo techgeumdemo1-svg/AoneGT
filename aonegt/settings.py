@@ -281,6 +281,7 @@ GEIDEA_PUBLIC_KEY   = os.environ.get('GEIDEA_PUBLIC_KEY', '')
 GEIDEA_API_PASSWORD = os.environ.get('GEIDEA_API_PASSWORD', '')
 GEIDEA_SESSION_URL  = os.environ.get('GEIDEA_SESSION_URL', '')
 GEIDEA_CALLBACK_URL = os.environ.get('GEIDEA_CALLBACK_URL', '')
+GEIDEA_FETCH_URL    = os.environ.get('GEIDEA_FETCH_URL', '')
 # ─────────────────────────────────────────────────────────────────────────
 
 SIMPLE_JWT = {

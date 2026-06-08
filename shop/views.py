@@ -1,3 +1,4 @@
+import logging
 import secrets
 import string
 from decimal import Decimal
@@ -52,7 +53,7 @@ from .models import (
     WishlistItem,
 )
 from .services.zoho_commerce import ZohoCommerceError, ZohoCommerceService
-from .services.geidea import GeideaSessionError, create_geidea_session
+from .services.geidea import GeideaSessionError, create_geidea_session, fetch_geidea_orders_by_merchant_ref
 from .services.geidea_callback import process_geidea_callback
 from offer.models import Coupon
 from offer.services import (
@@ -2890,3 +2891,81 @@ class GeideaCallbackView(APIView):
 
         http_status, message = process_geidea_callback(payload)
         return Response({"message": message}, status=http_status)
+
+
+logger = logging.getLogger(__name__)
+
+
+class GeideaStatusView(APIView):
+    """
+    GET /api/shop/geidea/status/?order_id=<pk>
+
+    Manual fallback called by frontend if polling times out.
+    Fetches the order status directly from Geidea and reconciles
+    if payment succeeded but callback was missed.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        order_id = request.query_params.get('order_id')
+        if not order_id:
+            return Response(
+                {'error': 'order_id is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            order = Order.objects.get(pk=order_id, user=request.user)
+        except Order.DoesNotExist:
+            return Response(
+                {'error': 'Order not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Already paid — no need to check Geidea
+        if order.payment_status == Order.PaymentStatus.PAID:
+            return Response({'status': 'paid'})
+
+        # No Geidea merchant ref means initiate was never called successfully
+        if not order.geidea_merchant_ref:
+            return Response({'status': 'pending'})
+
+        # Fetch from Geidea
+        orders_list = fetch_geidea_orders_by_merchant_ref(order.geidea_merchant_ref)
+
+        paid_entry = next(
+            (o for o in orders_list
+             if o.get("status") == "Success" and o.get("detailedStatus") == "Paid"),
+            None
+        )
+
+        if paid_entry:
+            # Callback was missed — reconcile manually
+            from shop.services.account_credit import credit_user_for_prepaid_order
+            from shop.services.zoho_books_payment import maybe_create_zoho_books_advance_payment_for_order
+
+            logger.warning(
+                "GeideaStatusView — missed callback detected. "
+                "order_pk=%s geidea_order_id=%s Reconciling manually.",
+                order.pk, paid_entry.get("orderId"),
+            )
+            try:
+                with transaction.atomic():
+                    order = Order.objects.select_for_update().get(pk=order.pk)
+                    if order.payment_status != Order.PaymentStatus.PAID:
+                        credit_user_for_prepaid_order(
+                            order,
+                            amount=Decimal(str(paid_entry["totalAmount"])),
+                            gateway_reference=paid_entry["orderId"],
+                        )
+                maybe_create_zoho_books_advance_payment_for_order(order)
+            except Exception as exc:
+                logger.error(
+                    "GeideaStatusView — reconciliation failed. order_pk=%s error=%s",
+                    order.pk, exc,
+                )
+                return Response({'status': 'pending'})
+
+            return Response({'status': 'paid'})
+
+        return Response({'status': 'pending'})
