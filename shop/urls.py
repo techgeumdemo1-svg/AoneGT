@@ -35,6 +35,9 @@ from .views import (
     ZohoProductListAPIView,
     ZohoProductDetailAPIView,
     ZohoProductImageProxyAPIView,
+    GeideaInitiateView,
+    GeideaCallbackView,
+    GeideaStatusView,
 )
 
 urlpatterns = [
@@ -86,5 +89,9 @@ urlpatterns = [
     ),
     path('admin/delivery-zones/', DeliveryZoneListCreateAPIView.as_view()),
     path('admin/delivery-zones/<int:pk>/', DeliveryZoneDetailAPIView.as_view()),
+
+    path('geidea/initiate/', GeideaInitiateView.as_view(), name='geidea-initiate'),
+    path('geidea/callback/', GeideaCallbackView.as_view(), name='geidea-callback'),
+    path('geidea/status/', GeideaStatusView.as_view(), name='geidea-status'),
 
 ]

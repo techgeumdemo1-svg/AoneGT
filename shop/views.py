@@ -1,3 +1,4 @@
+import logging
 import secrets
 import string
 from decimal import Decimal
@@ -52,6 +53,8 @@ from .models import (
     WishlistItem,
 )
 from .services.zoho_commerce import ZohoCommerceError, ZohoCommerceService
+from .services.geidea import GeideaSessionError, create_geidea_session, fetch_geidea_orders_by_merchant_ref
+from .services.geidea_callback import process_geidea_callback
 from offer.models import Coupon
 from offer.services import (
     _as_decimal,
@@ -1512,14 +1515,21 @@ class CheckoutAPIView(APIView):
                 uearn.save(update_fields=['points_balance'])
 
             from shop.services.account_credit import credit_user_for_prepaid_order, get_user_credit_balance
-            from shop.services.zoho_books_payment import is_prepaid_at_checkout_payment_method
 
             gateway_reference = (ser.validated_data.get('gateway_reference') or '').strip()
             if gateway_reference:
                 order.gateway_reference = gateway_reference[:255]
                 order.save(update_fields=['gateway_reference', 'updated_at'])
 
-            if is_prepaid_at_checkout_payment_method(order.payment_method):
+            # payment_gateway: DO NOT credit user at checkout.
+            # Credit is applied in the Geidea callback view when Geidea confirms
+            # payment (Phase 3). payment_success is always False here for
+            # payment_gateway so this block would never execute anyway, but
+            # the explicit check makes the intent unambiguous and safe.
+            #
+            # pay_by_link: unchanged — credit user immediately when
+            # payment_success=True is sent at checkout.
+            if order.payment_method == Order.PaymentMethod.PAY_BY_LINK:
                 if ser.validated_data.get('payment_success'):
                     pay_amount = ser.validated_data.get('payment_amount')
                     if pay_amount is not None and pay_amount != final_total:
@@ -1538,8 +1548,15 @@ class CheckoutAPIView(APIView):
 
         if getattr(settings, 'ZOHO_BOOKS_MANUAL_WORKFLOW', False):
             maybe_create_zoho_books_sales_order_for_order(order.pk, trigger='placed')
-            from shop.services.zoho_books_payment import maybe_create_zoho_books_advance_payment_for_order
-            maybe_create_zoho_books_advance_payment_for_order(order)
+            # payment_gateway: advance payment is created by the Geidea callback (Phase 3)
+            # after Geidea confirms the payment. DO NOT create it here — the user has
+            # not paid yet at this point in the flow.
+            #
+            # pay_by_link: payment_success=True was already confirmed and
+            # credit_user_for_prepaid_order() was called above, so create it now.
+            if order.payment_method != Order.PaymentMethod.PAYMENT_GATEWAY:
+                from shop.services.zoho_books_payment import maybe_create_zoho_books_advance_payment_for_order
+                maybe_create_zoho_books_advance_payment_for_order(order)
         else:
             maybe_create_zoho_sales_order_for_order(order.pk)
 
@@ -2770,3 +2787,185 @@ class NotificationDetailAPIView(APIView):
             n.read_at = timezone.now()
             n.save(update_fields=['read_at'])
         return Response(UserNotificationSerializer(n).data)
+
+
+class GeideaInitiateView(APIView):
+    """
+    POST /api/shop/geidea/initiate/
+    Body: { "order_id": <int> }
+
+    Creates a Geidea payment session server-to-server and returns the session_id
+    to the frontend. The frontend uses it to launch the Geidea hosted payment page.
+
+    Session expires in 15 minutes — frontend must call startPayment() immediately.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        order_id = request.data.get('order_id')
+        if not order_id:
+            return Response(
+                {'error': 'order_id is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Fetch the order and verify it belongs to the requesting user.
+        # Using user=request.user means even a valid JWT cannot access another
+        # user's order — it returns 404 rather than 403 so the order's existence
+        # is not revealed.
+        try:
+            order = Order.objects.get(pk=order_id, user=request.user)
+        except Order.DoesNotExist:
+            return Response(
+                {'error': 'Order not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Guard: only payment_gateway orders go through this flow.
+        # cash_on_delivery, card_on_delivery, and pay_by_link must never
+        # reach this endpoint.
+        if order.payment_method != Order.PaymentMethod.PAYMENT_GATEWAY:
+            return Response(
+                {'error': 'This order does not use the payment gateway.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Guard: order must still be in a payable state.
+        if order.payment_status == Order.PaymentStatus.PAID:
+            return Response(
+                {'error': 'Order already paid.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Note: PaymentStatus has no CANCELLED constant; cancellation is tracked
+        # on Order.Status. Check order.status instead.
+        if order.status == Order.Status.CANCELLED:
+            return Response(
+                {'error': 'Order cancelled.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Guard: Zoho Sales Order must exist.
+        # zoho_books_salesorder_id is the merchantReferenceId sent to Geidea.
+        # If it is null, the Zoho sync from Phase 1 failed and the frontend
+        # should offer a retry button that calls this endpoint again.
+        if not order.zoho_books_salesorder_id:
+            return Response(
+                {'error': 'Order saved, payment cannot start — Zoho sync pending.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Create the Geidea session server-to-server.
+        try:
+            session_id = create_geidea_session(order)
+        except GeideaSessionError as exc:
+            return Response(
+                {'error': str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response(
+            {'session_id': session_id},
+            status=status.HTTP_200_OK,
+        )
+
+
+class GeideaCallbackView(APIView):
+    """
+    POST /api/shop/geidea/callback/
+    Open endpoint — no JWT auth. Secured by HMAC signature only.
+
+    Geidea POSTs payment results here after the user completes or
+    abandons payment on the HPP. This is the authoritative payment confirmation.
+
+    Always returns HTTP 200 to Geidea except on signature mismatch (400).
+    Geidea retries on non-200 — returning 200 on failures prevents retry loops.
+    """
+    permission_classes = []   # No auth — open endpoint
+    authentication_classes = []  # No JWT parsing
+
+    def post(self, request):
+        try:
+            payload = request.data
+        except Exception:
+            return Response({"message": "Invalid payload"}, status=400)
+
+        http_status, message = process_geidea_callback(payload)
+        return Response({"message": message}, status=http_status)
+
+
+logger = logging.getLogger(__name__)
+
+
+class GeideaStatusView(APIView):
+    """
+    GET /api/shop/geidea/status/?order_id=<pk>
+
+    Manual fallback called by frontend if polling times out.
+    Fetches the order status directly from Geidea and reconciles
+    if payment succeeded but callback was missed.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        order_id = request.query_params.get('order_id')
+        if not order_id:
+            return Response(
+                {'error': 'order_id is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            order = Order.objects.get(pk=order_id, user=request.user)
+        except Order.DoesNotExist:
+            return Response(
+                {'error': 'Order not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Already paid — no need to check Geidea
+        if order.payment_status == Order.PaymentStatus.PAID:
+            return Response({'status': 'paid'})
+
+        # No Geidea merchant ref means initiate was never called successfully
+        if not order.geidea_merchant_ref:
+            return Response({'status': 'pending'})
+
+        # Fetch from Geidea
+        orders_list = fetch_geidea_orders_by_merchant_ref(order.geidea_merchant_ref)
+
+        paid_entry = next(
+            (o for o in orders_list
+             if o.get("status") == "Success" and o.get("detailedStatus") == "Paid"),
+            None
+        )
+
+        if paid_entry:
+            # Callback was missed — reconcile manually
+            from shop.services.account_credit import credit_user_for_prepaid_order
+            from shop.services.zoho_books_payment import maybe_create_zoho_books_advance_payment_for_order
+
+            logger.warning(
+                "GeideaStatusView — missed callback detected. "
+                "order_pk=%s geidea_order_id=%s Reconciling manually.",
+                order.pk, paid_entry.get("orderId"),
+            )
+            try:
+                with transaction.atomic():
+                    order = Order.objects.select_for_update().get(pk=order.pk)
+                    if order.payment_status != Order.PaymentStatus.PAID:
+                        credit_user_for_prepaid_order(
+                            order,
+                            amount=Decimal(str(paid_entry["totalAmount"])),
+                            gateway_reference=paid_entry["orderId"],
+                        )
+                maybe_create_zoho_books_advance_payment_for_order(order)
+            except Exception as exc:
+                logger.error(
+                    "GeideaStatusView — reconciliation failed. order_pk=%s error=%s",
+                    order.pk, exc,
+                )
+                return Response({'status': 'pending'})
+
+            return Response({'status': 'paid'})
+
+        return Response({'status': 'pending'})

@@ -142,6 +142,11 @@ class Order(models.Model):
         blank=True,
         help_text='Payment gateway or pay-by-link transaction reference.',
     )
+    geidea_merchant_ref = models.UUIDField(
+        null=True,
+        blank=True,
+        help_text='UUID sent to Geidea as merchantReferenceId. Generated on first payment initiation.',
+    )
     prepaid_credited_amount = models.DecimalField(
         max_digits=12,
         decimal_places=2,

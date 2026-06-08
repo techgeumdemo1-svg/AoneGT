@@ -117,6 +117,7 @@ AoneGT/
 ├── shop/                     ← Cart, Orders, Wishlist, Notifications, FCM
 │   ├── admin.py
 │   ├── apps.py               ← Imports shop.signals on ready()
+│   ├── api_delivery_zones.py ← Delivery zone API views
 │   ├── models.py             ← UserAddress, Cart, CartItem, WishlistItem,
 │   │                             Order, OrderItem, OrderReturn, OrderReturnLine,
 │   │                             AccountCreditLedger, LoyaltyIssuedCoupon,
@@ -130,6 +131,8 @@ AoneGT/
 │       ├── __init__.py
 │       ├── account_credit.py        ← Account credit (prepaid AED) ledger helpers
 │       ├── cart_zoho.py             ← Cart add from Zoho account
+│       ├── delivery_zones.py        ← Delivery zone fee calculators
+│       ├── geidea.py                ← Geidea payment session service
 │       ├── notifications.py         ← create_user_notification()
 │       ├── order_email.py           ← Out-for-delivery email trigger
 │       ├── order_sync_state.py      ← Order status/sync helpers
@@ -269,6 +272,15 @@ All environment variables are read via `os.environ` or `django.conf.settings`. T
 |---|---|
 | `SUPERUSER_API_SECRET` | Secret header value for `POST /api/superuser/create-superuser/` |
 
+### 4.11 Geidea Payment Gateway
+
+| Variable | Description |
+|---|---|
+| `GEIDEA_PUBLIC_KEY` | Public key for Geidea integration (UAE environment) |
+| `GEIDEA_API_PASSWORD` | API Password / Secret for signature generation and basic auth |
+| `GEIDEA_SESSION_URL` | Direct session creation API URL (UAE endpoint) |
+| `GEIDEA_CALLBACK_URL` | Webhook URL where Geidea POSTs payment status callbacks |
+
 ---
 
 ## 5. Core Django Configuration (`aonegt/`)
@@ -323,6 +335,8 @@ REST_FRAMEWORK = {
 **Static Files:** `whitenoise.middleware.WhiteNoiseMiddleware` in middleware. `STATIC_ROOT` configured.
 
 **Firebase Initialization:** On settings load, if `FIREBASE_CREDENTIALS_JSON` env is set, parses JSON and calls `firebase_admin.initialize_app(credentials.Certificate(creds_dict))`. This initializes the FCM SDK globally.
+
+**Geidea Payment Gateway:** Loads `GEIDEA_PUBLIC_KEY`, `GEIDEA_API_PASSWORD`, `GEIDEA_SESSION_URL`, and `GEIDEA_CALLBACK_URL` from the environment for server-to-server operations.
 
 ---
 
@@ -1793,7 +1807,24 @@ Key function: `mark_order_synced(order_id, zoho_salesorder_id) -> None`
 
 ---
 
-### 8.20 `shop/urls.py`
+### 8.20 `shop/services/geidea.py`
+
+**Purpose:** Call the Geidea Create Session API server-to-server and return the session ID.
+
+**Exception:** `GeideaSessionError` — Raised when session creation fails due to API timeout, non-success response codes, or malformed JSON.
+
+**Functions:**
+- `create_geidea_session(order) -> str`:
+  - Uses `order.zoho_books_salesorder_id` as the `merchantReferenceId` sent to Geidea.
+  - Computes an HMAC-SHA256 signature using the `GEIDEA_API_PASSWORD` key and base64-encodes it.
+  - Concatenation format for signature: `PublicKey + amount(2dp) + Currency + merchantReferenceId + timestamp`
+  - Sends a POST request to `settings.GEIDEA_SESSION_URL` with basic auth (`GEIDEA_PUBLIC_KEY`, `GEIDEA_API_PASSWORD`).
+  - Expects `responseCode` and `detailedResponseCode` to be `"000"`.
+  - Extracts and returns `session_id` from `response_data["session"]["id"]`.
+
+---
+
+### 8.21 `shop/urls.py`
 
 ```python
 urlpatterns = [
@@ -1837,6 +1868,9 @@ urlpatterns = [
     path('zoho-products/', ZohoProductListAPIView),
     path('zoho-products/<str:product_id>/', ZohoProductDetailAPIView),
     path('zoho-products/<str:product_id>/image/', ZohoProductImageProxyAPIView),
+    path('admin/delivery-zones/', DeliveryZoneListCreateAPIView),
+    path('admin/delivery-zones/<int:pk>/', DeliveryZoneDetailAPIView),
+    path('geidea/initiate/', GeideaInitiateView),
 ]
 ```
 
@@ -2300,6 +2334,29 @@ For each Store:
           → Send FCM push to all active device tokens
 ```
 
+### 12.6 Geidea Payment Flow
+
+```
+Phase 1 — Order Placement (Checkout):
+Client POST /api/shop/orders/checkout/ {store_id, payment_method='payment_gateway', ...}
+  → CheckoutSerializer.validate()
+      → No payment_success or gateway_reference required at checkout stage.
+  → Create local Order (status='pending_zoho_sync', payment_status='pending', total)
+  → maybe_create_zoho_books_sales_order_for_order(order_id)
+      → Creates Sales Order in Zoho Books
+      → Stores zoho_books_salesorder_id on Order
+  → Return OrderSerializer data
+
+Phase 2 — Initiate Geidea Session:
+Client POST /api/shop/geidea/initiate/ {order_id}
+  → Verify order belongs to requesting user, status is not CANCELLED, payment_status is not PAID.
+  → Guard: zoho_books_salesorder_id must be populated (if not, return 400 for retry).
+  → create_geidea_session(order) [shop.services.geidea]
+      → Call Geidea Create Session API server-to-server (amount, currency, merchantReferenceId=zoho_books_salesorder_id)
+      → Return session_id to frontend
+  → Frontend launches Geidea hosted payment page (HPP) using session_id
+```
+
 ---
 
 ## 13. API Endpoint Reference (Complete)
@@ -2361,6 +2418,7 @@ For each Store:
 | POST | `/api/shop/cart/clear/` | JWT | Clear cart |
 | POST | `/api/shop/cart/items/` | JWT | Add/update cart item |
 | POST | `/api/shop/orders/checkout/` | JWT | Create order from cart |
+| POST | `/api/shop/geidea/initiate/` | JWT | Initiate Geidea payment session |
 | GET | `/api/shop/rewards/points/` | JWT | Loyalty points balance |
 | POST | `/api/shop/rewards/issue-coupon/` | JWT | Issue loyalty coupon (spend points) |
 | GET | `/api/shop/orders/return-flow/` | JWT | Return flow UI metadata |
@@ -2613,7 +2671,9 @@ Order created locally (shop.Order)
 
 9. **Return eligibility gate:** Returns require `order.status == SYNCED` OR `customer_tracking_stage == delivered`. Business logic enforced in both serializer and view.
 
-10. **Prepaid flow (payment_gateway / pay_by_link):** Client must complete payment externally, then send `payment_success=True + gateway_reference` at checkout. Server validates this and credits `UserCreditBalance` with the paid amount, then deducts when creating the Zoho Books invoice.
+10. **Prepaid flow (payment_gateway / pay_by_link):**
+    - For `pay_by_link`: Client must complete payment externally, then send `payment_success=True + gateway_reference` at checkout. Server validates this and credits `UserCreditBalance` with the paid amount, then deducts when creating the Zoho Books invoice.
+    - For `payment_gateway` (Geidea): Checkout does not require payment success. Order is created in `pending_zoho_sync` status, synced to Zoho Books to obtain `zoho_books_salesorder_id`, and then a Geidea session is initiated via `/api/shop/geidea/initiate/` using the Zoho Books Sales Order ID as `merchantReferenceId`. The payment is confirmed later via callback or status polling.
 
 ### 19.2 Feature Flags
 
@@ -2638,14 +2698,11 @@ Order created locally (shop.Order)
 
 ---
 
-## Auto Sync Update — 2026-05-30
+## Auto Sync Update — 2026-06-06 (INSTRUCTION.md Re-run)
 
 The following files were detected as created or modified in the current session and are recorded here verbatim to keep PROJECT_TRUTH.md in sync with the workspace (migration files are intentionally excluded from this list).
 
 Files changed:
-- `offer/views.py` (modified)
-- `shop/admin.py` (modified)
-- `shop/models.py` (modified)
 - `shop/serializers.py` (modified)
 - `shop/urls.py` (modified)
 - `shop/views.py` (modified)
@@ -3226,3 +3283,164 @@ PROJECT_TRUTH sync status for this run:
 📝 Files changed: [offer/serializers.py, offer/views.py, shop/admin.py, shop/models.py, shop/serializers.py, shop/services/zoho_books_invoice.py, shop/services/zoho_books_sales_order.py, shop/urls.py, shop/views.py, shop/api_delivery_zones.py, shop/services/delivery_zones.py]
 🔄 Sections updated: [Auto Sync Update — 2026-05-30 (INSTRUCTION.md Re-run)]
 
+---
+
+## Auto Sync Update — 2026-06-06 (INSTRUCTION.md Re-run)
+
+Detected changed `.py` files (excluding migrations) in current workspace state:
+
+- `aonegt/settings.py` (modified)
+- `shop/urls.py` (modified)
+- `shop/views.py` (modified)
+- `shop/services/geidea.py` (created)
+
+PROJECT_TRUTH sync status for this run:
+
+- Reconciled file-change detection against repository state.
+- Documented Geidea Payment Gateway integration variables, views, endpoints, and services.
+- Added `shop/services/geidea.py` full source code.
+
+### `shop/services/geidea.py` — Full Source Code
+
+```python
+import base64
+import hashlib
+import hmac
+import logging
+from datetime import datetime
+
+import requests
+from django.conf import settings
+
+logger = logging.getLogger(__name__)
+
+
+class GeideaSessionError(Exception):
+    """Raised when Geidea session creation fails for any reason."""
+    pass
+
+
+def create_geidea_session(order):
+    """
+    Call the Geidea Create Session API server-to-server and return the session_id.
+
+    Uses order.zoho_books_salesorder_id as merchantReferenceId so every Geidea
+    transaction is directly traceable to the Zoho Books Sales Order — which
+    matters for refunds and reconciliation.
+
+    Args:
+        order: A fully saved Order instance with zoho_books_salesorder_id populated.
+
+    Returns:
+        str: The session_id from Geidea (response["session"]["id"]).
+
+    Raises:
+        GeideaSessionError: If the API call fails, times out, returns a
+                            non-success response code, or returns malformed JSON.
+    """
+    merchant_ref = order.zoho_books_salesorder_id
+    amount_str   = f"{float(order.total):.2f}"
+    currency     = order.currency
+
+    # Timestamp format confirmed from Geidea PHP sample: Y/m/d H:i:s
+    timestamp = datetime.utcnow().strftime("%Y/%m/%d %H:%M:%S")
+
+    # Signature: HMAC-SHA256, Base64-encoded.
+    # Concatenation order: PublicKey + amount(2dp) + Currency + merchantReferenceId + timestamp
+    concat = f"{settings.GEIDEA_PUBLIC_KEY}{amount_str}{currency}{merchant_ref}{timestamp}"
+    signature = base64.b64encode(
+        hmac.new(
+            key=settings.GEIDEA_API_PASSWORD.encode('utf-8'),
+            msg=concat.encode('utf-8'),
+            digestmod=hashlib.sha256,
+        ).digest()
+    ).decode('utf-8')
+
+    payload = {
+        "amount":              round(float(order.total), 2),
+        "currency":            currency,
+        "timestamp":           timestamp,
+        "merchantReferenceId": merchant_ref,
+        "signature":           signature,
+        "paymentOperation":    "Pay",
+        "callbackUrl":         settings.GEIDEA_CALLBACK_URL,
+        "language":            "en",
+    }
+
+    # --- Make the HTTP request ---
+    try:
+        response = requests.post(
+            settings.GEIDEA_SESSION_URL,
+            json=payload,
+            auth=(settings.GEIDEA_PUBLIC_KEY, settings.GEIDEA_API_PASSWORD),
+            timeout=30,
+        )
+        response.raise_for_status()
+
+    except requests.exceptions.Timeout:
+        logger.error(
+            "Geidea session creation timed out. order_pk=%s zoho_so=%s",
+            order.pk, merchant_ref,
+        )
+        raise GeideaSessionError("Payment initiation timed out, please retry.")
+
+    except requests.exceptions.RequestException as exc:
+        logger.error(
+            "Geidea session creation request failed. order_pk=%s zoho_so=%s error=%s",
+            order.pk, merchant_ref, exc,
+        )
+        raise GeideaSessionError("Payment initiation failed, please retry.")
+
+    # --- Parse response body ---
+    # Kept in a separate try-except because response.json() can fail independently
+    # of the HTTP request succeeding (e.g. Geidea returns malformed JSON).
+    try:
+        response_data = response.json()
+    except ValueError:
+        logger.error(
+            "Geidea session response was not valid JSON. "
+            "order_pk=%s zoho_so=%s status_code=%s body=%s",
+            order.pk, merchant_ref, response.status_code, response.text,
+        )
+        raise GeideaSessionError("Payment initiation failed, please retry.")
+
+    # --- Validate response codes ---
+    # Both responseCode and detailedResponseCode must be "000" for a valid session.
+    if (response_data.get("responseCode") != "000"
+            or response_data.get("detailedResponseCode") != "000"):
+        logger.error(
+            "Geidea session creation returned non-success codes. "
+            "order_pk=%s zoho_so=%s responseCode=%s detailedResponseCode=%s",
+            order.pk,
+            merchant_ref,
+            response_data.get("responseCode"),
+            response_data.get("detailedResponseCode"),
+        )
+        raise GeideaSessionError("Payment initiation failed, please retry.")
+
+    # --- Extract session ID ---
+    # session.id is nested inside a "session" object — NOT a top-level session_id key.
+    try:
+        session_id = response_data["session"]["id"]
+    except (KeyError, TypeError):
+        logger.error(
+            "Geidea session response missing session.id. "
+            "order_pk=%s zoho_so=%s response=%s",
+            order.pk, merchant_ref, response_data,
+        )
+        raise GeideaSessionError("Payment initiation failed, please retry.")
+
+    logger.info(
+        "Geidea session created successfully. order_pk=%s zoho_so=%s session_id=%s",
+        order.pk, merchant_ref, session_id,
+    )
+    return session_id
+```
+
+### `shop/views.py` — Note
+
+`GeideaInitiateView` view was added to initiate the payment sessions server-to-server using Geidea's APIs and check validity (user ownership, payable status, cancellation state, and existence of Zoho Books Sales Order).
+
+✅ PROJECT_TRUTH.md updated
+📝 Files changed: [aonegt/settings.py, shop/urls.py, shop/views.py, shop/services/geidea.py]
+🔄 Sections updated: [Directory Tree, Environment Variables & Configuration, Core Django Configuration, App: shop, Cross-App Data Flow & Integration Patterns, API Endpoint Reference, Project Status & Known Patterns, Auto Sync Update — 2026-06-06 (INSTRUCTION.md Re-run)]
