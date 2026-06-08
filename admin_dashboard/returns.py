@@ -18,6 +18,8 @@ from shop.services.account_credit import get_user_credit_balance
 from shop.services.notifications import create_user_notification
 from shop.services.zoho_returns import enqueue_push_return_to_zoho
 
+from .activity_log_utils import record_admin_activity
+from .models import AdminActivityLog
 from .orders import _paginate_queryset, _parse_order_list_date
 from .views import IsStaffUser
 
@@ -377,6 +379,15 @@ class AdminReturnApproveAPIView(AdminReturnDetailAPIViewMixin, APIView):
         )
 
         ret = _reload_admin_return(pk)
+        record_admin_activity(
+            request,
+            category=AdminActivityLog.Category.RETURNS,
+            action="return.approved",
+            message=f"Approved return #{ret.pk} for order #{ret.order_id}.",
+            target_type="return",
+            target_id=ret.pk,
+            metadata={"order_id": ret.order_id},
+        )
         return Response(
             {
                 "message": "Return approved.",
@@ -430,6 +441,15 @@ class AdminReturnRejectAPIView(AdminReturnDetailAPIViewMixin, APIView):
         )
 
         ret = _reload_admin_return(pk)
+        record_admin_activity(
+            request,
+            category=AdminActivityLog.Category.RETURNS,
+            action="return.rejected",
+            message=f"Rejected return #{ret.pk} for order #{ret.order_id}.",
+            target_type="return",
+            target_id=ret.pk,
+            metadata={"order_id": ret.order_id},
+        )
         return Response(
             {
                 "message": "Return rejected.",
@@ -531,6 +551,18 @@ class AdminReturnRefundAPIView(AdminReturnDetailAPIViewMixin, APIView):
         )
 
         ret = _reload_admin_return(pk)
+        record_admin_activity(
+            request,
+            category=AdminActivityLog.Category.RETURNS,
+            action="return.refunded",
+            message=f"Refunded return #{ret.pk} with {refund_amount} AED.",
+            target_type="return",
+            target_id=ret.pk,
+            metadata={
+                "order_id": ret.order_id,
+                "refund_amount": str(refund_amount),
+            },
+        )
         return Response(
             {
                 "message": "Return refunded and credited to customer account.",

@@ -8,6 +8,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from .activity_log_utils import record_admin_activity
+from .models import AdminActivityLog
 from .orders import _paginate_queryset
 from .views import IsStaffUser
 
@@ -191,6 +193,14 @@ class AdminUserListCreateAPIView(APIView):
         serializer = AdminUserCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
+        record_admin_activity(
+            request,
+            category=AdminActivityLog.Category.USERS,
+            action="user.created",
+            message=f"Created admin user #{user.pk} ({user.email}).",
+            target_type="user",
+            target_id=user.pk,
+        )
         return Response(
             {
                 "message": "Admin user created.",
@@ -221,6 +231,15 @@ class AdminUserDetailAPIView(APIView):
 
         serializer.update(user, serializer.validated_data)
         user.refresh_from_db()
+        record_admin_activity(
+            request,
+            category=AdminActivityLog.Category.USERS,
+            action="user.updated",
+            message=f"Updated admin user #{user.pk} ({user.email}).",
+            target_type="user",
+            target_id=user.pk,
+            metadata={"fields": sorted(serializer.validated_data.keys())},
+        )
         return Response(
             {
                 "message": "Admin user updated.",
@@ -252,6 +271,14 @@ class AdminUserDeactivateAPIView(APIView):
             )
         user.is_active = False
         user.save(update_fields=["is_active"])
+        record_admin_activity(
+            request,
+            category=AdminActivityLog.Category.USERS,
+            action="user.deactivated",
+            message=f"Deactivated admin user #{user.pk} ({user.email}).",
+            target_type="user",
+            target_id=user.pk,
+        )
         return Response(
             {
                 "message": "Admin user deactivated.",
@@ -280,6 +307,14 @@ class AdminUserReactivateAPIView(APIView):
             )
         user.is_active = True
         user.save(update_fields=["is_active"])
+        record_admin_activity(
+            request,
+            category=AdminActivityLog.Category.USERS,
+            action="user.reactivated",
+            message=f"Reactivated admin user #{user.pk} ({user.email}).",
+            target_type="user",
+            target_id=user.pk,
+        )
         return Response(
             {
                 "message": "Admin user reactivated.",

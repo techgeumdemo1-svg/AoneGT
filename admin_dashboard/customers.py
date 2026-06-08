@@ -8,11 +8,12 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from shop.loyalty import point_value_aed
-from shop.models import LoyaltyIssuedCoupon, Order, PurchasePointsLedger
-from shop.serializers import order_code_for_order
+from shop.models import Order
 
+from .activity_log_utils import record_admin_activity
+from .models import AdminActivityLog
 from .orders import AdminOrderListSerializer, _paginate_queryset
+from .super_coins import build_customer_super_coins_payload
 from .views import IsStaffUser
 
 User = get_user_model()
@@ -171,6 +172,15 @@ class AdminCustomerStatusUpdateAPIView(APIView):
         new_status = serializer.validated_data["status"]
         user.is_active = new_status == "active"
         user.save(update_fields=["is_active"])
+        record_admin_activity(
+            request,
+            category=AdminActivityLog.Category.CUSTOMERS,
+            action="customer.status_updated",
+            message=f"Updated customer #{user.pk} status to {new_status}.",
+            target_type="customer",
+            target_id=user.pk,
+            metadata={"status": new_status},
+        )
         return Response(
             {
                 "message": "Customer status updated.",
@@ -215,57 +225,4 @@ class AdminCustomerSuperCoinsAPIView(APIView):
 
     def get(self, request, pk):
         user = get_object_or_404(_customers_queryset(), pk=pk)
-        point_value = point_value_aed()
-        balance = int(user.points_balance or 0)
-
-        earned = []
-        for row in (
-            PurchasePointsLedger.objects.filter(user=user)
-            .select_related("order")
-            .order_by("-created_at")[:50]
-        ):
-            earned.append(
-                {
-                    "type": "earned",
-                    "points": row.points_awarded,
-                    "order_id": row.order_id,
-                    "order_code": order_code_for_order(row.order) if row.order_id else None,
-                    "note": row.note or "",
-                    "at": row.created_at.isoformat() if row.created_at else None,
-                }
-            )
-
-        spent = []
-        for row in LoyaltyIssuedCoupon.objects.filter(user=user).order_by("-created_at")[:50]:
-            spent.append(
-                {
-                    "type": "spent",
-                    "points": row.points_spent,
-                    "amount_aed": str(Decimal(str(row.amount_aed)).quantize(Decimal("0.01"))),
-                    "coupon_code": row.code,
-                    "used": bool(row.used_at),
-                    "used_at": row.used_at.isoformat() if row.used_at else None,
-                    "order_id": row.order_id,
-                    "at": row.created_at.isoformat() if row.created_at else None,
-                }
-            )
-
-        history = sorted(
-            earned + spent,
-            key=lambda item: item.get("at") or "",
-            reverse=True,
-        )
-
-        return Response(
-            {
-                "customer_id": user.pk,
-                "super_coins_balance": balance,
-                "point_value_aed": str(point_value.quantize(Decimal("0.01"))),
-                "balance_value_aed": str((Decimal(balance) * point_value).quantize(Decimal("0.01"))),
-                "credit_balance_aed": str(
-                    Decimal(str(user.credit_balance_aed or 0)).quantize(Decimal("0.01"))
-                ),
-                "history": history,
-            },
-            status=status.HTTP_200_OK,
-        )
+        return Response(build_customer_super_coins_payload(user), status=status.HTTP_200_OK)

@@ -23,6 +23,8 @@ from shop.services.zoho_books_payment import (
     staff_record_zoho_books_payment_for_order,
 )
 
+from .activity_log_utils import record_admin_activity
+from .models import AdminActivityLog
 from .views import IsStaffUser
 
 # Admin-facing labels (request) → customer_tracking_stage key or "cancelled"
@@ -412,6 +414,16 @@ class AdminOrderStatusUpdateAPIView(APIView):
         serializer = AdminOrderStatusUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         order = _apply_status_update(order, serializer.validated_data["status"])
+        new_status = serializer.validated_data["status"]
+        record_admin_activity(
+            request,
+            category=AdminActivityLog.Category.ORDERS,
+            action="order.status_updated",
+            message=f"Updated order #{order.pk} status to {new_status}.",
+            target_type="order",
+            target_id=order.pk,
+            metadata={"status": new_status},
+        )
         return Response(
             {
                 "message": "Order status updated.",

@@ -67,3 +67,43 @@ class CMSPage(models.Model):
 
     def __str__(self):
         return self.title
+
+
+class AdminActivityLog(models.Model):
+    """Audit trail of staff actions in the admin dashboard."""
+
+    class Category(models.TextChoices):
+        ORDERS = "orders", "Orders"
+        RETURNS = "returns", "Returns"
+        CUSTOMERS = "customers", "Customers"
+        USERS = "users", "Admin users"
+        CMS = "cms", "CMS"
+        BANNERS = "banners", "Banners"
+        STORES = "stores", "Stores"
+        DELIVERY_ZONES = "delivery_zones", "Delivery zones"
+        AUTH = "auth", "Authentication"
+        SYSTEM = "system", "System"
+
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="admin_activity_logs",
+    )
+    actor_email = models.EmailField(blank=True)
+    category = models.CharField(max_length=32, choices=Category.choices)
+    action = models.CharField(max_length=64)
+    message = models.CharField(max_length=500)
+    target_type = models.CharField(max_length=32, blank=True)
+    target_id = models.PositiveIntegerField(null=True, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Admin activity log"
+        verbose_name_plural = "Admin activity logs"
+
+    def __str__(self):
+        return f"{self.category}:{self.action} ({self.created_at})"
