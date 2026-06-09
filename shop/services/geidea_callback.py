@@ -28,31 +28,24 @@ def verify_callback_signature(payload):
     """
     Verify the HMAC-SHA256 signature in the Geidea callback payload.
 
-    Callback signature concatenation is DIFFERENT from create-session:
-      create-session: PublicKey + amount + currency + merchantRef + timestamp
-      callback:       PublicKey + amount + currency + geideaOrderId + status + merchantRef + timestamp
+    Callback signature concatenation per official Geidea docs:
+      PublicKey + OrderAmount + OrderCurrency + OrderId + Status + MerchantReferenceId + timeStamp
+
+    The timestamp field name is confirmed as top-level "timeStamp" (capital S).
 
     Returns True if signature is valid, False otherwise.
-
-    ⚠️ OPEN ITEM — timestamp field:
-    The Geidea callback signature formula includes a timestamp.
-    The exact field name is not confirmed — could be top-level "timestamp"
-    or order["createdDate"]. This function attempts "timestamp" first.
-    Log the full raw body on the first sandbox callback to confirm.
     """
     try:
-        order_data      = payload["order"]
-        received_sig    = payload["signature"]
+        order_data       = payload["order"]
+        received_sig     = payload["signature"]
         merchant_pub_key = order_data["merchantPublicKey"]
-        amount_str      = f"{float(order_data['totalAmount']):.2f}"
-        currency        = order_data["currency"]
-        geidea_order_id = order_data["orderId"]
-        status          = order_data["status"]
-        merchant_ref    = order_data["merchantReferenceId"]
+        amount_str       = f"{float(order_data['totalAmount']):.2f}"
+        currency         = order_data["currency"]
+        geidea_order_id  = order_data["orderId"]
+        status           = order_data["status"]
+        merchant_ref     = order_data["merchantReferenceId"]
 
-        # ⚠️ Try top-level timestamp first.
-        # If signature verification keeps failing after confirming other fields,
-        # switch to order_data.get("createdDate", "") or check the raw callback log.
+        # Confirmed field name from official Geidea docs: top-level "timeStamp"
         timestamp = payload.get("timeStamp", "")
 
         concat = (

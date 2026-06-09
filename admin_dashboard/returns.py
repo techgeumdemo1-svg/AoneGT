@@ -595,14 +595,27 @@ class AdminReturnRefundAPIView(AdminReturnDetailAPIViewMixin, APIView):
                 ret = get_object_or_404(
                     _admin_returns_queryset().select_for_update(), pk=pk,
                 )
+                # Re-check idempotency inside the lock — prevents race condition
+                # where two concurrent requests both called Geidea before this block
+                if (ret.geidea_refund_id or '').strip():
+                    return Response(
+                        {
+                            'message': 'Refund already processed.',
+                            'refund_amount': str(refund_amount),
+                            'geidea_refund_id': ret.geidea_refund_id,
+                            'return': self._detail_payload(ret),
+                        },
+                        status=status.HTTP_200_OK,
+                    )
                 if staff_note:
                     ret.note = (
                         f'{ret.note}\n[Refunded] {staff_note}'.strip()
                         if ret.note
                         else f'[Refunded] {staff_note}'
                     )
+                ret.geidea_refund_id = geidea_refund_id
                 ret.status = OrderReturn.Status.COMPLETED
-                ret.save(update_fields=['status', 'note', 'updated_at'])
+                ret.save(update_fields=['geidea_refund_id', 'status', 'note', 'updated_at'])
 
             create_user_notification(
                 ret.user,

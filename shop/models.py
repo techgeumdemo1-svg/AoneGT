@@ -145,6 +145,7 @@ class Order(models.Model):
     geidea_merchant_ref = models.UUIDField(
         null=True,
         blank=True,
+        unique=True,
         help_text='UUID sent to Geidea as merchantReferenceId. Generated on first payment initiation.',
     )
     geidea_paylink_intent_id = models.CharField(
