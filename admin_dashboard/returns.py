@@ -89,8 +89,15 @@ def _reload_admin_return(pk: int) -> OrderReturn:
     return get_object_or_404(_admin_returns_queryset(), pk=pk)
 
 
-def _parse_return_id_query_param(request):
+def _parse_return_id_query_param(request, *, required=True):
     return_id = (request.query_params.get('id') or '').strip()
+    if not return_id:
+        if required:
+            return None, Response(
+                {'detail': 'Query parameter id is required and must be a positive integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return None, None
     if not return_id.isdigit():
         return None, Response(
             {'detail': 'Query parameter id is required and must be a positive integer.'},
@@ -445,10 +452,17 @@ class AdminReturnDetailAPIViewMixin:
         return data
 
 
-class AdminReturnListAPIView(APIView):
+class AdminReturnListAPIView(AdminReturnDetailAPIViewMixin, APIView):
     permission_classes = [IsAuthenticated, IsStaffUser]
 
     def get(self, request):
+        return_id, err = _parse_return_id_query_param(request, required=False)
+        if err:
+            return err
+        if return_id is not None:
+            ret = _reload_admin_return(return_id)
+            return Response(self._detail_payload(ret), status=status.HTTP_200_OK)
+
         qs, date_err, date_filter = _apply_return_list_filters(
             _admin_returns_queryset().order_by("-created_at"),
             request,
@@ -464,14 +478,6 @@ class AdminReturnListAPIView(APIView):
         if date_filter:
             payload["date_filter"] = date_filter
         return Response(payload, status=status.HTTP_200_OK)
-
-
-class AdminReturnDetailAPIView(AdminReturnDetailAPIViewMixin, APIView):
-    permission_classes = [IsAuthenticated, IsStaffUser]
-
-    def get(self, request, pk):
-        ret = _reload_admin_return(pk)
-        return Response(self._detail_payload(ret), status=status.HTTP_200_OK)
 
 
 class AdminReturnApproveAPIView(AdminReturnDetailAPIViewMixin, APIView):

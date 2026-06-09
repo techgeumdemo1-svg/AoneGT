@@ -22,7 +22,6 @@ from .orders import (
 )
 from .returns import (
     AdminReturnApproveAPIView,
-    AdminReturnDetailAPIView,
     AdminReturnListAPIView,
     AdminReturnLogsAPIView,
     AdminReturnRefundAPIView,
@@ -102,7 +101,6 @@ urlpatterns = [
     path('returns/approve/', AdminReturnApproveAPIView.as_view(), name='admin-returns-approve'),
     path('returns/reject/', AdminReturnRejectAPIView.as_view(), name='admin-returns-reject'),
     path('returns/refund/', AdminReturnRefundAPIView.as_view(), name='admin-returns-refund'),
-    path('returns/<int:pk>/', AdminReturnDetailAPIView.as_view(), name='admin-returns-detail'),
     path('returns/<int:pk>/zoho-sync/', AdminReturnZohoSyncAPIView.as_view(), name='admin-returns-zoho-sync'),
     path('stores/', AdminStoreListAPIView.as_view(), name='admin-stores-list'),
     path('stores/reorder/', AdminStoreReorderAPIView.as_view(), name='admin-stores-reorder'),
