@@ -89,6 +89,16 @@ def _reload_admin_return(pk: int) -> OrderReturn:
     return get_object_or_404(_admin_returns_queryset(), pk=pk)
 
 
+def _parse_return_id_query_param(request):
+    return_id = (request.query_params.get('id') or '').strip()
+    if not return_id.isdigit():
+        return None, Response(
+            {'detail': 'Query parameter id is required and must be a positive integer.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return int(return_id), None
+
+
 def _normalize_return_status(raw: str) -> Optional[str]:
     key = (raw or "").strip().lower()
     if not key:
@@ -356,6 +366,7 @@ class AdminReturnListSerializer(serializers.ModelSerializer):
     return_reason_label = serializers.SerializerMethodField()
     refund_amount = serializers.SerializerMethodField()
     lines_count = serializers.SerializerMethodField()
+    items = serializers.SerializerMethodField()
 
     class Meta:
         model = OrderReturn
@@ -375,6 +386,7 @@ class AdminReturnListSerializer(serializers.ModelSerializer):
             "return_reason_detail",
             "refund_amount",
             "lines_count",
+            "items",
             "zoho_salesreturn_id",
             "created_at",
             "updated_at",
@@ -397,6 +409,16 @@ class AdminReturnListSerializer(serializers.ModelSerializer):
 
     def get_lines_count(self, obj):
         return obj.lines.count()
+
+    def get_items(self, obj):
+        return [
+            {
+                "name": line.order_item.product_name,
+                "quantity": line.quantity,
+            }
+            for line in obj.lines.all()
+            if (line.order_item.product_name or "").strip()
+        ]
 
 
 class AdminReturnDetailAPIViewMixin:
@@ -455,7 +477,11 @@ class AdminReturnDetailAPIView(AdminReturnDetailAPIViewMixin, APIView):
 class AdminReturnApproveAPIView(AdminReturnDetailAPIViewMixin, APIView):
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def patch(self, request, pk):
+    def patch(self, request):
+        pk, err = _parse_return_id_query_param(request)
+        if err:
+            return err
+
         serializer = AdminReturnNoteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         staff_note = (serializer.validated_data.get("note") or "").strip()
@@ -589,7 +615,11 @@ class AdminReturnZohoSyncAPIView(AdminReturnDetailAPIViewMixin, APIView):
 class AdminReturnRejectAPIView(AdminReturnDetailAPIViewMixin, APIView):
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def patch(self, request, pk):
+    def patch(self, request):
+        pk, err = _parse_return_id_query_param(request)
+        if err:
+            return err
+
         with transaction.atomic():
             ret = get_object_or_404(_admin_returns_queryset().select_for_update(), pk=pk)
             if ret.status not in _REJECTABLE_STATUSES:
@@ -651,7 +681,11 @@ class AdminReturnRejectAPIView(AdminReturnDetailAPIViewMixin, APIView):
 class AdminReturnRefundAPIView(AdminReturnDetailAPIViewMixin, APIView):
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def post(self, request, pk):
+    def post(self, request):
+        pk, err = _parse_return_id_query_param(request)
+        if err:
+            return err
+
         serializer = AdminReturnRefundSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -911,6 +945,9 @@ class AdminReturnRefundAPIView(AdminReturnDetailAPIViewMixin, APIView):
 class AdminReturnLogsAPIView(APIView):
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def get(self, request, pk):
-        ret = get_object_or_404(_admin_returns_queryset(), pk=pk)
+    def get(self, request):
+        return_id, err = _parse_return_id_query_param(request)
+        if err:
+            return err
+        ret = get_object_or_404(_admin_returns_queryset(), pk=return_id)
         return Response(_build_return_logs(ret), status=status.HTTP_200_OK)
