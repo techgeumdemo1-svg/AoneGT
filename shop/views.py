@@ -55,6 +55,7 @@ from .models import (
 from .services.zoho_commerce import ZohoCommerceError, ZohoCommerceService
 from .services.geidea import GeideaSessionError, create_geidea_session, fetch_geidea_orders_by_merchant_ref
 from .services.geidea_callback import process_geidea_callback
+from .services.geidea_paybylink import GeideaPayLinkError, create_geidea_payment_link
 from offer.models import Coupon
 from offer.services import (
     _as_decimal,
@@ -1548,15 +1549,15 @@ class CheckoutAPIView(APIView):
 
         if getattr(settings, 'ZOHO_BOOKS_MANUAL_WORKFLOW', False):
             maybe_create_zoho_books_sales_order_for_order(order.pk, trigger='placed')
-            # payment_gateway: advance payment is created by the Geidea callback (Phase 3)
-            # after Geidea confirms the payment. DO NOT create it here — the user has
-            # not paid yet at this point in the flow.
+            # payment_gateway: advance payment is created by the Geidea callback
+            # after Geidea confirms payment. DO NOT create it here.
             #
-            # pay_by_link: payment_success=True was already confirmed and
-            # credit_user_for_prepaid_order() was called above, so create it now.
-            if order.payment_method != Order.PaymentMethod.PAYMENT_GATEWAY:
-                from shop.services.zoho_books_payment import maybe_create_zoho_books_advance_payment_for_order
-                maybe_create_zoho_books_advance_payment_for_order(order)
+            # pay_by_link: advance payment is also created by the Geidea callback
+            # after the customer pays the link. DO NOT create it here — the customer
+            # has not paid yet at checkout time.
+            #
+            # cash_on_delivery / card_on_delivery: not prepaid, skip advance payment.
+            pass
         else:
             maybe_create_zoho_sales_order_for_order(order.pk)
 
@@ -2969,3 +2970,79 @@ class GeideaStatusView(APIView):
             return Response({'status': 'paid'})
 
         return Response({'status': 'pending'})
+
+
+class PayByLinkInitiateView(APIView):
+    """
+    POST /api/shop/paybylink/initiate/
+    Body: { "order_id": <int> }
+
+    Generates a Geidea eInvoice payment link for a pay_by_link order and
+    returns the URL to Flutter. Also sends the link to the customer by email.
+
+    Idempotent: calling this endpoint again for an already-linked order returns
+    the same URL without hitting the Geidea API again.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        order_id = request.data.get('order_id')
+        if not order_id:
+            return Response(
+                {'detail': 'order_id is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            order = Order.objects.get(pk=order_id, user=request.user)
+        except Order.DoesNotExist:
+            return Response(
+                {'detail': 'Not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if order.payment_method != Order.PaymentMethod.PAY_BY_LINK:
+            return Response(
+                {'detail': 'Order is not a pay_by_link order.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if order.status == Order.Status.CANCELLED:
+            return Response(
+                {'detail': 'Order has been cancelled.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if order.payment_status == Order.PaymentStatus.PAID:
+            return Response(
+                {'detail': 'Order already paid.', 'order_id': order.pk},
+                status=status.HTTP_200_OK,
+            )
+
+        try:
+            payment_link = create_geidea_payment_link(order)
+        except GeideaPayLinkError as exc:
+            return Response(
+                {'detail': str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        # Send payment link email — best-effort, never block the response
+        try:
+            from .services.order_email import send_paybylink_email
+            send_paybylink_email(order, request.user)
+        except Exception:
+            pass
+
+        from datetime import date as _date, timedelta as _timedelta
+        expiry_days = getattr(settings, 'GEIDEA_PAYLINK_EXPIRY_DAYS', 7)
+        expires_at = (_date.today() + _timedelta(days=expiry_days)).isoformat()
+
+        return Response(
+            {
+                'payment_link': payment_link,
+                'order_id': order.pk,
+                'expires_at': expires_at,
+            },
+            status=status.HTTP_200_OK,
+        )

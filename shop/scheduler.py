@@ -72,7 +72,10 @@ def _run_stale_order_cleanup():
     try:
         cutoff = timezone.now() - timedelta(hours=2)
         stale_orders = Order.objects.filter(
-            payment_method=Order.PaymentMethod.PAYMENT_GATEWAY,
+            payment_method__in=[
+                Order.PaymentMethod.PAYMENT_GATEWAY,
+                Order.PaymentMethod.PAY_BY_LINK,
+            ],
             payment_status=Order.PaymentStatus.PENDING,
             created_at__lt=cutoff,
         )

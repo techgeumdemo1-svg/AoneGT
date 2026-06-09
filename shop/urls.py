@@ -38,6 +38,7 @@ from .views import (
     GeideaInitiateView,
     GeideaCallbackView,
     GeideaStatusView,
+    PayByLinkInitiateView,
 )
 
 urlpatterns = [
@@ -93,5 +94,6 @@ urlpatterns = [
     path('geidea/initiate/', GeideaInitiateView.as_view(), name='geidea-initiate'),
     path('geidea/callback/', GeideaCallbackView.as_view(), name='geidea-callback'),
     path('geidea/status/', GeideaStatusView.as_view(), name='geidea-status'),
+    path('paybylink/initiate/', PayByLinkInitiateView.as_view(), name='paybylink-initiate'),
 
 ]

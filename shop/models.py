@@ -147,6 +147,18 @@ class Order(models.Model):
         blank=True,
         help_text='UUID sent to Geidea as merchantReferenceId. Generated on first payment initiation.',
     )
+    geidea_paylink_intent_id = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        help_text='Geidea paymentIntentId returned by eInvoice API. Used to cancel the link.',
+    )
+    geidea_paylink_url = models.CharField(
+        max_length=500,
+        blank=True,
+        default='',
+        help_text='Full Geidea hosted payment URL returned by eInvoice API.',
+    )
     prepaid_credited_amount = models.DecimalField(
         max_digits=12,
         decimal_places=2,
@@ -397,6 +409,12 @@ class OrderReturn(models.Model):
         default=Status.PENDING_ZOHO,
     )
     zoho_salesreturn_id = models.CharField(max_length=120, blank=True)
+    geidea_refund_id = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        help_text='Geidea refund transaction ID. Non-empty = refund already processed (idempotency guard).',
+    )
     return_reason = models.CharField(
         max_length=32,
         choices=ReturnReason.choices,
