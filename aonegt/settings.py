@@ -290,6 +290,24 @@ GEIDEA_API_PASSWORD = os.environ.get('GEIDEA_API_PASSWORD', '')
 GEIDEA_SESSION_URL  = os.environ.get('GEIDEA_SESSION_URL', '')
 GEIDEA_CALLBACK_URL = os.environ.get('GEIDEA_CALLBACK_URL', '')
 GEIDEA_FETCH_URL    = os.environ.get('GEIDEA_FETCH_URL', '')
+
+# Pay by Link — eInvoice API endpoint (no hardcoded default)
+GEIDEA_PAYLINK_URL = os.environ.get('GEIDEA_PAYLINK_URL', '')
+
+# Callback URL for pay-by-link; falls back to the standard callback URL if unset
+GEIDEA_PAYLINK_CALLBACK_URL = (
+    os.environ.get('GEIDEA_PAYLINK_CALLBACK_URL', '').strip()
+    or os.environ.get('GEIDEA_CALLBACK_URL', '').strip()
+)
+
+# Refund API endpoint (no hardcoded default)
+GEIDEA_REFUND_URL = os.environ.get('GEIDEA_REFUND_URL', '')
+
+# Expiry period for generated payment links, in days (default 7)
+try:
+    GEIDEA_PAYLINK_EXPIRY_DAYS = int(os.environ.get('GEIDEA_PAYLINK_EXPIRY_DAYS', '7'))
+except (ValueError, TypeError):
+    GEIDEA_PAYLINK_EXPIRY_DAYS = 7
 # ─────────────────────────────────────────────────────────────────────────
 
 SIMPLE_JWT = {

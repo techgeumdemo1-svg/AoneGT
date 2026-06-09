@@ -179,3 +179,116 @@ def handle_customer_tracking_stage_change(order, previous_stage: Optional[str] =
     prev = (previous_stage or '').strip()
     if new_stage == 'out_for_delivery' and prev != 'out_for_delivery':
         send_order_out_for_delivery_email(order)
+
+
+def send_paybylink_email(order, user) -> bool:
+    """
+    Send the Geidea pay-by-link payment URL to the customer by email.
+
+    Returns True if sent; False if skipped or failed.
+    Email failure never blocks the API response.
+    """
+    payment_link = (order.geidea_paylink_url or '').strip()
+    if not payment_link:
+        logger.warning(
+            'order-email: skip paybylink order=%s — geidea_paylink_url is empty',
+            order.pk,
+        )
+        return False
+
+    to_email = (getattr(user, 'email', None) or '').strip().lower()
+    if not to_email or '@' not in to_email:
+        logger.warning(
+            'order-email: skip paybylink order=%s — user has no valid email',
+            order.pk,
+        )
+        return False
+
+    from django.conf import settings as _settings
+    expiry_days = getattr(_settings, 'GEIDEA_PAYLINK_EXPIRY_DAYS', 7)
+    from datetime import date, timedelta
+    expiry_date = (date.today() + timedelta(days=expiry_days)).strftime('%d %b %Y')
+
+    code = order_code_for_order(order)
+    greeting = (getattr(user, 'first_name', None) or '').strip() or 'there'
+    currency = (order.currency or 'AED').strip() or 'AED'
+
+    subject = f'AoneGt order #{code} — complete your payment'
+    message = (
+        f'Hello {greeting},\n\n'
+        f'Your order #{code} has been placed. Please complete your payment to confirm it.\n\n'
+        f'Order total: {currency} {order.total}\n'
+        f'Payment link: {payment_link}\n'
+        f'Link valid until: {expiry_date}\n\n'
+        f'Tap the link above to pay securely using your card.\n\n'
+        f'If you already paid, you can ignore this email.\n\n'
+        f'Thank you for shopping with us.'
+    )
+
+    try:
+        send_mail(
+            subject,
+            message,
+            settings.DEFAULT_FROM_EMAIL,
+            [to_email],
+            fail_silently=False,
+        )
+        return True
+    except Exception as exc:
+        logger.exception(
+            'order-email: paybylink failed order=%s to=%s (%s: %s)',
+            order.pk, to_email, type(exc).__name__, exc,
+        )
+        return False
+
+
+def send_refund_email(order, user, amount) -> bool:
+    """
+    Notify the customer that a card refund has been initiated.
+
+    Returns True if sent; False if skipped or failed.
+    Email failure never blocks the API response.
+    """
+    from decimal import Decimal as _Decimal
+    try:
+        refund_amount = _Decimal(str(amount)).quantize(_Decimal('0.01'))
+    except Exception:
+        refund_amount = amount
+
+    to_email = (getattr(user, 'email', None) or '').strip().lower()
+    if not to_email or '@' not in to_email:
+        logger.warning(
+            'order-email: skip refund order=%s — user has no valid email',
+            order.pk,
+        )
+        return False
+
+    code = order_code_for_order(order)
+    greeting = (getattr(user, 'first_name', None) or '').strip() or 'there'
+    currency = (order.currency or 'AED').strip() or 'AED'
+
+    subject = f'AoneGt order #{code} — refund initiated'
+    message = (
+        f'Hello {greeting},\n\n'
+        f'Your refund of {currency} {refund_amount} for order #{code} has been initiated.\n\n'
+        f'The amount will be credited to your original payment card within 3–7 business days, '
+        f'depending on your bank.\n\n'
+        f'If you have any questions, please contact our support team.\n\n'
+        f'Thank you for shopping with us.'
+    )
+
+    try:
+        send_mail(
+            subject,
+            message,
+            settings.DEFAULT_FROM_EMAIL,
+            [to_email],
+            fail_silently=False,
+        )
+        return True
+    except Exception as exc:
+        logger.exception(
+            'order-email: refund email failed order=%s to=%s (%s: %s)',
+            order.pk, to_email, type(exc).__name__, exc,
+        )
+        return False

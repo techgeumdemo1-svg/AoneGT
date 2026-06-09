@@ -1060,23 +1060,19 @@ class CheckoutSerializer(serializers.Serializer):
         # and confirmed via the Geidea server-to-server callback.
         # Do NOT require payment_success here for payment_gateway.
         #
-        # pay_by_link: unchanged — payment_success + gateway_reference
-        # must still be sent at checkout time.
-        if payment_method == Order.PaymentMethod.PAY_BY_LINK:
-            if require_prepaid_payment and not payment_success:
-                raise serializers.ValidationError({
-                    'payment_success': (
-                        'Payment must be successful before checkout for '
-                        'pay_by_link orders. '
-                        'Send payment_success: true and gateway_reference in JSON body.'
-                    ),
-                })
-            if payment_success and not gateway_reference:
-                raise serializers.ValidationError({
-                    'gateway_reference': (
-                        'Transaction reference is required after successful payment.'
-                    ),
-                })
+        # pay_by_link: same as payment_gateway — order is created first (PENDING),
+        # then payment link is generated via POST /api/shop/paybylink/initiate/
+        # and confirmed via the Geidea callback. payment_success is not required
+        # at checkout for pay_by_link.
+        if payment_success and not gateway_reference and payment_method in (
+            Order.PaymentMethod.PAY_BY_LINK,
+            Order.PaymentMethod.PAYMENT_GATEWAY,
+        ):
+            raise serializers.ValidationError({
+                'gateway_reference': (
+                    'Transaction reference is required when payment_success is true.'
+                ),
+            })
 
         payment_amount = attrs.get('payment_amount')
         if payment_amount is not None:

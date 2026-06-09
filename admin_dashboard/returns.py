@@ -2,8 +2,12 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import Optional
 
+import logging
+
 from django.contrib.auth import get_user_model
 from django.db import transaction
+
+logger = logging.getLogger(__name__)
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -12,10 +16,11 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from shop.models import AccountCreditLedger, OrderReturn, UserNotification
+from shop.models import AccountCreditLedger, Order, OrderReturn, UserNotification
 from shop.serializers import OrderReturnReadSerializer, order_code_for_order
 from shop.services.account_credit import get_user_credit_balance
 from shop.services.notifications import create_user_notification
+from shop.services.order_email import send_refund_email
 from shop.services.zoho_returns import enqueue_push_return_to_zoho
 
 from .activity_log_utils import record_admin_activity
@@ -471,12 +476,23 @@ class AdminReturnRefundAPIView(AdminReturnDetailAPIViewMixin, APIView):
 
             if ret.status == OrderReturn.Status.COMPLETED:
                 ret = _reload_admin_return(pk)
+                # Check if already processed via Geidea
+                if (ret.geidea_refund_id or '').strip():
+                    return Response(
+                        {
+                            'message': 'Refund already processed.',
+                            'refund_amount': str(_return_refund_amount(ret)),
+                            'geidea_refund_id': ret.geidea_refund_id,
+                            'return': self._detail_payload(ret),
+                        },
+                        status=status.HTTP_200_OK,
+                    )
                 return Response(
                     {
-                        "message": "Return already refunded.",
-                        "refund_amount": str(_return_refund_amount(ret)),
-                        "credit_balance_aed": str(get_user_credit_balance(ret.user)),
-                        "return": self._detail_payload(ret),
+                        'message': 'Return already refunded.',
+                        'refund_amount': str(_return_refund_amount(ret)),
+                        'credit_balance_aed': str(get_user_credit_balance(ret.user)),
+                        'return': self._detail_payload(ret),
                     },
                     status=status.HTTP_200_OK,
                 )
@@ -484,37 +500,149 @@ class AdminReturnRefundAPIView(AdminReturnDetailAPIViewMixin, APIView):
             if ret.status != OrderReturn.Status.SYNCED:
                 return Response(
                     {
-                        "detail": (
-                            "Return must be approved (status synced) before refund. "
-                            f"Current status: {ret.get_status_display()}."
+                        'detail': (
+                            'Return must be approved (status synced) before refund. '
+                            f'Current status: {ret.get_status_display()}.'
                         ),
                     },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
             default_amount = _return_refund_amount(ret)
-            amount = serializer.validated_data.get("amount")
+            amount = serializer.validated_data.get('amount')
             if amount is None:
                 refund_amount = default_amount
             else:
-                refund_amount = Decimal(str(amount)).quantize(Decimal("0.01"))
+                refund_amount = Decimal(str(amount)).quantize(Decimal('0.01'))
             if refund_amount <= 0:
                 return Response(
-                    {"detail": "Refund amount must be greater than zero."},
+                    {'detail': 'Refund amount must be greater than zero.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             if refund_amount > default_amount:
                 return Response(
                     {
-                        "detail": (
-                            f"Refund amount cannot exceed return total ({default_amount} AED)."
+                        'detail': (
+                            f'Refund amount cannot exceed return total ({default_amount} AED).'
                         ),
                     },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            staff_note = (serializer.validated_data.get("note") or "").strip()
-            ledger_note = staff_note or f"Return #{ret.pk} refund ({refund_amount} AED)"
+            staff_note = (serializer.validated_data.get('note') or '').strip()
+            order = ret.order
+
+            # Determine refund path: card payment → Geidea Refund API
+            # COD / card-on-delivery → existing account credit path
+            is_card_payment = order.payment_method in (
+                Order.PaymentMethod.PAY_BY_LINK,
+                Order.PaymentMethod.PAYMENT_GATEWAY,
+            )
+
+            if is_card_payment:
+                has_gateway_ref = bool((order.gateway_reference or '').strip())
+                if not has_gateway_ref:
+                    return Response(
+                        {
+                            'detail': (
+                                'No gateway_reference — card refund not possible. '
+                                'Use manual credit.'
+                            ),
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                # Release atomic lock before making external API call
+                # (atomic block exits here for card path)
+
+        # ── Card refund path — Geidea Refund API (outside atomic) ──────────
+        if is_card_payment:
+            from shop.services.geidea_paybylink import (
+                GeideaRefundAlreadyProcessedError,
+                GeideaRefundError,
+                refund_geidea_payment,
+            )
+
+            # Re-fetch without lock for the API call
+            ret = _reload_admin_return(pk)
+            order = ret.order
+
+            try:
+                geidea_refund_id = refund_geidea_payment(ret, refund_amount)
+            except GeideaRefundAlreadyProcessedError:
+                ret = _reload_admin_return(pk)
+                return Response(
+                    {
+                        'message': 'Refund already processed.',
+                        'refund_amount': str(refund_amount),
+                        'geidea_refund_id': ret.geidea_refund_id,
+                        'return': self._detail_payload(ret),
+                    },
+                    status=status.HTTP_200_OK,
+                )
+            except GeideaRefundError as exc:
+                logger.error(
+                    'admin-refund: Geidea refund failed return=%s order=%s error=%s',
+                    ret.pk, order.pk, exc,
+                )
+                return Response(
+                    {'detail': str(exc)},
+                    status=status.HTTP_502_BAD_GATEWAY,
+                )
+
+            # Update return status and note
+            with transaction.atomic():
+                ret = get_object_or_404(
+                    _admin_returns_queryset().select_for_update(), pk=pk,
+                )
+                if staff_note:
+                    ret.note = (
+                        f'{ret.note}\n[Refunded] {staff_note}'.strip()
+                        if ret.note
+                        else f'[Refunded] {staff_note}'
+                    )
+                ret.status = OrderReturn.Status.COMPLETED
+                ret.save(update_fields=['status', 'note', 'updated_at'])
+
+            create_user_notification(
+                ret.user,
+                UserNotification.Kind.ORDER,
+                title='Refund initiated',
+                body=(
+                    f'Your refund of AED {refund_amount} will be credited to '
+                    f'your card in 3–7 business days.'
+                ),
+                payload={
+                    'event': 'return_refunded',
+                    'return_id': ret.pk,
+                    'order_id': ret.order_id,
+                    'order_code': order_code_for_order(ret.order),
+                    'refund_amount': str(refund_amount),
+                },
+            )
+
+            # Best-effort refund email
+            try:
+                send_refund_email(order, ret.user, refund_amount)
+            except Exception:
+                pass
+
+            ret = _reload_admin_return(pk)
+            return Response(
+                {
+                    'message': 'Refund issued to customer card.',
+                    'refund_amount': str(refund_amount),
+                    'geidea_refund_id': geidea_refund_id,
+                    'return': self._detail_payload(ret),
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        # ── COD / card-on-delivery path — account credit (unchanged) ────────
+        ledger_note = staff_note or f'Return #{ret.pk} refund ({refund_amount} AED)'
+
+        with transaction.atomic():
+            ret = get_object_or_404(_admin_returns_queryset().select_for_update(), pk=pk)
 
             try:
                 new_balance = _credit_return_refund(
@@ -524,29 +652,29 @@ class AdminReturnRefundAPIView(AdminReturnDetailAPIViewMixin, APIView):
                     note=ledger_note,
                 )
             except ValueError as exc:
-                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
             if staff_note:
                 ret.note = (
-                    f"{ret.note}\n[Refunded] {staff_note}".strip()
+                    f'{ret.note}\n[Refunded] {staff_note}'.strip()
                     if ret.note
-                    else f"[Refunded] {staff_note}"
+                    else f'[Refunded] {staff_note}'
                 )
 
             ret.status = OrderReturn.Status.COMPLETED
-            ret.save(update_fields=["status", "note", "updated_at"])
+            ret.save(update_fields=['status', 'note', 'updated_at'])
 
         create_user_notification(
             ret.user,
             UserNotification.Kind.ORDER,
-            title="Return refund processed",
-            body=f"{refund_amount} AED was credited to your account.",
+            title='Return refund processed',
+            body=f'{refund_amount} AED was credited to your account.',
             payload={
-                "event": "return_refunded",
-                "return_id": ret.pk,
-                "order_id": ret.order_id,
-                "order_code": order_code_for_order(ret.order),
-                "refund_amount": str(refund_amount),
+                'event': 'return_refunded',
+                'return_id': ret.pk,
+                'order_id': ret.order_id,
+                'order_code': order_code_for_order(ret.order),
+                'refund_amount': str(refund_amount),
             },
         )
 
@@ -565,10 +693,10 @@ class AdminReturnRefundAPIView(AdminReturnDetailAPIViewMixin, APIView):
         )
         return Response(
             {
-                "message": "Return refunded and credited to customer account.",
-                "refund_amount": str(refund_amount),
-                "credit_balance_aed": str(new_balance),
-                "return": self._detail_payload(ret),
+                'message': 'Return refunded and credited to customer account.',
+                'refund_amount': str(refund_amount),
+                'credit_balance_aed': str(new_balance),
+                'return': self._detail_payload(ret),
             },
             status=status.HTTP_200_OK,
         )

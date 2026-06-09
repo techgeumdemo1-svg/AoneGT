@@ -297,12 +297,14 @@ def create_zoho_books_advance_payment_for_order(order) -> None:
     payment_method = (order.payment_method or '').strip()
 
     payment_mode_map = {
-        'pay_by_link': 'banktransfer',
-        'payment_gateway': 'creditcard',
+        'pay_by_link': 'pay_by_link',
+        'payment_gateway': 'credit_card',
     }
-    payment_mode = payment_mode_map.get(payment_method, 'banktransfer')
+    payment_mode = payment_mode_map.get(payment_method, 'pay_by_link')
 
-    description = f'AoneGT order #{order.pk} - advance payment ({payment_method})'
+    so_number = (order.zoho_books_salesorder_number or '').strip()
+    order_ref = so_number if so_number else f'#{order.pk}'
+    description = f'AoneGT order {order_ref} - advance payment ({payment_method})'
     if gateway_reference:
         description += f' ref {gateway_reference}'
 

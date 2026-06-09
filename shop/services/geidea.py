@@ -267,6 +267,17 @@ def _cancel_stale_order(order):
     from shop.services.order_sync_state import apply_order_sync_transition
     from shop.services.zoho_books_sales_order import void_zoho_books_sales_order_for_order
 
+    # Best-effort: cancel Geidea payment link for pay_by_link orders
+    if order.payment_method == Order.PaymentMethod.PAY_BY_LINK:
+        try:
+            from shop.services.geidea_paybylink import cancel_geidea_payment_link
+            cancel_geidea_payment_link(order)
+        except Exception as exc:
+            logger.error(
+                'Stale order cleanup — cancel_geidea_payment_link failed. order_pk=%s error=%s',
+                order.pk, exc,
+            )
+        # DB cancellation proceeds regardless of payment link cancellation result
     try:
         apply_order_sync_transition(order, Order.Status.CANCELLED)
     except Exception as exc:
