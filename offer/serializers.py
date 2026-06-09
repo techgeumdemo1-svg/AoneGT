@@ -23,7 +23,12 @@ class OrderSummaryRequestSerializer(serializers.Serializer):
     ]
 
     store_id = serializers.IntegerField(min_value=1)
-    vat_percent = serializers.DecimalField(max_digits=5, decimal_places=2, min_value=Decimal('0'))
+    # vat_percent is accepted from client for backward compatibility but ignored server-side.
+    # The server always uses DEFAULT_VAT_PERCENT from settings.
+    vat_percent = serializers.DecimalField(
+        max_digits=5, decimal_places=2, min_value=Decimal('0'),
+        required=False, default=Decimal('5.00'),
+    )
     coupon_code = serializers.CharField(max_length=120, required=False, allow_blank=True, trim_whitespace=True)
     # Address resolution: provide address_id (preferred) OR city (fallback). Both optional.
     address_id = serializers.IntegerField(min_value=1, required=False, allow_null=True)
