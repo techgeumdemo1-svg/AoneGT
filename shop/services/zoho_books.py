@@ -295,6 +295,39 @@ def books_get_sales_order(salesorder_id: str, *, store=None) -> dict[str, Any]:
     return salesorder
 
 
+def books_find_sales_order(
+    *,
+    store=None,
+    reference_number: str = '',
+    salesorder_number: str = '',
+) -> dict[str, Any] | None:
+    """Best-effort lookup when the stored salesorder_id is stale or from another org."""
+    queries: list[dict[str, str]] = []
+    ref = (reference_number or '').strip()
+    number = (salesorder_number or '').strip()
+    if ref:
+        queries.append({'reference_number': ref})
+        queries.append({'search_text': ref})
+    if number:
+        queries.append({'salesorder_number': number})
+
+    seen: set[tuple] = set()
+    for query in queries:
+        key = tuple(sorted(query.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            payload = _books_request('GET', 'salesorders', store=store, query=query)
+        except ZohoBooksError:
+            continue
+        rows = payload.get('salesorders') or []
+        if isinstance(rows, list) and rows:
+            row = rows[0]
+            return row if isinstance(row, dict) else None
+    return None
+
+
 def books_update_sales_order(
     salesorder_id: str,
     salesorder_body: dict[str, Any],
@@ -328,6 +361,40 @@ def books_void_sales_order(salesorder_id: str, *, store=None) -> dict[str, Any]:
     )
     salesorder = payload.get('salesorder')
     return salesorder if isinstance(salesorder, dict) else payload
+
+
+def books_get_invoice(invoice_id: str, *, store=None) -> dict[str, Any]:
+    invoice_id = (invoice_id or '').strip()
+    if not invoice_id:
+        raise ZohoBooksError('invoice_id is required to fetch invoice.')
+    payload = _books_request('GET', f'invoices/{invoice_id}', store=store)
+    invoice = payload.get('invoice')
+    if not isinstance(invoice, dict):
+        raise ZohoBooksError('Zoho Books did not return invoice payload.')
+    return invoice
+
+
+def books_create_credit_note(
+    credit_note_body: dict[str, Any],
+    *,
+    store=None,
+    invoice_id: str = '',
+) -> dict[str, Any]:
+    query: dict[str, Any] = {}
+    linked_invoice_id = (invoice_id or '').strip()
+    if linked_invoice_id:
+        query['invoice_id'] = linked_invoice_id
+    payload = _books_request(
+        'POST',
+        'creditnotes',
+        store=store,
+        query=query or None,
+        json_data=credit_note_body,
+    )
+    creditnote = payload.get('creditnote')
+    if not isinstance(creditnote, dict):
+        raise ZohoBooksError('Zoho Books did not return creditnote payload.')
+    return creditnote
 
 
 def books_create_invoice(invoice_body: dict[str, Any], *, store=None) -> dict[str, Any]:

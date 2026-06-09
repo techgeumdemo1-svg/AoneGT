@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import timedelta, timezone as dt_timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -21,9 +21,12 @@ from shop.serializers import OrderReturnReadSerializer, order_code_for_order
 from shop.services.account_credit import get_user_credit_balance
 from shop.services.notifications import create_user_notification
 from shop.services.order_email import send_refund_email
-from shop.services.zoho_returns import enqueue_push_return_to_zoho
+from shop.services.order_tracking import record_tracking_stage
+from shop.services.order_status_notifications import notify_order_tracking_status_change
+from shop.services.zoho_returns import enqueue_push_return_to_zoho, maybe_push_return_to_zoho
 
 from .activity_log_utils import record_admin_activity
+from .activity_logs import _actor_display_name
 from .models import AdminActivityLog
 from .orders import _paginate_queryset, _parse_order_list_date
 from .views import IsStaffUser
@@ -49,6 +52,30 @@ _REJECTABLE_STATUSES = (
     OrderReturn.Status.SYNCED,
     OrderReturn.Status.FAILED,
 )
+
+_ADMIN_RETURN_STATUS_LABELS = {
+    OrderReturn.Status.PENDING_ZOHO: "Pending",
+    OrderReturn.Status.SYNCED: "Approved",
+    OrderReturn.Status.COMPLETED: "Completed",
+    OrderReturn.Status.REJECTED: "Rejected",
+    OrderReturn.Status.FAILED: "Failed",
+}
+
+_RETURN_LOG_ACTIONS = {
+    "return.approved": "approved",
+    "return.rejected": "rejected",
+    "return.refunded": "refunded",
+    "return.zoho_synced": "zoho_synced",
+    "return.zoho_sync_failed": "zoho_sync_failed",
+}
+
+_NOTE_TAG_BY_ACTION = {
+    "approved": "Approved",
+    "rejected": "Rejected",
+    "refunded": "Refunded",
+    "zoho_synced": "Zoho synced",
+    "zoho_sync_failed": "Zoho sync failed",
+}
 
 
 def _admin_returns_queryset():
@@ -84,6 +111,94 @@ def _return_refund_amount(ret: OrderReturn) -> Decimal:
 def _customer_display_name(user) -> str:
     parts = [user.first_name or "", user.last_name or ""]
     return " ".join(p for p in parts if p).strip() or user.email
+
+
+def _performed_at_iso(dt) -> str:
+    if not dt:
+        return ""
+    if timezone.is_naive(dt):
+        dt = timezone.make_aware(dt, timezone.get_current_timezone())
+    return dt.astimezone(dt_timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _extract_tagged_note(note: str, tag: str) -> str:
+    prefix = f"[{tag}]"
+    for line in (note or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith(prefix):
+            return stripped[len(prefix):].strip()
+    return ""
+
+
+def _log_note_for_action(ret: OrderReturn, action: str, metadata: Optional[dict] = None) -> str:
+    meta = metadata or {}
+    note = (meta.get("note") or "").strip()
+    if note:
+        return note
+    tag = _NOTE_TAG_BY_ACTION.get(action)
+    if tag:
+        parsed = _extract_tagged_note(ret.note, tag)
+        if parsed:
+            return parsed
+    if action == "requested":
+        return (ret.return_reason_detail or "").strip() or _return_reason_label(ret)
+    if action == "zoho_synced" and (ret.zoho_salesreturn_id or "").strip():
+        return f"Books credit note {ret.zoho_salesreturn_id}"
+    return ""
+
+
+def _build_return_logs(ret: OrderReturn) -> list[dict]:
+    logs: list[dict] = [
+        {
+            "return_id": ret.pk,
+            "action": "requested",
+            "performed_by": _customer_display_name(ret.user),
+            "performed_at": _performed_at_iso(ret.created_at),
+            "note": _log_note_for_action(ret, "requested"),
+        },
+    ]
+
+    activity_qs = (
+        AdminActivityLog.objects.filter(
+            category=AdminActivityLog.Category.RETURNS,
+            target_type="return",
+            target_id=ret.pk,
+        )
+        .select_related("actor")
+        .order_by("created_at")
+    )
+
+    logged_actions: set[str] = set()
+    for entry in activity_qs:
+        action = _RETURN_LOG_ACTIONS.get(
+            entry.action,
+            (entry.action or "").replace("return.", "", 1),
+        )
+        logged_actions.add(action)
+        if entry.actor_id:
+            performed_by = _actor_display_name(entry.actor)
+        elif entry.actor_email:
+            performed_by = entry.actor_email
+        else:
+            performed_by = "System"
+        logs.append({
+            "return_id": ret.pk,
+            "action": action,
+            "performed_by": performed_by,
+            "performed_at": _performed_at_iso(entry.created_at),
+            "note": _log_note_for_action(ret, action, entry.metadata),
+        })
+
+    if (ret.zoho_salesreturn_id or "").strip() and "zoho_synced" not in logged_actions:
+        logs.append({
+            "return_id": ret.pk,
+            "action": "zoho_synced",
+            "performed_by": "System",
+            "performed_at": _performed_at_iso(ret.updated_at),
+            "note": _log_note_for_action(ret, "zoho_synced"),
+        })
+
+    return logs
 
 
 def _return_reason_label(ret: OrderReturn) -> str:
@@ -272,7 +387,7 @@ class AdminReturnListSerializer(serializers.ModelSerializer):
         return _customer_display_name(obj.user)
 
     def get_status_label(self, obj):
-        return obj.get_status_display()
+        return _ADMIN_RETURN_STATUS_LABELS.get(obj.status, obj.get_status_display())
 
     def get_return_reason_label(self, obj):
         return _return_reason_label(obj)
@@ -391,12 +506,81 @@ class AdminReturnApproveAPIView(AdminReturnDetailAPIViewMixin, APIView):
             message=f"Approved return #{ret.pk} for order #{ret.order_id}.",
             target_type="return",
             target_id=ret.pk,
-            metadata={"order_id": ret.order_id},
+            metadata={"order_id": ret.order_id, "note": staff_note},
         )
         return Response(
             {
                 "message": "Return approved.",
                 "return": self._detail_payload(ret),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminReturnZohoSyncAPIView(AdminReturnDetailAPIViewMixin, APIView):
+    """Retry pushing an approved return to Zoho when zoho_salesreturn_id is still empty."""
+
+    permission_classes = [IsAuthenticated, IsStaffUser]
+
+    def post(self, request, pk):
+        ret = get_object_or_404(_admin_returns_queryset(), pk=pk)
+        if (ret.zoho_salesreturn_id or '').strip():
+            return Response(
+                {
+                    'message': 'Return is already synced to Zoho.',
+                    'return': self._detail_payload(ret),
+                },
+                status=status.HTTP_200_OK,
+            )
+        if ret.status not in (OrderReturn.Status.SYNCED, OrderReturn.Status.FAILED):
+            return Response(
+                {
+                    'detail': (
+                        'Return must be approved before Zoho sync. '
+                        f"Current status: {ret.get_status_display()}."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if ret.status == OrderReturn.Status.FAILED:
+            ret.status = OrderReturn.Status.SYNCED
+            ret.save(update_fields=['status', 'updated_at'])
+
+        maybe_push_return_to_zoho(ret.pk)
+        ret = _reload_admin_return(pk)
+        if (ret.zoho_salesreturn_id or '').strip():
+            message = 'Return synced to Zoho.'
+            record_admin_activity(
+                request,
+                category=AdminActivityLog.Category.RETURNS,
+                action='return.zoho_synced',
+                message=f'Synced return #{ret.pk} to Zoho ({ret.zoho_salesreturn_id}).',
+                target_type='return',
+                target_id=ret.pk,
+                metadata={
+                    'order_id': ret.order_id,
+                    'zoho_salesreturn_id': ret.zoho_salesreturn_id,
+                },
+            )
+        elif ret.status == OrderReturn.Status.FAILED:
+            message = 'Zoho sync failed. See return note for details.'
+            record_admin_activity(
+                request,
+                category=AdminActivityLog.Category.RETURNS,
+                action='return.zoho_sync_failed',
+                message=f'Zoho sync failed for return #{ret.pk}.',
+                target_type='return',
+                target_id=ret.pk,
+                metadata={'order_id': ret.order_id},
+            )
+        else:
+            message = 'Zoho sync did not complete. Check server logs and Zoho configuration.'
+
+        return Response(
+            {
+                'message': message,
+                'return': self._detail_payload(ret),
             },
             status=status.HTTP_200_OK,
         )
@@ -453,7 +637,7 @@ class AdminReturnRejectAPIView(AdminReturnDetailAPIViewMixin, APIView):
             message=f"Rejected return #{ret.pk} for order #{ret.order_id}.",
             target_type="return",
             target_id=ret.pk,
-            metadata={"order_id": ret.order_id},
+            metadata={"order_id": ret.order_id, "note": staff_note},
         )
         return Response(
             {
@@ -676,6 +860,14 @@ class AdminReturnRefundAPIView(AdminReturnDetailAPIViewMixin, APIView):
 
             ret.status = OrderReturn.Status.COMPLETED
             ret.save(update_fields=['status', 'note', 'updated_at'])
+            previous_stage = ret.order.customer_tracking_stage
+            record_tracking_stage(ret.order, "returned", save=True)
+            ret.order.refresh_from_db(fields=["customer_tracking_stage", "tracking_stage_history"])
+            notify_order_tracking_status_change(
+                ret.order,
+                stage_key="returned",
+                previous_stage=previous_stage,
+            )
 
         create_user_notification(
             ret.user,
@@ -702,6 +894,7 @@ class AdminReturnRefundAPIView(AdminReturnDetailAPIViewMixin, APIView):
             metadata={
                 "order_id": ret.order_id,
                 "refund_amount": str(refund_amount),
+                "note": staff_note,
             },
         )
         return Response(
@@ -713,3 +906,11 @@ class AdminReturnRefundAPIView(AdminReturnDetailAPIViewMixin, APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class AdminReturnLogsAPIView(APIView):
+    permission_classes = [IsAuthenticated, IsStaffUser]
+
+    def get(self, request, pk):
+        ret = get_object_or_404(_admin_returns_queryset(), pk=pk)
+        return Response(_build_return_logs(ret), status=status.HTTP_200_OK)

@@ -113,10 +113,10 @@ class Order(models.Model):
 
     class CustomerTrackingStage(models.TextChoices):
         PENDING = 'pending', 'Pending'
-        CONFIRMED = 'confirmed', 'Confirmed'
         PACKED = 'packed', 'Packed'
         OUT_FOR_DELIVERY = 'out_for_delivery', 'Out for Delivery'
         DELIVERED = 'delivered', 'Delivered'
+        RETURNED = 'returned', 'Returned'
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='orders')
     store = models.ForeignKey(Store, on_delete=models.PROTECT, related_name='orders')
@@ -254,6 +254,11 @@ class Order(models.Model):
         choices=CustomerTrackingStage.choices,
         blank=True,
         help_text='Customer-facing delivery stage for the app tracking rail and emails.',
+    )
+    tracking_stage_history = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Map of tracking stage key → ISO datetime when that stage was reached.',
     )
     out_for_delivery_email_sent_at = models.DateTimeField(
         null=True,

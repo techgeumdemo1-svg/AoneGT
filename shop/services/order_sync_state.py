@@ -66,9 +66,12 @@ def apply_order_sync_transition(
         update_fields.extend(['zoho_sync_error', 'zoho_synced_at'])
         if not (order.customer_tracking_stage or '').strip():
             from shop.models import Order as OrderModel
+            from shop.services.order_tracking import ensure_pending_recorded, record_tracking_stage
 
-            order.customer_tracking_stage = OrderModel.CustomerTrackingStage.CONFIRMED
-            update_fields.append('customer_tracking_stage')
+            order.customer_tracking_stage = OrderModel.CustomerTrackingStage.PENDING
+            ensure_pending_recorded(order)
+            record_tracking_stage(order, 'pending', at=order.created_at, save=False)
+            update_fields.extend(['customer_tracking_stage', 'tracking_stage_history'])
     elif clear_error:
         order.zoho_sync_error = ''
         update_fields.append('zoho_sync_error')

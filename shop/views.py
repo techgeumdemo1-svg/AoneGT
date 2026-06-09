@@ -1405,6 +1405,7 @@ class CheckoutAPIView(APIView):
                 user=request.user,
                 store=store,
                 status=Order.Status.PENDING_ZOHO_SYNC,
+                tracking_stage_history={},
                 currency=currency,
                 payment_method=ser.validated_data['payment_method'],
                 payment_status=(
@@ -1438,6 +1439,10 @@ class CheckoutAPIView(APIView):
                     quantity=it.quantity,
                     line_total=line,
                 )
+
+            from shop.services.order_tracking import record_tracking_stage
+
+            record_tracking_stage(order, 'pending', at=order.created_at, save=True)
             if offer_coupon is not None and (offer_coupon.coupon_type or '').lower() == 'buyxgety':
                 get_products = offer_coupon.get_products if isinstance(offer_coupon.get_products, dict) else {}
                 get_product_rows = get_products.get('products', []) if isinstance(get_products, dict) else []

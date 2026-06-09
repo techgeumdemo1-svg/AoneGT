@@ -24,8 +24,10 @@ from .returns import (
     AdminReturnApproveAPIView,
     AdminReturnDetailAPIView,
     AdminReturnListAPIView,
+    AdminReturnLogsAPIView,
     AdminReturnRefundAPIView,
     AdminReturnRejectAPIView,
+    AdminReturnZohoSyncAPIView,
 )
 from .banners import (
     AdminBannerDetailAPIView,
@@ -97,7 +99,9 @@ urlpatterns = [
     path('customers/<int:pk>/super-coins/', AdminCustomerSuperCoinsAPIView.as_view(), name='admin-customers-super-coins'),
     path('returns/', AdminReturnListAPIView.as_view(), name='admin-returns-list'),
     path('returns/<int:pk>/', AdminReturnDetailAPIView.as_view(), name='admin-returns-detail'),
+    path('returns/<int:pk>/logs/', AdminReturnLogsAPIView.as_view(), name='admin-returns-logs'),
     path('returns/<int:pk>/approve/', AdminReturnApproveAPIView.as_view(), name='admin-returns-approve'),
+    path('returns/<int:pk>/zoho-sync/', AdminReturnZohoSyncAPIView.as_view(), name='admin-returns-zoho-sync'),
     path('returns/<int:pk>/reject/', AdminReturnRejectAPIView.as_view(), name='admin-returns-reject'),
     path('returns/<int:pk>/refund/', AdminReturnRefundAPIView.as_view(), name='admin-returns-refund'),
     path('stores/', AdminStoreListAPIView.as_view(), name='admin-stores-list'),
