@@ -39,7 +39,10 @@ class OrderSummaryAPIView(APIView):
         ser = OrderSummaryRequestSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         store = Store.objects.get(pk=ser.validated_data['store_id'], is_active=True)
-        vat_percent = Decimal(ser.validated_data['vat_percent']).quantize(Decimal('0.01'))
+        # VAT percent always from server settings — client value ignored.
+        from django.conf import settings as _settings
+        _default_vat = getattr(_settings, 'DEFAULT_VAT_PERCENT', '5.00')
+        vat_percent = Decimal(str(_default_vat)).quantize(Decimal('0.01'))
         coupon_code = (ser.validated_data.get('coupon_code') or '').strip()
         _cart, cart_items, subtotal = get_cart_context(request.user, store)
         # Use serializer-validated payment_method. None/blank = no method selected yet

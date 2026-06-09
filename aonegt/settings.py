@@ -208,6 +208,11 @@ try:
 except Exception:
     DEFAULT_SHIPPING_AMOUNT = Decimal('0')
 
+try:
+    DEFAULT_VAT_PERCENT = Decimal(os.getenv('DEFAULT_VAT_PERCENT', '5.00'))
+except Exception:
+    DEFAULT_VAT_PERCENT = Decimal('5.00')
+
 # --- Zoho: registration gate ---
 REGISTER_REQUIRE_ZOHO_CONTACT = os.getenv(
     'REGISTER_REQUIRE_ZOHO_CONTACT', 'False',

@@ -1230,7 +1230,10 @@ class CheckoutAPIView(APIView):
             )
         subtotal = sum((it.line_subtotal for it in items), Decimal('0'))
         subtotal = subtotal.quantize(Decimal('0.01'))
-        vat_percent = Decimal(ser.validated_data.get('vat_percent') or '0').quantize(Decimal('0.01'))
+        # VAT percent is always taken from server settings — never trusted from client.
+        # Client may still send vat_percent for display purposes but it is ignored here.
+        _default_vat = getattr(settings, 'DEFAULT_VAT_PERCENT', '5.00')
+        vat_percent = Decimal(str(_default_vat)).quantize(Decimal('0.01'))
 
         billing_same = ser.validated_data['billing_same_as_shipping']
         ship = {k: ser.validated_data[k] for k in (
@@ -1290,8 +1293,14 @@ class CheckoutAPIView(APIView):
                 allowed, reason = coupon_is_applicable(offer_coupon, locked_user, cart_snapshots, subtotal)
                 if not allowed:
                     return Response({'error': reason}, status=status.HTTP_400_BAD_REQUEST)
-                if offer_coupon_discount is not None:
-                    offer_coupon_discount_value = Decimal(str(offer_coupon_discount)).quantize(Decimal('0.01'))
+                # Always recalculate discount server-side — never trust client-provided value.
+                offer_coupon_discount_value = calculate_coupon_discount(
+                    offer_coupon,
+                    cart_snapshots,
+                    subtotal,
+                    shipping_amount,
+                    currency,
+                )
             else:
                 applicable = get_applicable_coupons_for_store(locked_user, store)
                 auto_coupons = applicable.get('auto_applied_coupons') or []
@@ -2945,6 +2954,15 @@ class GeideaStatusView(APIView):
             from shop.services.account_credit import credit_user_for_prepaid_order
             from shop.services.zoho_books_payment import maybe_create_zoho_books_advance_payment_for_order
 
+            # Amount tamper check — same as GeideaCallbackView
+            if Decimal(str(paid_entry.get("totalAmount", 0))) != order.total:
+                logger.error(
+                    "GeideaStatusView — amount mismatch, not reconciling. "
+                    "order_pk=%s expected=%s received=%s",
+                    order.pk, order.total, paid_entry.get("totalAmount"),
+                )
+                return Response({'status': 'pending'})
+
             logger.warning(
                 "GeideaStatusView — missed callback detected. "
                 "order_pk=%s geidea_order_id=%s Reconciling manually.",
@@ -3019,8 +3037,16 @@ class PayByLinkInitiateView(APIView):
                 status=status.HTTP_200_OK,
             )
 
+        # Use select_for_update inside atomic to prevent concurrent requests
+        # from creating two payment links for the same order on network timeout
         try:
-            payment_link = create_geidea_payment_link(order)
+            with transaction.atomic():
+                order = Order.objects.select_for_update().get(pk=order_id, user=request.user)
+                # Re-check inside lock — if another request already created the link, return it
+                if (order.geidea_paylink_url or '').strip():
+                    payment_link = order.geidea_paylink_url
+                else:
+                    payment_link = create_geidea_payment_link(order)
         except GeideaPayLinkError as exc:
             return Response(
                 {'detail': str(exc)},
