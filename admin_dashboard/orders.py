@@ -17,7 +17,14 @@ from shop.serializers import (
     order_code_for_order,
 )
 from shop.services.account_credit import get_user_credit_balance, record_prepaid_payment_success
+from shop.services.order_tracking import (
+    cancelled_at,
+    record_tracking_stage,
+    tracking_stage_events,
+    TRACKING_HISTORY_CANCELLED_KEY,
+)
 from shop.services.order_email import handle_customer_tracking_stage_change
+from shop.services.order_status_notifications import notify_order_tracking_status_change
 from shop.services.zoho_books_payment import (
     is_prepaid_at_checkout_payment_method,
     staff_record_zoho_books_payment_for_order,
@@ -30,15 +37,17 @@ from .views import IsStaffUser
 # Admin-facing labels (request) → customer_tracking_stage key or "cancelled"
 _ADMIN_STATUS_ALIASES = {
     "pending": "pending",
-    "confirmed": "confirmed",
+    "confirmed": "packed",
     "packed": "packed",
     "under processing": "packed",
     "under_processing": "packed",
     "out for delivery": "out_for_delivery",
     "out_for_delivery": "out_for_delivery",
     "delivered": "delivered",
+    "returned": "returned",
     "cancelled": "cancelled",
     "canceled": "cancelled",
+    "cancel": "cancelled",
 }
 for _key, _label in ORDER_CUSTOMER_TRACKING_STAGE_LABELS.items():
     _ADMIN_STATUS_ALIASES[_label.lower()] = _key
@@ -279,14 +288,23 @@ def _apply_order_list_filters(queryset, request):
 
 def _apply_status_update(order: Order, new_status: str) -> Order:
     previous_stage = order.customer_tracking_stage
+    was_cancelled = order.status == Order.Status.CANCELLED
 
     if new_status == "cancelled":
+        record_tracking_stage(order, TRACKING_HISTORY_CANCELLED_KEY, save=False)
         order.status = Order.Status.CANCELLED
-        order.save(update_fields=["status", "updated_at"])
+        order.save(update_fields=["status", "tracking_stage_history", "updated_at"])
+        if not was_cancelled:
+            notify_order_tracking_status_change(
+                order,
+                stage_key="cancelled",
+                previous_stage=previous_stage,
+            )
         return order
 
-    update_fields = ["customer_tracking_stage", "updated_at"]
+    update_fields = ["customer_tracking_stage", "tracking_stage_history", "updated_at"]
     order.customer_tracking_stage = new_status
+    record_tracking_stage(order, new_status, save=False)
 
     if order.status in (Order.Status.PENDING_ZOHO_SYNC, Order.Status.SYNC_FAILED):
         order.status = Order.Status.SYNCED
@@ -294,6 +312,11 @@ def _apply_status_update(order: Order, new_status: str) -> Order:
 
     order.save(update_fields=update_fields)
     handle_customer_tracking_stage_change(order, previous_stage)
+    notify_order_tracking_status_change(
+        order,
+        stage_key=new_status,
+        previous_stage=previous_stage,
+    )
     return order
 
 
@@ -303,10 +326,11 @@ def _build_order_timeline(order: Order) -> list:
     def add_event(*, key, label, at, extra=None):
         if not at:
             return
+        at_value = at.isoformat() if hasattr(at, "isoformat") else str(at)
         payload = {
             "key": key,
             "label": label,
-            "at": at.isoformat(),
+            "at": at_value,
         }
         if extra:
             payload.update(extra)
@@ -318,7 +342,7 @@ def _build_order_timeline(order: Order) -> list:
         add_event(
             key="cancelled",
             label="Cancelled",
-            at=order.updated_at,
+            at=cancelled_at(order) or order.updated_at,
             extra={"status": order.status},
         )
     else:
@@ -344,16 +368,14 @@ def _build_order_timeline(order: Order) -> list:
             at=order.out_for_delivery_email_sent_at,
         )
 
-        stage = _effective_customer_tracking_stage(order)
-        stage_label = ORDER_CUSTOMER_TRACKING_STAGE_LABELS.get(stage, stage)
+    for stage_event in tracking_stage_events(order):
+        if stage_event["key"] == TRACKING_HISTORY_CANCELLED_KEY:
+            continue
         add_event(
-            key=f"tracking_{stage}",
-            label=stage_label,
-            at=order.updated_at,
-            extra={
-                "customer_tracking_stage": stage,
-                "display_status": _display_status_for_order(order),
-            },
+            key=f"tracking_{stage_event['key']}",
+            label=stage_event["label"],
+            at=stage_event["at"],
+            extra={"customer_tracking_stage": stage_event["key"]},
         )
 
     for ret in order.returns.all().order_by("created_at"):

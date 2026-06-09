@@ -24,6 +24,7 @@ from shop.services.zoho_books_invoice import (
     _order_coupon_discount,
     _resolve_customer_id,
 )
+from shop.services.zoho_returns import persist_books_sales_order_line_item_ids
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +148,8 @@ def create_zoho_books_sales_order_for_order(order: Order) -> bool:
     if not salesorder_id:
         raise ZohoBooksError('Zoho Books salesorder_id missing in response.')
 
+    persist_books_sales_order_line_item_ids(order, salesorder)
+
     order.zoho_books_salesorder_id = salesorder_id[:64]
     order.zoho_books_salesorder_number = salesorder_number[:64]
     order.zoho_books_salesorder_error = ''
@@ -179,6 +182,7 @@ def update_zoho_books_sales_order_for_order(order: Order) -> bool:
     customer_id = _resolve_customer_id(order)
     salesorder_body = _build_sales_order_payload(order, customer_id)
     salesorder = books_update_sales_order(salesorder_id, salesorder_body, store=order.store)
+    persist_books_sales_order_line_item_ids(order, salesorder)
 
     salesorder_number = str(salesorder.get('salesorder_number') or '').strip()
     order.zoho_books_salesorder_error = ''

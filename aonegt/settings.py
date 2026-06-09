@@ -166,6 +166,13 @@ except ValueError:
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'webmaster@localhost')
 ORDER_CONFIRMATION_EMAIL = os.getenv('ORDER_CONFIRMATION_EMAIL', 'True') == 'True'
 ORDER_OUT_FOR_DELIVERY_EMAIL = os.getenv('ORDER_OUT_FOR_DELIVERY_EMAIL', 'True') == 'True'
+ORDER_TRACKING_PUSH_ENABLED = os.getenv('ORDER_TRACKING_PUSH_ENABLED', 'True').strip().lower() in (
+    'true', '1', 'yes',
+)
+try:
+    ORDER_TRACKING_POLL_INTERVAL_SECONDS = max(int(os.getenv('ORDER_TRACKING_POLL_INTERVAL_SECONDS', '30')), 5)
+except (TypeError, ValueError):
+    ORDER_TRACKING_POLL_INTERVAL_SECONDS = 30
 FRONTEND_RESET_URL = os.getenv('FRONTEND_RESET_URL', 'aonegt://reset-password')
 
 # --- OTP cleanup (background scheduler + manage.py purge_expired_otps) ---
@@ -242,6 +249,15 @@ ZOHO_ACCESS_TOKEN = os.getenv('ZOHO_ACCESS_TOKEN', '').strip()
 # Push local orders to Zoho Commerce sales orders at checkout / order edit (shop.services.zoho_sales_order).
 ZOHO_COMMERCE_CREATE_SALES_ORDER_ENABLED = os.getenv(
     'ZOHO_COMMERCE_CREATE_SALES_ORDER_ENABLED', 'False',
+).strip().lower() in ('true', '1', 'yes')
+ZOHO_SALES_RETURN_ENABLED = os.getenv('ZOHO_SALES_RETURN_ENABLED', 'True').strip().lower() in (
+    'true', '1', 'yes',
+)
+# Books credit note for returns when a Books invoice exists (see shop.services.zoho_returns).
+# Unset = follow ZOHO_BOOKS_MANUAL_WORKFLOW; set true/false to override.
+ZOHO_RETURN_PREFER_BOOKS_CREDIT_NOTE = os.getenv('ZOHO_RETURN_PREFER_BOOKS_CREDIT_NOTE', '').strip().lower()
+ZOHO_RETURN_BOOKS_CREDIT_NOTE_FALLBACK = os.getenv(
+    'ZOHO_RETURN_BOOKS_CREDIT_NOTE_FALLBACK', 'True',
 ).strip().lower() in ('true', '1', 'yes')
 
 # Zoho Books invoices (per-store zoho_books_org_id on catalog.Store; see shop.services.zoho_books)

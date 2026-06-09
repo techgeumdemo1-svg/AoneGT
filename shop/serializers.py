@@ -9,6 +9,11 @@ from rest_framework import serializers
 from catalog.models import Product, Store
 from offer.models import Coupon
 from shop.services.delivery_zones import get_shipping_fee
+from shop.services.order_tracking import (
+    cancelled_at,
+    ensure_pending_recorded,
+    tracking_stage_at,
+)
 from shop.services.zoho_commerce import ZohoCommerceError, ZohoCommerceService
 from zoho_integration.models import ZohoCommerceAccount
 from zoho_integration.services import ZohoCommerceService as ZohoAccountService
@@ -588,13 +593,25 @@ class OrderItemSerializer(serializers.ModelSerializer):
 # Mobile order-tracking rail (labels). Per-stage updates require Zoho fulfilment data not stored here yet.
 ORDER_CUSTOMER_TRACKING_PIPELINE = (
     ('pending', 'Pending'),
-    ('confirmed', 'Confirmed'),
     ('packed', 'Packed'),
     ('out_for_delivery', 'Out for Delivery'),
     ('delivered', 'Delivered'),
+    ('returned', 'Returned'),
 )
 
 ORDER_CUSTOMER_TRACKING_STAGE_LABELS = dict(ORDER_CUSTOMER_TRACKING_PIPELINE)
+
+
+def _tracking_realtime_meta() -> dict:
+    raw = getattr(settings, 'ORDER_TRACKING_POLL_INTERVAL_SECONDS', 30)
+    try:
+        interval = max(int(raw), 5)
+    except (TypeError, ValueError):
+        interval = 30
+    return {
+        'poll_interval_seconds': interval,
+        'refresh_on_push_event': 'order_status_updated',
+    }
 
 
 def _tracking_stage_index(stage_key: str) -> int:
@@ -607,10 +624,10 @@ def _tracking_stage_index(stage_key: str) -> int:
 
 def _effective_customer_tracking_stage(order: Order) -> str:
     stage = (getattr(order, 'customer_tracking_stage', '') or '').strip()
+    if stage == 'confirmed':
+        return 'packed'
     if stage and stage in ORDER_CUSTOMER_TRACKING_STAGE_LABELS:
         return stage
-    if order.status == Order.Status.SYNCED:
-        return 'confirmed'
     return 'pending'
 
 
@@ -741,8 +758,15 @@ class OrderSerializer(serializers.ModelSerializer):
         return 'Pending'
 
     def get_tracking(self, obj):
+        ensure_pending_recorded(obj)
+
         def step_dict(key: str, label: str, state: str) -> dict:
-            return {'key': key, 'label': label, 'state': state}
+            return {
+                'key': key,
+                'label': label,
+                'state': state,
+                'at': tracking_stage_at(obj, key),
+            }
 
         pipeline = ORDER_CUSTOMER_TRACKING_PIPELINE
         if obj.status == Order.Status.CANCELLED:
@@ -750,23 +774,17 @@ class OrderSerializer(serializers.ModelSerializer):
                 'steps': [step_dict(k, l, 'skipped') for k, l in pipeline],
                 'current_key': 'cancelled',
                 'current_label': 'Cancelled',
+                'cancelled_at': cancelled_at(obj),
                 'is_cancelled': True,
                 'is_returned': False,
                 'note': 'Order was cancelled.',
+                **_tracking_realtime_meta(),
             }
 
         ret = self._order_return_status(obj)
-        if ret == 'full':
-            steps = [step_dict(k, l, 'completed') for k, l in pipeline]
-            steps.append(step_dict('returned', 'Returned', 'current'))
-            return {
-                'steps': steps,
-                'current_key': 'returned',
-                'current_label': 'Returned',
-                'is_cancelled': False,
-                'is_returned': True,
-                'note': None,
-            }
+        stage_key = _effective_customer_tracking_stage(obj)
+        if ret == 'full' and stage_key != 'returned':
+            stage_key = 'returned'
 
         if obj.status in (Order.Status.PENDING_ZOHO_SYNC, Order.Status.SYNC_FAILED):
             steps = []
@@ -778,12 +796,10 @@ class OrderSerializer(serializers.ModelSerializer):
                 'current_label': pipeline[0][1],
                 'is_cancelled': False,
                 'is_returned': False,
-                'note': (
-                    'Further stages appear after the order is confirmed.'
-                ),
+                'note': 'Further stages appear after the order is synced.',
+                **_tracking_realtime_meta(),
             }
 
-        stage_key = _effective_customer_tracking_stage(obj)
         stage_idx = _tracking_stage_index(stage_key)
         steps = []
         for i, (k, l) in enumerate(pipeline):
@@ -797,13 +813,16 @@ class OrderSerializer(serializers.ModelSerializer):
         note = None
         if ret == 'partial':
             note = 'Some items were returned; order is still in progress with partial refund.'
+        is_returned = ret == 'full' or stage_key == 'returned'
         return {
             'steps': steps,
             'current_key': stage_key,
             'current_label': ORDER_CUSTOMER_TRACKING_STAGE_LABELS.get(stage_key, stage_key),
+            'current_at': tracking_stage_at(obj, stage_key),
             'is_cancelled': False,
-            'is_returned': False,
+            'is_returned': is_returned,
             'note': note,
+            **_tracking_realtime_meta(),
         }
 
     def get_items_count(self, obj):
