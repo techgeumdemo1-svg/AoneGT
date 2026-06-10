@@ -317,6 +317,15 @@ def create_zoho_books_advance_payment_for_order(order) -> None:
         'description': description,
     }
 
+    # Deposit account routing — add account_id if configured for this store
+    try:
+        books_config = order.store.zoho_books_config
+        deposit_id = (books_config.deposit_account_id or '').strip()
+        if deposit_id:
+            body['account_id'] = deposit_id
+    except Exception:
+        pass  # No config — omit account_id; Zoho defaults to Undeposited Funds
+
     try:
         payload = _books_request('POST', 'customerpayments', store=store, json_data=body)
         payment = payload.get('payment') or {}
@@ -331,6 +340,16 @@ def create_zoho_books_advance_payment_for_order(order) -> None:
         )
         order.zoho_books_payment_id = payment_id
         logger.info("Advance payment %s created in Zoho Books for order %s", payment_id, order.pk)
+
+        # Journal automation — best-effort, after payment is persisted
+        try:
+            from shop.services.zoho_books_journals import create_payment_journals_for_order
+            create_payment_journals_for_order(order, order.payment_method)
+        except Exception as exc:
+            logger.exception(
+                'zoho-journals: journal trigger failed after advance payment order=%s error=%s',
+                order.pk, exc,
+            )
 
     except ZohoBooksError as exc:
         logger.error("Zoho Books advance payment failed for order %s: %s", order.pk, exc, exc_info=True)
