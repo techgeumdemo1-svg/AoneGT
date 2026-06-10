@@ -363,6 +363,81 @@ def books_void_sales_order(salesorder_id: str, *, store=None) -> dict[str, Any]:
     return salesorder if isinstance(salesorder, dict) else payload
 
 
+def invoice_belongs_to_sales_order(invoice: dict[str, Any], salesorder_id: str) -> bool:
+    """True when the invoice was created from the given Zoho Books sales order."""
+    salesorder_id = (salesorder_id or '').strip()
+    if not salesorder_id:
+        return False
+    if str(invoice.get('salesorder_id') or '').strip() == salesorder_id:
+        return True
+    for row in invoice.get('salesorders') or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get('salesorder_id') or '').strip() == salesorder_id:
+            return True
+    return False
+
+
+def books_list_invoices_for_sales_order(salesorder_id: str, *, store=None) -> list[dict[str, Any]]:
+    """
+    List invoices for a sales order.
+
+    Uses the sales order record first (authoritative). The invoices list API
+    salesorder_id filter is unreliable and may return unrelated invoices.
+    """
+    salesorder_id = (salesorder_id or '').strip()
+    if not salesorder_id:
+        return []
+
+    try:
+        salesorder = books_get_sales_order(salesorder_id, store=store)
+        from_sales_order = [
+            row for row in (salesorder.get('invoices') or [])
+            if isinstance(row, dict)
+        ]
+        if from_sales_order:
+            # SO detail returns invoice summaries without salesorder_id — fetch full
+            # records so invoice_belongs_to_sales_order() can validate them.
+            full_invoices: list[dict[str, Any]] = []
+            for row in from_sales_order:
+                invoice_id = str(row.get('invoice_id') or '').strip()
+                if not invoice_id:
+                    continue
+                try:
+                    invoice = books_get_invoice(invoice_id, store=store)
+                except ZohoBooksError:
+                    continue
+                if invoice_belongs_to_sales_order(invoice, salesorder_id):
+                    full_invoices.append(invoice)
+            if full_invoices:
+                return full_invoices
+    except ZohoBooksError:
+        pass
+
+    payload = _books_request(
+        'GET',
+        'invoices',
+        store=store,
+        query={'salesorder_id': salesorder_id},
+    )
+    matched: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in payload.get('invoices') or []:
+        if not isinstance(row, dict):
+            continue
+        invoice_id = str(row.get('invoice_id') or '').strip()
+        if not invoice_id or invoice_id in seen:
+            continue
+        seen.add(invoice_id)
+        try:
+            invoice = books_get_invoice(invoice_id, store=store)
+        except ZohoBooksError:
+            continue
+        if invoice_belongs_to_sales_order(invoice, salesorder_id):
+            matched.append(invoice)
+    return matched
+
+
 def books_get_invoice(invoice_id: str, *, store=None) -> dict[str, Any]:
     invoice_id = (invoice_id or '').strip()
     if not invoice_id:

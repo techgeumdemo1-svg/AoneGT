@@ -19,6 +19,11 @@ from django.db import transaction
 
 from shop.models import Order
 from shop.services.account_credit import credit_user_for_prepaid_order
+from shop.services.card_on_delivery_payment import (
+    finalize_card_on_delivery_after_geidea,
+    is_card_on_delivery_order,
+    record_card_on_delivery_geidea_payment,
+)
 from shop.services.zoho_books_payment import maybe_create_zoho_books_advance_payment_for_order
 
 logger = logging.getLogger(__name__)
@@ -157,19 +162,29 @@ def process_geidea_callback(payload):
                 )
                 return 400, "Currency mismatch"
 
-            # Credit the user — this sets payment_status=PAID and gateway_reference
-            credit_user_for_prepaid_order(
-                order,
-                amount=Decimal(str(callback_amount)),
-                gateway_reference=geidea_order_id,  # Geidea's UUID
-            )
-
-            logger.info(
-                "Geidea callback — order marked PAID. "
-                "order_pk=%s zoho_so=%s geidea_order_id=%s amount=%s",
-                order.pk, order.zoho_books_salesorder_id,
-                geidea_order_id, callback_amount,
-            )
+            if is_card_on_delivery_order(order):
+                record_card_on_delivery_geidea_payment(
+                    order,
+                    Decimal(str(callback_amount)),
+                    gateway_reference=geidea_order_id,
+                )
+                logger.info(
+                    "Geidea callback — card on delivery marked PAID. "
+                    "order_pk=%s geidea_order_id=%s amount=%s",
+                    order.pk, geidea_order_id, callback_amount,
+                )
+            else:
+                credit_user_for_prepaid_order(
+                    order,
+                    amount=Decimal(str(callback_amount)),
+                    gateway_reference=geidea_order_id,
+                )
+                logger.info(
+                    "Geidea callback — order marked PAID. "
+                    "order_pk=%s zoho_so=%s geidea_order_id=%s amount=%s",
+                    order.pk, order.zoho_books_salesorder_id,
+                    geidea_order_id, callback_amount,
+                )
 
     except Exception as exc:
         logger.critical(
@@ -180,17 +195,18 @@ def process_geidea_callback(payload):
         # Return 200 anyway — do not let Geidea retry indefinitely
         return 200, "Internal error"
 
-    # ── Step D: Zoho Advance Payment (outside atomic block) ───────────────
-    # Order is now PAID. Zoho failure must never reverse this.
+    # ── Step D: Post-payment actions (outside atomic block) ─────────────
     try:
-        maybe_create_zoho_books_advance_payment_for_order(order)
+        if is_card_on_delivery_order(order):
+            finalize_card_on_delivery_after_geidea(order.pk)
+        else:
+            maybe_create_zoho_books_advance_payment_for_order(order)
     except Exception as exc:
         logger.critical(
-            "Geidea callback — Zoho advance payment failed AFTER order marked PAID. "
-            "order_pk=%s zoho_so=%s amount=%s error=%s "
-            "ACTION REQUIRED: reconcile manually via OrderZohoBooksPaymentAPIView.",
-            order.pk, order.zoho_books_salesorder_id, callback_amount, exc,
+            "Geidea callback — post-payment step failed AFTER order marked PAID. "
+            "order_pk=%s payment_method=%s amount=%s error=%s "
+            "ACTION REQUIRED: reconcile manually.",
+            order.pk, order.payment_method, callback_amount, exc,
         )
-        # Still return 200 to Geidea — order is paid, Zoho is a separate concern
 
     return 200, "OK"

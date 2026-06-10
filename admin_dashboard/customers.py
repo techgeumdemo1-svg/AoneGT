@@ -98,6 +98,33 @@ class AdminCustomerStatusUpdateSerializer(serializers.Serializer):
         return key
 
 
+def _parse_customer_id_query_param(request, *, required=True):
+    customer_id = (request.query_params.get('id') or '').strip()
+    if not customer_id:
+        if required:
+            return None, Response(
+                {'detail': 'Query parameter id is required and must be a positive integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return None, None
+    if not customer_id.isdigit():
+        return None, Response(
+            {'detail': 'Query parameter id is required and must be a positive integer.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return int(customer_id), None
+
+
+def _customer_detail_queryset():
+    return _customers_queryset().annotate(
+        orders_count=Count("orders", distinct=True),
+        orders_total=Sum(
+            "orders__total",
+            filter=~Q(orders__status=Order.Status.CANCELLED),
+        ),
+    )
+
+
 def _apply_customer_list_filters(queryset, request):
     status_filter = (request.query_params.get("status") or "").strip().lower()
     if status_filter == "active":
@@ -145,28 +172,26 @@ class AdminCustomerListAPIView(APIView):
 
 
 class AdminCustomerDetailAPIView(APIView):
+    """GET /api/admin/customers/detail/?id=<customer_id>"""
+
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def get(self, request, pk):
-        user = get_object_or_404(
-            _customers_queryset()
-            .annotate(
-                orders_count=Count("orders", distinct=True),
-                orders_total=Sum(
-                    "orders__total",
-                    filter=~Q(orders__status=Order.Status.CANCELLED),
-                ),
-            ),
-            pk=pk,
-        )
+    def get(self, request):
+        customer_id, err = _parse_customer_id_query_param(request)
+        if err:
+            return err
+        user = get_object_or_404(_customer_detail_queryset(), pk=customer_id)
         return Response(AdminCustomerDetailSerializer(user).data, status=status.HTTP_200_OK)
 
 
 class AdminCustomerStatusUpdateAPIView(APIView):
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def patch(self, request, pk):
-        user = get_object_or_404(_customers_queryset(), pk=pk)
+    def patch(self, request):
+        customer_id, err = _parse_customer_id_query_param(request)
+        if err:
+            return err
+        user = get_object_or_404(_customers_queryset(), pk=customer_id)
         serializer = AdminCustomerStatusUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         new_status = serializer.validated_data["status"]
@@ -195,8 +220,11 @@ class AdminCustomerStatusUpdateAPIView(APIView):
 class AdminCustomerOrdersAPIView(APIView):
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def get(self, request, pk):
-        user = get_object_or_404(_customers_queryset(), pk=pk)
+    def get(self, request):
+        customer_id, err = _parse_customer_id_query_param(request)
+        if err:
+            return err
+        user = get_object_or_404(_customers_queryset(), pk=customer_id)
         qs = (
             Order.objects.filter(user=user)
             .select_related("user", "store")
@@ -223,6 +251,9 @@ class AdminCustomerSuperCoinsAPIView(APIView):
 
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def get(self, request, pk):
-        user = get_object_or_404(_customers_queryset(), pk=pk)
+    def get(self, request):
+        customer_id, err = _parse_customer_id_query_param(request)
+        if err:
+            return err
+        user = get_object_or_404(_customers_queryset(), pk=customer_id)
         return Response(build_customer_super_coins_payload(user), status=status.HTTP_200_OK)

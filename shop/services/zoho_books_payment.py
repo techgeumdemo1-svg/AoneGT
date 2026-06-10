@@ -13,6 +13,8 @@ from shop.serializers import order_code_for_order
 from shop.services.zoho_books import (
     ZohoBooksError,
     books_create_customer_payment,
+    books_get_invoice,
+    invoice_belongs_to_sales_order,
     zoho_books_enabled,
     store_has_books_config,
 )
@@ -88,12 +90,27 @@ def record_zoho_books_payment_for_order(
     if not ready:
         raise ZohoBooksError(reason)
 
+    invoice_id = (order.zoho_books_invoice_id or '').strip()
+    invoice = books_get_invoice(invoice_id, store=order.store)
+    salesorder_id = (order.zoho_books_salesorder_id or '').strip()
+    if salesorder_id and not invoice_belongs_to_sales_order(invoice, salesorder_id):
+        raise ZohoBooksError(
+            'Linked invoice does not belong to this order sales order. '
+            'Create the correct invoice in Zoho Books and retry collect-cod.',
+        )
+
+    balance_due = Decimal(str(invoice.get('balance', 0))).quantize(Decimal('0.01'))
+    if balance_due <= 0:
+        raise ZohoBooksError(
+            'Invoice has no balance due. It may already be paid or the wrong invoice is linked.',
+        )
+
     pay_amount = amount if amount is not None else Decimal(str(order.total or 0))
     pay_amount = pay_amount.quantize(Decimal('0.01'))
     if pay_amount <= 0:
         raise ZohoBooksError('Payment amount must be greater than zero.')
-
-    invoice_id = (order.zoho_books_invoice_id or '').strip()
+    if pay_amount > balance_due:
+        pay_amount = balance_due
     customer_id = _resolve_customer_id(order)
     payment_mode = books_payment_mode_for_order(order, override=payment_method)
     paid_dt = paid_at or dj_tz.now()

@@ -20,8 +20,12 @@ from shop.services.zoho_books import (
     books_find_contact_id_by_email,
     books_find_contact_id_by_name,
     books_get_contact,
+    books_get_invoice,
+    books_get_sales_order,
+    books_list_invoices_for_sales_order,
     books_mark_invoice_sent,
     books_update_contact_name,
+    invoice_belongs_to_sales_order,
     store_has_books_config,
     zoho_books_enabled,
     zoho_books_vat_tax_id,
@@ -544,3 +548,172 @@ def staff_create_zoho_books_invoice_for_order(order_id: int) -> tuple[bool, str]
         return False, str(exc)
 
     return True, f'Zoho Books invoice created.{credit_msg}'
+
+
+_VOID_INVOICE_STATUSES = frozenset({'void', 'cancelled'})
+
+
+def _clear_linked_invoice_fields(order: Order) -> None:
+    order.zoho_books_invoice_id = ''
+    order.zoho_books_invoice_number = ''
+    order.zoho_books_invoice_error = ''
+    order.zoho_books_invoiced_at = None
+
+
+def _pick_invoice_for_order(order: Order, invoices: list[dict]) -> dict | None:
+    """Choose the best Zoho invoice for this order's sales order."""
+    order_total = Decimal(str(order.total or 0)).quantize(Decimal('0.01'))
+    salesorder_id = (order.zoho_books_salesorder_id or '').strip()
+    candidates: list[dict] = []
+    for invoice in invoices:
+        if not isinstance(invoice, dict):
+            continue
+        status = (invoice.get('status') or '').strip().lower()
+        if status in _VOID_INVOICE_STATUSES:
+            continue
+        if not invoice_belongs_to_sales_order(invoice, salesorder_id):
+            continue
+        candidates.append(invoice)
+
+    if not candidates:
+        return None
+
+    unpaid = [
+        row for row in candidates
+        if Decimal(str(row.get('balance', 0))).quantize(Decimal('0.01')) > 0
+    ]
+    pool = unpaid or candidates
+
+    def sort_key(row: dict) -> tuple:
+        total = Decimal(str(row.get('total', 0))).quantize(Decimal('0.01'))
+        balance = Decimal(str(row.get('balance', 0))).quantize(Decimal('0.01'))
+        return (abs(total - order_total), -balance)
+
+    return min(pool, key=sort_key)
+
+
+def relink_zoho_books_invoice_for_order_from_books(order: Order) -> tuple[bool, str]:
+    """
+    Drop a stale/wrong local invoice link and sync from Zoho Books again.
+    """
+    if (order.zoho_books_invoice_id or '').strip():
+        _clear_linked_invoice_fields(order)
+        order.save(
+            update_fields=[
+                'zoho_books_invoice_id',
+                'zoho_books_invoice_number',
+                'zoho_books_invoice_error',
+                'zoho_books_invoiced_at',
+                'updated_at',
+            ],
+        )
+    return sync_zoho_books_invoice_for_order_from_books(order)
+
+
+def ensure_zoho_books_invoice_for_order(order: Order) -> tuple[bool, str]:
+    """
+    Ensure the local order points at the correct Zoho invoice for its sales order.
+    Clears and re-links when the stored invoice belongs to another sales order.
+    """
+    salesorder_id = (order.zoho_books_salesorder_id or '').strip()
+    if not salesorder_id:
+        return False, 'Order has no Zoho Books sales order.'
+
+    linked_id = (order.zoho_books_invoice_id or '').strip()
+    if linked_id:
+        try:
+            invoice = books_get_invoice(linked_id, store=order.store)
+        except ZohoBooksError as exc:
+            return relink_zoho_books_invoice_for_order_from_books(order)
+
+        if invoice_belongs_to_sales_order(invoice, salesorder_id):
+            return True, 'Zoho Books invoice already linked.'
+
+        logger.warning(
+            'zoho-books: wrong invoice linked order=%s invoice=%s salesorder=%s',
+            order.pk,
+            linked_id,
+            salesorder_id,
+        )
+        return relink_zoho_books_invoice_for_order_from_books(order)
+
+    return sync_zoho_books_invoice_for_order_from_books(order)
+
+
+def sync_zoho_books_invoice_for_order_from_books(order: Order) -> tuple[bool, str]:
+    """
+    Link an invoice staff created in the Zoho Books UI to this local order.
+    Looks up invoices by sales order id — no invoice is created by our API.
+    """
+    if not zoho_books_enabled():
+        return False, 'Zoho Books is disabled.'
+    if not store_has_books_config(order.store):
+        return False, 'Store is missing Zoho Books org configuration.'
+    if order.status == Order.Status.CANCELLED:
+        return False, 'Cancelled orders cannot be linked to an invoice.'
+    if (order.zoho_books_invoice_id or '').strip():
+        return True, 'Zoho Books invoice already linked.'
+
+    salesorder_id = (order.zoho_books_salesorder_id or '').strip()
+    if not salesorder_id:
+        return False, 'Order has no Zoho Books sales order.'
+
+    try:
+        invoices = books_list_invoices_for_sales_order(salesorder_id, store=order.store)
+    except ZohoBooksError as exc:
+        logger.warning(
+            'zoho-books: invoice sync failed order=%s salesorder=%s (%s)',
+            order.pk,
+            salesorder_id,
+            exc,
+        )
+        return False, str(exc)
+
+    candidate = _pick_invoice_for_order(order, invoices)
+
+    if candidate is None:
+        so_number = (order.zoho_books_salesorder_number or '').strip()
+        so_label = f' {so_number}' if so_number else ''
+        try:
+            salesorder = books_get_sales_order(salesorder_id, store=order.store)
+            invoiced_status = str(salesorder.get('invoiced_status') or '').strip()
+        except ZohoBooksError:
+            invoiced_status = ''
+        if invoiced_status == 'not_invoiced':
+            return (
+                False,
+                f'No invoice found in Zoho Books for sales order{so_label}. '
+                'The sales order is confirmed, but an invoice has not been created yet. '
+                f'In Zoho Books, open{so_label} and use Convert to Invoice, then retry collect-cod.',
+            )
+        return (
+            False,
+            'No invoice found in Zoho Books for this sales order. '
+            'Staff must confirm the sales order and create the invoice in Zoho Books.',
+        )
+
+    invoice_id = str(candidate.get('invoice_id') or '').strip()
+    invoice_number = str(candidate.get('invoice_number') or '').strip()
+    if not invoice_id:
+        return False, 'Zoho Books returned an invoice without invoice_id.'
+
+    order.zoho_books_invoice_id = invoice_id[:64]
+    order.zoho_books_invoice_number = invoice_number[:64]
+    order.zoho_books_invoice_error = ''
+    order.zoho_books_invoiced_at = dj_tz.now()
+    order.save(
+        update_fields=[
+            'zoho_books_invoice_id',
+            'zoho_books_invoice_number',
+            'zoho_books_invoice_error',
+            'zoho_books_invoiced_at',
+            'updated_at',
+        ],
+    )
+    logger.info(
+        'zoho-books: linked invoice from Books order=%s invoice_id=%s number=%s',
+        order.pk,
+        invoice_id,
+        invoice_number,
+    )
+    return True, f'Linked Zoho Books invoice {invoice_number or invoice_id}.'
