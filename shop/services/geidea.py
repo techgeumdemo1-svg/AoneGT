@@ -16,6 +16,32 @@ class GeideaSessionError(Exception):
     pass
 
 
+_REQUIRED_GEIDEA_SETTINGS = (
+    'GEIDEA_PUBLIC_KEY',
+    'GEIDEA_API_PASSWORD',
+    'GEIDEA_SESSION_URL',
+    'GEIDEA_CALLBACK_URL',
+)
+
+
+def geidea_config_missing() -> list[str]:
+    """Return names of unset Geidea settings required for session creation."""
+    return [
+        name
+        for name in _REQUIRED_GEIDEA_SETTINGS
+        if not (getattr(settings, name, '') or '').strip()
+    ]
+
+
+def assert_geidea_configured() -> None:
+    missing = geidea_config_missing()
+    if missing:
+        raise GeideaSessionError(
+            'Geidea is not configured on this server. '
+            f'Set environment variables: {", ".join(missing)}.'
+        )
+
+
 def create_geidea_session(order):
     """
     Call the Geidea Create Session API server-to-server and return the session_id.
@@ -34,6 +60,8 @@ def create_geidea_session(order):
         GeideaSessionError: If the API call fails, times out, returns a
                             non-success response code, or returns malformed JSON.
     """
+    assert_geidea_configured()
+
     # Generate a UUID for Geidea if not already set.
     # Geidea requires merchantReferenceId to be a valid UUID.
     # We store it on the order so the callback can look it up.
@@ -111,15 +139,29 @@ def create_geidea_session(order):
     # Both responseCode and detailedResponseCode must be "000" for a valid session.
     if (response_data.get("responseCode") != "000"
             or response_data.get("detailedResponseCode") != "000"):
+        response_code = response_data.get("responseCode")
+        detailed_code = response_data.get("detailedResponseCode")
+        response_message = (
+            response_data.get("detailedResponseMessage")
+            or response_data.get("responseMessage")
+            or ""
+        )
         logger.error(
             "Geidea session creation returned non-success codes. "
-            "order_pk=%s zoho_so=%s responseCode=%s detailedResponseCode=%s",
+            "order_pk=%s merchant_ref=%s responseCode=%s detailedResponseCode=%s message=%s",
             order.pk,
             merchant_ref,
-            response_data.get("responseCode"),
-            response_data.get("detailedResponseCode"),
+            response_code,
+            detailed_code,
+            response_message,
         )
-        raise GeideaSessionError("Payment initiation failed, please retry.")
+        detail = (
+            f"Geidea rejected session "
+            f"(responseCode={response_code}, detailedResponseCode={detailed_code})."
+        )
+        if response_message:
+            detail = f"{detail} {response_message}"
+        raise GeideaSessionError(detail)
 
     # --- Extract session ID ---
     # session.id is nested inside a "session" object — NOT a top-level session_id key.
@@ -198,6 +240,7 @@ def reconcile_or_cancel_stale_order(order):
     """
     from decimal import Decimal
     from django.db import transaction as db_transaction
+    from shop.models import Order
     from shop.services.account_credit import credit_user_for_prepaid_order
     from shop.services.zoho_books_payment import maybe_create_zoho_books_advance_payment_for_order
 
@@ -264,6 +307,7 @@ def reconcile_or_cancel_stale_order(order):
 
 def _cancel_stale_order(order):
     """Cancel a stale order and void its Zoho Sales Order."""
+    from shop.models import Order
     from shop.services.order_sync_state import apply_order_sync_transition
     from shop.services.zoho_books_sales_order import void_zoho_books_sales_order_for_order
 

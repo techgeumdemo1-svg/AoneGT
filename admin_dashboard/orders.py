@@ -25,6 +25,15 @@ from shop.services.order_tracking import (
 )
 from shop.services.order_email import handle_customer_tracking_stage_change
 from shop.services.order_status_notifications import notify_order_tracking_status_change
+from shop.services.card_on_delivery_payment import order_ready_for_card_on_delivery_collect
+from shop.services.geidea import GeideaSessionError, create_geidea_session
+from shop.services.geidea_reconcile import reconcile_missed_geidea_callback
+from shop.services.order_delivery_payment import (
+    finalize_cod_delivery_and_payment,
+    is_cod_order,
+    maybe_auto_mark_delivered_on_payment,
+    order_ready_for_cod_collect,
+)
 from shop.services.zoho_books_payment import (
     is_prepaid_at_checkout_payment_method,
     staff_record_zoho_books_payment_for_order,
@@ -435,8 +444,33 @@ class AdminOrderStatusUpdateAPIView(APIView):
         order = get_object_or_404(_admin_orders_queryset(), pk=pk)
         serializer = AdminOrderStatusUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        order = _apply_status_update(order, serializer.validated_data["status"])
         new_status = serializer.validated_data["status"]
+        if new_status == "delivered":
+            if is_cod_order(order):
+                return Response(
+                    {
+                        "detail": (
+                            "Cash on delivery orders cannot be marked delivered here. "
+                            "Use POST /api/admin/orders/{id}/collect-cod/ after collecting cash."
+                        ),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if (
+                order.payment_method == Order.PaymentMethod.CARD_ON_DELIVERY
+                and order.payment_status == Order.PaymentStatus.PENDING
+            ):
+                return Response(
+                    {
+                        "detail": (
+                            "Card payment is still pending. "
+                            "Collect payment via Geidea before marking delivered."
+                        ),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        order = _apply_status_update(order, new_status)
+
         record_admin_activity(
             request,
             category=AdminActivityLog.Category.ORDERS,
@@ -446,19 +480,59 @@ class AdminOrderStatusUpdateAPIView(APIView):
             target_id=order.pk,
             metadata={"status": new_status},
         )
+        payload = {
+            "message": "Order status updated.",
+            "order_id": order.pk,
+            "status": ORDER_CUSTOMER_TRACKING_STAGE_LABELS.get(
+                new_status,
+                "Cancelled" if new_status == "cancelled" else new_status,
+            ),
+            "display_status": _display_status_for_order(order),
+            "order_status": order.status,
+            "customer_tracking_stage": order.customer_tracking_stage,
+        }
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class AdminOrderCollectCodAPIView(APIView):
+    """
+    COD only: delivery boy collects cash → delivered + paid + Zoho invoice payment.
+
+    Invoice must already exist in Zoho Books (staff creates it in Zoho UI).
+    POST /api/admin/orders/<pk>/collect-cod/
+    """
+
+    permission_classes = [IsAuthenticated, IsStaffUser]
+
+    def post(self, request, pk):
+        order = get_object_or_404(_admin_orders_queryset(), pk=pk)
+        ready, reason = order_ready_for_cod_collect(order)
+        if not ready:
+            return Response({"detail": reason}, status=status.HTTP_400_BAD_REQUEST)
+
+        ok, steps = finalize_cod_delivery_and_payment(pk)
+        order = _reload_admin_order(pk)
+
+        record_admin_activity(
+            request,
+            category=AdminActivityLog.Category.ORDERS,
+            action="order.cod_collected",
+            message=f"Collected COD cash for order #{order.pk}.",
+            target_type="order",
+            target_id=order.pk,
+        )
         return Response(
             {
-                "message": "Order status updated.",
-                "order_id": order.pk,
-                "status": ORDER_CUSTOMER_TRACKING_STAGE_LABELS.get(
-                    serializer.validated_data["status"],
-                    "Cancelled" if serializer.validated_data["status"] == "cancelled" else serializer.validated_data["status"],
+                "status": "success" if ok else "error",
+                "message": (
+                    "Cash collected. Order delivered and invoice paid."
+                    if ok
+                    else "Could not complete COD collection."
                 ),
-                "display_status": _display_status_for_order(order),
-                "order_status": order.status,
-                "customer_tracking_stage": order.customer_tracking_stage,
+                "steps_completed": steps,
+                "order": _admin_order_payload(order),
             },
-            status=status.HTTP_200_OK,
+            status=status.HTTP_200_OK if ok else status.HTTP_400_BAD_REQUEST,
         )
 
 
@@ -480,24 +554,68 @@ class AdminOrderTimelineAPIView(APIView):
         )
 
 
-class AdminOrderInvoiceAPIView(APIView):
-    """Create Zoho Books invoice for the order (requires sales order in Zoho)."""
+class AdminOrderGeideaCollectAPIView(APIView):
+    """
+    Delivery boy / staff: start Geidea card payment for a card-on-delivery order.
+
+    POST /api/admin/orders/<pk>/geidea-collect/
+    Order must be out_for_delivery with invoice created. Returns session_id for HPP.
+    On Geidea callback: paid → delivered → notification → Zoho invoice paid.
+    """
 
     permission_classes = [IsAuthenticated, IsStaffUser]
 
     def post(self, request, pk):
-        get_object_or_404(_admin_orders_queryset(), pk=pk)
-        from shop.services.zoho_books_invoice import staff_create_zoho_books_invoice_for_order
+        order = get_object_or_404(_admin_orders_queryset(), pk=pk)
+        ready, reason = order_ready_for_card_on_delivery_collect(order)
+        if not ready:
+            return Response({"detail": reason}, status=status.HTTP_400_BAD_REQUEST)
 
-        ok, message = staff_create_zoho_books_invoice_for_order(pk)
+        try:
+            session_id = create_geidea_session(order)
+        except GeideaSessionError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                "message": "Geidea session created. Collect card payment on device.",
+                "session_id": session_id,
+                "order_id": order.pk,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminOrderGeideaReconcileAPIView(APIView):
+    """
+    Staff fallback when Geidea callback was missed after card collection.
+
+    POST /api/admin/orders/<pk>/geidea-reconcile/
+    """
+
+    permission_classes = [IsAuthenticated, IsStaffUser]
+
+    def post(self, request, pk):
+        order = get_object_or_404(_admin_orders_queryset(), pk=pk)
+        if order.payment_method != Order.PaymentMethod.CARD_ON_DELIVERY:
+            return Response(
+                {"detail": "Only card-on-delivery orders use this reconcile endpoint."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        reconcile_status, steps = reconcile_missed_geidea_callback(order)
         order = _reload_admin_order(pk)
         return Response(
             {
-                "status": "success" if ok else "error",
-                "message": message,
+                "status": reconcile_status,
+                "message": (
+                    "Payment reconciled."
+                    if reconcile_status == "paid"
+                    else "Payment still pending on Geidea."
+                ),
+                "steps_completed": steps,
                 "order": _admin_order_payload(order),
             },
-            status=status.HTTP_200_OK if ok else status.HTTP_400_BAD_REQUEST,
+            status=status.HTTP_200_OK,
         )
 
 
@@ -513,6 +631,17 @@ class AdminOrderVerifyPaymentAPIView(APIView):
 
     def post(self, request, pk):
         order = get_object_or_404(_admin_orders_queryset(), pk=pk)
+        if is_cod_order(order):
+            return Response(
+                {
+                    "status": "error",
+                    "message": (
+                        "Cash on delivery orders use POST /api/admin/orders/{id}/collect-cod/ "
+                        "after the delivery boy collects cash."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         amount = _optional_decimal(request.data.get("amount"))
         gateway_reference = (request.data.get("gateway_reference") or "").strip()
         payment_method = (request.data.get("payment_method") or "").strip()
@@ -560,6 +689,11 @@ class AdminOrderVerifyPaymentAPIView(APIView):
                 )
             steps.append(message)
             order = _reload_admin_order(pk)
+            if order.payment_method == Order.PaymentMethod.CARD_ON_DELIVERY:
+                changed, deliver_msg = maybe_auto_mark_delivered_on_payment(pk)
+                if changed:
+                    steps.append(deliver_msg)
+                    order = _reload_admin_order(pk)
         elif not steps:
             if order.payment_status == Order.PaymentStatus.PAID and (order.zoho_books_payment_id or "").strip():
                 message = "Payment already verified."
