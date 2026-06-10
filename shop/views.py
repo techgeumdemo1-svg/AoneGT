@@ -1413,6 +1413,7 @@ class CheckoutAPIView(APIView):
                     if ser.validated_data['payment_method'] in (
                         Order.PaymentMethod.PAYMENT_GATEWAY.value,
                         Order.PaymentMethod.PAY_BY_LINK.value,
+                        Order.PaymentMethod.CARD_ON_DELIVERY.value,
                     )
                     else Order.PaymentStatus.NOT_REQUIRED
                 ),
@@ -2106,6 +2107,18 @@ class OrderZohoBooksInvoiceAPIView(APIView):
         if err:
             return err
 
+        if order.payment_method == Order.PaymentMethod.CASH_ON_DELIVERY:
+            return Response(
+                {
+                    'status': 'error',
+                    'message': (
+                        'Cash on delivery: create the invoice in Zoho Books. '
+                        'Use POST /api/admin/orders/{id}/collect-cod/ after delivery.'
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         from shop.services.zoho_books_invoice import staff_create_zoho_books_invoice_for_order
 
         ok, message = staff_create_zoho_books_invoice_for_order(order.pk)
@@ -2140,6 +2153,18 @@ class OrderZohoBooksPaymentAPIView(APIView):
         if err:
             return err
 
+        if order.payment_method == Order.PaymentMethod.CASH_ON_DELIVERY:
+            return Response(
+                {
+                    'status': 'error',
+                    'message': (
+                        'Cash on delivery: use POST /api/admin/orders/{id}/collect-cod/ '
+                        'after the delivery boy collects cash.'
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         amount = None
         raw_amount = request.data.get('amount')
         if raw_amount is not None and str(raw_amount).strip() != '':
@@ -2156,6 +2181,13 @@ class OrderZohoBooksPaymentAPIView(APIView):
             payment_method=payment_method,
             gateway_reference=gateway_reference,
         )
+        steps = [message] if ok else []
+        if ok and order.payment_method == Order.PaymentMethod.CARD_ON_DELIVERY:
+            from shop.services.order_delivery_payment import maybe_auto_mark_delivered_on_payment
+
+            changed, deliver_msg = maybe_auto_mark_delivered_on_payment(order.pk)
+            if changed:
+                steps.append(deliver_msg)
         order = (
             Order.objects.filter(pk=order.pk)
             .select_related('store')
@@ -2165,7 +2197,8 @@ class OrderZohoBooksPaymentAPIView(APIView):
         return Response(
             {
                 'status': 'success' if ok else 'error',
-                'message': message,
+                'message': ' '.join(steps) if steps else message,
+                'steps_completed': steps,
                 'order': OrderSerializer(order).data,
             },
             status=status.HTTP_200_OK if ok else status.HTTP_400_BAD_REQUEST,
@@ -2941,56 +2974,17 @@ class GeideaStatusView(APIView):
         if order.payment_status == Order.PaymentStatus.PAID:
             return Response({'status': 'paid'})
 
-        # No Geidea merchant ref means initiate was never called successfully
         if not order.geidea_merchant_ref:
             return Response({'status': 'pending'})
 
-        # Fetch from Geidea
-        orders_list = fetch_geidea_orders_by_merchant_ref(order.geidea_merchant_ref)
+        from shop.services.geidea_reconcile import reconcile_missed_geidea_callback
 
-        paid_entry = next(
-            (o for o in orders_list
-             if o.get("status") == "Success" and o.get("detailedStatus") == "Paid"),
-            None
-        )
-
-        if paid_entry:
-            # Callback was missed — reconcile manually
-            from shop.services.account_credit import credit_user_for_prepaid_order
-            from shop.services.zoho_books_payment import maybe_create_zoho_books_advance_payment_for_order
-
-            # Amount tamper check — same as GeideaCallbackView
-            if Decimal(str(paid_entry.get("totalAmount", 0))) != order.total:
-                logger.error(
-                    "GeideaStatusView — amount mismatch, not reconciling. "
-                    "order_pk=%s expected=%s received=%s",
-                    order.pk, order.total, paid_entry.get("totalAmount"),
-                )
-                return Response({'status': 'pending'})
-
-            logger.warning(
-                "GeideaStatusView — missed callback detected. "
-                "order_pk=%s geidea_order_id=%s Reconciling manually.",
-                order.pk, paid_entry.get("orderId"),
-            )
-            try:
-                with transaction.atomic():
-                    order = Order.objects.select_for_update().get(pk=order.pk)
-                    if order.payment_status != Order.PaymentStatus.PAID:
-                        credit_user_for_prepaid_order(
-                            order,
-                            amount=Decimal(str(paid_entry["totalAmount"])),
-                            gateway_reference=paid_entry["orderId"],
-                        )
-                maybe_create_zoho_books_advance_payment_for_order(order)
-            except Exception as exc:
-                logger.error(
-                    "GeideaStatusView — reconciliation failed. order_pk=%s error=%s",
-                    order.pk, exc,
-                )
-                return Response({'status': 'pending'})
-
-            return Response({'status': 'paid'})
+        reconcile_status, steps = reconcile_missed_geidea_callback(order)
+        if reconcile_status == 'paid':
+            payload = {'status': 'paid'}
+            if steps:
+                payload['steps'] = steps
+            return Response(payload)
 
         return Response({'status': 'pending'})
 

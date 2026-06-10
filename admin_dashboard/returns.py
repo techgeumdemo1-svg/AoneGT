@@ -756,11 +756,11 @@ class AdminReturnRefundAPIView(AdminReturnDetailAPIViewMixin, APIView):
             staff_note = (serializer.validated_data.get('note') or '').strip()
             order = ret.order
 
-            # Determine refund path: card payment → Geidea Refund API
-            # COD / card-on-delivery → existing account credit path
+            # Card paid via Geidea (gateway, pay-by-link, or card-on-delivery) → Refund API
             is_card_payment = order.payment_method in (
                 Order.PaymentMethod.PAY_BY_LINK,
                 Order.PaymentMethod.PAYMENT_GATEWAY,
+                Order.PaymentMethod.CARD_ON_DELIVERY,
             )
 
             if is_card_payment:
