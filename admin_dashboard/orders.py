@@ -585,3 +585,245 @@ class AdminOrderVerifyPaymentAPIView(APIView):
         if is_prepaid_at_checkout_payment_method(order.payment_method):
             payload["credit_balance_aed"] = str(get_user_credit_balance(order.user))
         return Response(payload, status=status.HTTP_200_OK)
+
+
+class AdminOrderMarkCodPaidAPIView(APIView):
+    """
+    Mark a card-on-delivery order as paid in Zoho Books by recording a
+    customer payment against the order's invoice.
+
+    After a successful payment recording, triggers journal automation
+    (payment charge + VAT on charge) using COD rates from ZohoBooksStoreConfig.
+
+    POST /api/admin/orders/<pk>/mark-cod-paid/
+    Body (all optional):
+      payment_reference  — POS machine reference ID
+      payment_date       — ISO date string (defaults to today)
+      zoho_invoice_id    — Zoho Books invoice_id; if omitted, fetched via sales order ID
+    """
+
+    permission_classes = [IsAuthenticated, IsStaffUser]
+
+    def post(self, request, pk):
+        from decimal import Decimal
+
+        from django.utils import timezone as dj_tz
+
+        from shop.models import Order
+        from shop.services.zoho_books import ZohoBooksError, _books_request, books_mark_invoice_sent, store_has_books_config, zoho_books_enabled
+        from shop.services.zoho_books_invoice import _resolve_customer_id
+        from shop.services.zoho_books_journals import create_payment_journals_for_order
+        from shop.serializers import order_code_for_order
+
+        order = get_object_or_404(
+            Order.objects.select_related('user', 'store').prefetch_related('items'),
+            pk=pk,
+        )
+
+        # Guard: only COD payment methods
+        cod_methods = (
+            Order.PaymentMethod.CARD_ON_DELIVERY.value,
+            Order.PaymentMethod.CASH_ON_DELIVERY.value,
+        )
+        if order.payment_method not in cod_methods:
+            return Response(
+                {'detail': 'This endpoint is only for COD orders.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Guard: not already paid
+        if (order.zoho_books_payment_id or '').strip():
+            return Response(
+                {'detail': 'Payment already recorded for this order.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not zoho_books_enabled():
+            return Response(
+                {'detail': 'Zoho Books is disabled.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not store_has_books_config(order.store):
+            return Response(
+                {'detail': 'Store has no Zoho Books org configuration.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Request body fields
+        payment_reference = (request.data.get('payment_reference') or '').strip()
+        payment_date_raw = (request.data.get('payment_date') or '').strip()
+        zoho_invoice_id = (request.data.get('zoho_invoice_id') or '').strip()
+
+        # Parse payment date
+        if payment_date_raw:
+            try:
+                from datetime import datetime
+                payment_date = datetime.strptime(payment_date_raw, '%Y-%m-%d').date()
+            except ValueError:
+                return Response(
+                    {'detail': 'payment_date must be in YYYY-MM-DD format.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        else:
+            payment_date = dj_tz.now().date()
+
+        # Resolve invoice ID
+        if not zoho_invoice_id:
+            salesorder_id = (order.zoho_books_salesorder_id or '').strip()
+            if not salesorder_id:
+                return Response(
+                    {
+                        'detail': (
+                            'Order has no Zoho Books sales order ID. '
+                            'Please provide zoho_invoice_id manually.'
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            salesorder_number = (order.zoho_books_salesorder_number or salesorder_id).strip()
+            try:
+                invoices_payload = _books_request(
+                    'GET',
+                    'invoices',
+                    store=order.store,
+                    query={'salesorder_id': salesorder_id},
+                )
+                invoices = invoices_payload.get('invoices') or []
+                if not invoices:
+                    return Response(
+                        {
+                            'detail': (
+                                f'No invoice found in Zoho Books for sales order {salesorder_number}. '
+                                'Create the invoice first or provide zoho_invoice_id.'
+                            )
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                first_invoice = invoices[0]
+                zoho_invoice_id = str(first_invoice.get('invoice_id') or '').strip()
+                if not zoho_invoice_id:
+                    return Response(
+                        {'detail': 'Could not extract invoice_id from Zoho Books response.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                # If invoice is not yet confirmed/sent, mark it as sent before payment.
+                # Zoho Books rejects payments against draft invoices (balance due = 0).
+                # Zoho list response returns status as e.g. "draft", "sent", "overdue", "paid".
+                # Only "sent", "overdue", and "partially_paid" are payable states.
+                invoice_status = str(first_invoice.get('status') or '').strip().lower()
+                _payable_statuses = {'sent', 'overdue', 'partially_paid'}
+                if invoice_status not in _payable_statuses:
+                    try:
+                        books_mark_invoice_sent(zoho_invoice_id, store=order.store)
+                    except ZohoBooksError as exc:
+                        return Response(
+                            {
+                                'detail': (
+                                    f'Invoice (status: {invoice_status!r}) could not be confirmed '
+                                    f'before payment: {exc}'
+                                )
+                            },
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+            except ZohoBooksError as exc:
+                return Response(
+                    {'detail': f'Zoho Books invoice lookup failed: {exc}'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # Save resolved invoice ID to order if not already set
+        if not (order.zoho_books_invoice_id or '').strip():
+            Order.objects.filter(pk=order.pk).update(zoho_books_invoice_id=zoho_invoice_id[:64])
+            order.zoho_books_invoice_id = zoho_invoice_id[:64]
+
+        # Resolve deposit account from config
+        deposit_account_id = ''
+        try:
+            books_config = order.store.zoho_books_config
+            deposit_account_id = (books_config.deposit_account_id or '').strip()
+        except Exception:
+            pass
+
+        # Resolve customer ID
+        try:
+            customer_id = _resolve_customer_id(order)
+        except Exception as exc:
+            return Response(
+                {'detail': f'Could not resolve Zoho Books customer: {exc}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        pay_amount = Decimal(str(order.total or 0)).quantize(Decimal('0.01'))
+        is_cash = order.payment_method == Order.PaymentMethod.CASH_ON_DELIVERY.value
+        payment_mode = 'cash' if is_cash else 'creditcard'
+        method_label = 'Cash on Delivery' if is_cash else 'Card on Delivery'
+        description_parts = [f'AoneGt order #{order.pk}', method_label]
+        if payment_reference:
+            description_parts.append(f'ref {payment_reference}')
+        description = ' — '.join(description_parts)[:500]
+
+        body = {
+            'customer_id': customer_id,
+            'payment_mode': payment_mode,
+            'amount': float(pay_amount),
+            'date': payment_date.isoformat(),
+            'reference_number': (payment_reference or order_code_for_order(order))[:100],
+            'description': description,
+            'invoices': [
+                {
+                    'invoice_id': zoho_invoice_id,
+                    'amount_applied': float(pay_amount),
+                }
+            ],
+        }
+        if deposit_account_id:
+            body['account_id'] = deposit_account_id
+
+        try:
+            payment_payload = _books_request(
+                'POST', 'customerpayments', store=order.store, json_data=body,
+            )
+            payment = payment_payload.get('payment') or {}
+            payment_id = str(payment.get('payment_id') or '').strip()
+            if not payment_id:
+                return Response(
+                    {'detail': 'Zoho Books did not return payment_id.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        except ZohoBooksError as exc:
+            return Response(
+                {'detail': str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Persist payment info and mark order as paid
+        Order.objects.filter(pk=order.pk).update(
+            zoho_books_payment_id=payment_id[:64],
+            zoho_books_paid_at=dj_tz.now(),
+            zoho_books_payment_error='',
+            payment_status=Order.PaymentStatus.PAID,
+        )
+        order.zoho_books_payment_id = payment_id
+        order.payment_status = Order.PaymentStatus.PAID
+
+        # Journal automation — best-effort
+        try:
+            create_payment_journals_for_order(order, order.payment_method)
+        except Exception as exc:
+            import logging as _logging
+            _logging.getLogger(__name__).exception(
+                'zoho-journals: COD journal trigger failed order=%s error=%s',
+                order.pk, exc,
+            )
+
+        order = _reload_admin_order(pk)
+        return Response(
+            {
+                'message': 'Invoice marked as paid.',
+                'payment_id': payment_id,
+                'invoice_id': zoho_invoice_id,
+                'order': _admin_order_payload(order),
+            },
+            status=status.HTTP_200_OK,
+        )
