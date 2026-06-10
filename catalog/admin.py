@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Banner, Store, Product, ProductReview
+from .models import Banner, Store, Product, ProductReview, ZohoBooksStoreConfig
 
 
 class ProductReviewInline(admin.TabularInline):
@@ -125,5 +125,49 @@ class ProductAdmin(admin.ModelAdmin):
         (
             'Zoho Commerce',
             {'fields': ('zoho_product_id', 'zoho_category_id', 'zoho_collection_id')},
+        ),
+    )
+
+
+@admin.register(ZohoBooksStoreConfig)
+class ZohoBooksStoreConfigAdmin(admin.ModelAdmin):
+    list_display = (
+        'store',
+        'deposit_account_id',
+        'charge_account_id',
+        'gateway_charge_rate',
+        'paylink_charge_rate',
+        'cod_charge_rate',
+        'journal_gateway_enabled',
+        'journal_paylink_enabled',
+        'journal_cod_enabled',
+        'updated_at',
+    )
+    search_fields = ('store__name',)
+    fieldsets = (
+        ('Store', {'fields': ('store',)}),
+        (
+            'Deposit Account',
+            {'fields': ('deposit_account_id', 'deposit_account_name')},
+        ),
+        (
+            'Payment Charges Account (shared)',
+            {'fields': ('charge_account_id', 'charge_account_name')},
+        ),
+        (
+            'VAT on Charges Account (shared)',
+            {'fields': ('vat_account_id', 'vat_account_name')},
+        ),
+        (
+            'Charge Rates (%)',
+            {'fields': ('gateway_charge_rate', 'paylink_charge_rate', 'cod_charge_rate')},
+        ),
+        (
+            'VAT Rates on Charge (%)',
+            {'fields': ('gateway_vat_rate', 'paylink_vat_rate', 'cod_vat_rate')},
+        ),
+        (
+            'Journal Automation',
+            {'fields': ('journal_gateway_enabled', 'journal_paylink_enabled', 'journal_cod_enabled')},
         ),
     )

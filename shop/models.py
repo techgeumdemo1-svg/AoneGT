@@ -6,7 +6,6 @@ from django.db.models import Sum
 
 from catalog.models import Product, Store
 
-
 class UserAddress(models.Model):
     class AddressType(models.TextChoices):
         HOME = 'home', 'Home'
@@ -585,3 +584,41 @@ class DeliveryZone(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class ZohoBooksJournalLog(models.Model):
+    """
+    Audit trail for every Zoho Books journal creation attempt.
+    unique_together on (order, journal_type) is the idempotency guard.
+    zoho_journal_id empty = attempt failed; non-empty = success.
+    """
+
+    class JournalType(models.TextChoices):
+        PAYMENT_CHARGE = 'payment_charge', 'Payment Charge'
+        VAT_CHARGE = 'vat_charge', 'VAT Charge'
+
+    order = models.ForeignKey(
+        'Order',
+        on_delete=models.CASCADE,
+        related_name='journal_logs',
+    )
+    journal_type = models.CharField(max_length=32, choices=JournalType.choices)
+    payment_method = models.CharField(max_length=32)
+    rate_used = models.DecimalField(max_digits=8, decimal_places=4)
+    base_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    journal_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    journal_date = models.DateField()
+    zoho_journal_id = models.CharField(
+        max_length=120,
+        blank=True,
+        help_text='Non-empty = journal created successfully. Empty = creation failed.',
+    )
+    error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        unique_together = ('order', 'journal_type')
+
+    def __str__(self):
+        return f'{self.journal_type} order={self.order_id} journal_id={self.zoho_journal_id or "failed"}'

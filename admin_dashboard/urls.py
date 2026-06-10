@@ -12,10 +12,17 @@ from .customers import (
     AdminCustomerStatusUpdateAPIView,
     AdminCustomerSuperCoinsAPIView,
 )
+from .finance import (
+    AdminFinanceJournalListAPIView,
+    AdminFinanceJournalRetryAPIView,
+    AdminFinanceStoreConfigDetailAPIView,
+    AdminFinanceStoreConfigListAPIView,
+)
 from .orders import (
     AdminOrderDetailAPIView,
     AdminOrderInvoiceAPIView,
     AdminOrderListAPIView,
+    AdminOrderMarkCodPaidAPIView,
     AdminOrderStatusUpdateAPIView,
     AdminOrderTimelineAPIView,
     AdminOrderVerifyPaymentAPIView,
@@ -91,6 +98,7 @@ urlpatterns = [
     path('orders/<int:pk>/timeline/', AdminOrderTimelineAPIView.as_view(), name='admin-orders-timeline'),
     path('orders/<int:pk>/invoice/', AdminOrderInvoiceAPIView.as_view(), name='admin-orders-invoice'),
     path('orders/<int:pk>/verify-payment/', AdminOrderVerifyPaymentAPIView.as_view(), name='admin-orders-verify-payment'),
+    path('orders/<int:pk>/mark-cod-paid/', AdminOrderMarkCodPaidAPIView.as_view(), name='admin-orders-mark-cod-paid'),
     path('customers/', AdminCustomerListAPIView.as_view(), name='admin-customers-list'),
     path('customers/<int:pk>/', AdminCustomerDetailAPIView.as_view(), name='admin-customers-detail'),
     path('customers/<int:pk>/status/', AdminCustomerStatusUpdateAPIView.as_view(), name='admin-customers-status'),
@@ -129,4 +137,10 @@ urlpatterns = [
     path('super-coins/settings/', AdminSuperCoinsSettingsAPIView.as_view(), name='admin-super-coins-settings'),
     path('super-coins/customers/<int:customer_id>/', AdminSuperCoinsCustomerAPIView.as_view(), name='admin-super-coins-customer'),
     path('activity-logs/', AdminActivityLogListAPIView.as_view(), name='admin-activity-logs-list'),
+
+    # Finance — Zoho Books store config and journal audit logs
+    path('finance/store-config/', AdminFinanceStoreConfigListAPIView.as_view(), name='admin-finance-store-config-list'),
+    path('finance/store-config/<int:store_id>/', AdminFinanceStoreConfigDetailAPIView.as_view(), name='admin-finance-store-config-detail'),
+    path('finance/journals/', AdminFinanceJournalListAPIView.as_view(), name='admin-finance-journals-list'),
+    path('finance/journals/<int:pk>/retry/', AdminFinanceJournalRetryAPIView.as_view(), name='admin-finance-journals-retry'),
 ]
