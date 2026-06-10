@@ -256,29 +256,51 @@ class OrderSummaryAPIView(APIView):
         else:
             discount = calculate_coupon_discount(coupon, cart_items, subtotal, shipping_amount, 'AED')
 
-        if discount > Decimal('0.00'):
-            taxable_amount = subtotal - discount
+        # FIXED: free_shipping coupon — shipping becomes 0, VAT is on full subtotal,
+        # discount is NOT subtracted from the taxable base (it only zeroes the shipping charge).
+        is_free_shipping_coupon = (coupon.coupon_type or '').lower() == 'free_shipping'  # FIXED: moved up
+
+        if is_free_shipping_coupon:
+            # FIXED: For free_shipping the effective shipping charge is 0.
+            # VAT applies to the full product subtotal (no product discount exists).
+            # grand_total = subtotal + vat_on_subtotal + 0 (shipping is free).
+            effective_shipping = Decimal('0.00')  # FIXED: shipping waived
+            vat_amount = (subtotal * vat_percent / Decimal('100')).quantize(Decimal('0.01'))  # FIXED: VAT on full subtotal
+            final_total = (subtotal + vat_amount + effective_shipping).quantize(Decimal('0.01'))  # FIXED: no shipping cost
+            if final_total < Decimal('0'):
+                final_total = Decimal('0.00')
+            # FIXED: coupon_discount shown to user = original shipping amount (what was waived)
+            shipping_discount_display = discount  # the waived shipping amount
+        elif discount > Decimal('0.00'):
+            # FIXED: transaction / item / buyxgety — VAT on subtotal after product discount
+            effective_shipping = shipping_amount
+            taxable_amount = max(subtotal - discount, Decimal('0')).quantize(Decimal('0.01'))  # FIXED: guard against negative
             vat_amount = (taxable_amount * vat_percent / Decimal('100')).quantize(Decimal('0.01'))
-            final_total = (taxable_amount + vat_amount + shipping_amount).quantize(Decimal('0.01'))
+            final_total = (taxable_amount + vat_amount + effective_shipping).quantize(Decimal('0.01'))
             if final_total < Decimal('0'):
                 final_total = Decimal('0.00')
+            shipping_discount_display = discount
         else:
-            final_total = (base_total - discount).quantize(Decimal('0.01'))
-            if final_total < Decimal('0'):
-                final_total = Decimal('0.00')
+            effective_shipping = shipping_amount
+            final_total = base_total  # FIXED: no discount, use pre-calculated base_total unchanged
+            shipping_discount_display = Decimal('0.00')
+
+        # FIXED: rebuild shipping breakdown lines using effective_shipping so free-shipping
+        # coupon shows Delivery (Free) instead of the original charge.
+        if is_free_shipping_coupon:
+            effective_shipping_lines = [{'label': 'Delivery (Free)', 'value': Decimal('0.00')}]  # FIXED
+        else:
+            effective_shipping_lines = shipping_lines  # unchanged for other coupon types
 
         breakdown = (
             [{'label': 'Subtotal', 'value': subtotal}]
-            + [{'label': f'Coupon Discount ({coupon.coupon_code})', 'value': -discount}]
-            + shipping_lines
+            + [{'label': f'Coupon Discount ({coupon.coupon_code})', 'value': -shipping_discount_display}]
+            + effective_shipping_lines  # FIXED: use effective shipping lines
             + [
                 {'label': f'VAT ({vat_percent}%)', 'value': vat_amount},
                 {'label': 'Total', 'value': final_total},
             ]
         )
-
-        # For free_shipping coupon type: display shipping as FREE
-        is_free_shipping_coupon = (coupon.coupon_type or '').lower() == 'free_shipping'
 
         response_data = {
             'coupon_applied': True,
@@ -290,8 +312,8 @@ class OrderSummaryAPIView(APIView):
             'vat_percent': str(vat_percent),
             'vat_amount': vat_amount,
             **shipping_meta,
-            'shipping_amount': 'FREE' if is_free_shipping_coupon else shipping_amount,
-            'coupon_discount': discount,
+            'shipping_amount': effective_shipping,  # FIXED: Decimal('0.00') for free_shipping, not string 'FREE'
+            'coupon_discount': shipping_discount_display,
             'total': final_total,
             'breakdown': breakdown,
             'product_details': product_details,

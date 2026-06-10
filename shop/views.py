@@ -1193,12 +1193,25 @@ def _checkout_totals(
     *,
     loyalty_discount: Decimal = Decimal('0'),
     coupon_discount: Decimal = Decimal('0'),
+    is_free_shipping_coupon: bool = False,  # FIXED: flag for free_shipping coupon type
 ) -> dict[str, Decimal]:
-    """VAT applies to subtotal after loyalty and coupon discounts (matches order summary API)."""
-    discount_total = (loyalty_discount + coupon_discount).quantize(Decimal('0.01'))
-    taxable_subtotal = max(subtotal - discount_total, Decimal('0')).quantize(Decimal('0.01'))
-    vat_amount = ((taxable_subtotal * vat_percent) / Decimal('100')).quantize(Decimal('0.01'))
-    total = (taxable_subtotal + vat_amount + shipping_amount).quantize(Decimal('0.01'))
+    """VAT applies to subtotal after loyalty and product-level discounts.
+    For free_shipping coupons, shipping is zeroed and VAT is on the full product subtotal.
+    """
+    if is_free_shipping_coupon:
+        # FIXED: free_shipping — coupon_discount IS the shipping amount being waived.
+        # Product subtotal is NOT discounted. VAT is on full product subtotal.
+        # Effective shipping = 0 (the whole point of the coupon).
+        loyalty_only_discount = loyalty_discount.quantize(Decimal('0.01'))
+        taxable_subtotal = max(subtotal - loyalty_only_discount, Decimal('0')).quantize(Decimal('0.01'))
+        vat_amount = ((taxable_subtotal * vat_percent) / Decimal('100')).quantize(Decimal('0.01'))
+        total = (taxable_subtotal + vat_amount).quantize(Decimal('0.01'))  # FIXED: no shipping added
+    else:
+        # Original logic for transaction / item / buyxgety / loyalty discounts.
+        discount_total = (loyalty_discount + coupon_discount).quantize(Decimal('0.01'))
+        taxable_subtotal = max(subtotal - discount_total, Decimal('0')).quantize(Decimal('0.01'))
+        vat_amount = ((taxable_subtotal * vat_percent) / Decimal('100')).quantize(Decimal('0.01'))
+        total = (taxable_subtotal + vat_amount + shipping_amount).quantize(Decimal('0.01'))
     return {
         'taxable_subtotal': taxable_subtotal,
         'vat_amount': vat_amount,
@@ -1396,6 +1409,10 @@ class CheckoutAPIView(APIView):
                 shipping_amount,
                 loyalty_discount=loyalty_discount,
                 coupon_discount=offer_coupon_discount_value,
+                is_free_shipping_coupon=(  # FIXED: pass flag so shipping is zeroed for free_shipping coupons
+                    offer_coupon is not None
+                    and (offer_coupon.coupon_type or '').lower() == 'free_shipping'
+                ),
             )
             vat_amount = checkout_totals['vat_amount']
             gross_total = checkout_totals['gross_total']
@@ -1488,6 +1505,7 @@ class CheckoutAPIView(APIView):
                         shipping_amount,
                         loyalty_discount=loyalty_discount,
                         coupon_discount=offer_coupon_discount_value,
+                        is_free_shipping_coupon=False,  # FIXED: buyxgety is never free_shipping
                     )
                     vat_amount = checkout_totals['vat_amount']
                     gross_total = checkout_totals['gross_total']
