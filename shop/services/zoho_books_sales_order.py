@@ -81,22 +81,22 @@ def _build_sales_order_payload(order: Order, customer_id: str) -> dict:
 
     # FIXED: Retrieve coupon/loyalty discounts up-front so we can distribute them
     # at the line-item level instead of using a top-level transaction discount.
-    # Top-level discount spreads across ALL line items including shipping, which
-    # causes Zoho Books to apply tax on shipping and produce wrong totals (51.67
-    # instead of 51.50). Item-level discounts exclude shipping automatically.
     coupon_discount = _order_coupon_discount(order)
     loyalty_discount = Decimal(str(order.loyalty_discount or 0))
     total_discount = (coupon_discount + loyalty_discount).quantize(Decimal('0.01'))
 
-    # FIXED: Detect free_shipping coupon type from CouponUsageLog.
-    # For free_shipping the product items get no discount; only the shipping line
-    # gets discount=100% (item_level) so Zoho Books shows the waived shipping.
+    # FIXED: Detect coupon type from CouponUsageLog.
     is_free_shipping_coupon = False
+    is_bxgy_coupon = False  # FIXED: detect buyxgety
     try:
         from offer.models import CouponUsageLog
         usage = CouponUsageLog.objects.filter(order_id=order.pk).order_by('-used_at').first()
-        if usage is not None and (usage.coupon_type or '').lower() == 'free_shipping':
-            is_free_shipping_coupon = True  # FIXED: flag free_shipping orders
+        if usage is not None:
+            ctype = (usage.coupon_type or '').lower()
+            if ctype == 'free_shipping':
+                is_free_shipping_coupon = True
+            elif ctype == 'buyxgety':
+                is_bxgy_coupon = True  # FIXED: flag bxgy orders
     except Exception:
         pass
 
@@ -111,6 +111,17 @@ def _build_sales_order_payload(order: Order, customer_id: str) -> dict:
         sku = (item.sku or '').strip()
         if sku:
             row['description'] = sku[:200]
+
+        if is_bxgy_coupon:
+            # FIXED: for buyxgety, derive per-item discount from stored line_total.
+            # The get-item has line_total = unit_price * qty - discount (net price).
+            # The buy-item has line_total = unit_price * qty (no discount on buy-item).
+            gross = (Decimal(str(item.unit_price)) * item.quantity).quantize(Decimal('0.01'))
+            stored_line = Decimal(str(item.line_total)).quantize(Decimal('0.01'))
+            item_discount = max(gross - stored_line, Decimal('0')).quantize(Decimal('0.01'))
+            if item_discount > Decimal('0'):
+                row['discount'] = float(item_discount)       # FIXED: only on get-item
+                row['discount_type'] = 'item_level'          # FIXED: item-level
         product_line_items.append(row)
 
     if not product_line_items:
@@ -120,25 +131,102 @@ def _build_sales_order_payload(order: Order, customer_id: str) -> dict:
             'quantity': 1.0,
         })
 
-    # FIXED: Distribute product-level discounts (transaction / item / buyxgety / loyalty)
+    # FIXED: Distribute product-level discounts (transaction / item / loyalty)
     # equally across non-shipping product line items at item level.
-    # Shipping is NEVER included in discount distribution per PHASE 2 rules.
-    if total_discount > Decimal('0') and not is_free_shipping_coupon:
-        n_product_items = len(product_line_items)
-        if n_product_items > 0:
-            # FIXED: split discount equally; remainder (from rounding) goes to first item.
-            per_item_discount = (total_discount / Decimal(str(n_product_items))).quantize(Decimal('0.01'))
-            remainder = total_discount - (per_item_discount * n_product_items)
-            for idx, row in enumerate(product_line_items):
-                item_discount = per_item_discount + (remainder if idx == 0 else Decimal('0'))  # FIXED: remainder to first item
-                if item_discount > Decimal('0'):
-                    row['discount'] = float(item_discount)  # FIXED: AED amount, item-level
-                    row['discount_type'] = 'item_level'  # FIXED: per Zoho Books API
+    # For item-level coupons, only eligible items get the discount — not all items equally.
+    # Bxgy handled per-item above. Shipping never gets product discounts.
+    if total_discount > Decimal('0') and not is_free_shipping_coupon and not is_bxgy_coupon:
+        # FIXED: detect item-level coupon so we can target only eligible product items.
+        is_item_coupon = False
+        item_coupon_eligible_zoho_ids: set[str] = set()
+        item_coupon_eligible_category_ids: set[str] = set()
+        item_coupon_eligible_collection_ids: set[str] = set()
+        try:
+            from offer.models import CouponUsageLog, Coupon as CouponModel
+            usage = CouponUsageLog.objects.filter(order_id=order.pk).order_by('-used_at').first()
+            if usage is not None and (usage.coupon_type or '').lower() == 'item' and usage.coupon_id:
+                coupon_obj = CouponModel.objects.filter(pk=usage.coupon_id).first()
+                if coupon_obj is not None:
+                    from offer.services import _json_dict, _json_list
+                    eligible = _json_dict(coupon_obj.eligible_products)
+                    pid_list = _json_list(eligible.get('products'))
+                    cat_list = _json_list(eligible.get('categories'))
+                    col_list = _json_list(eligible.get('collections'))
+                    # Extract raw string IDs from whatever structure Zoho returns
+                    def _extract_id(x):
+                        if isinstance(x, dict):
+                            return str(x.get('product_id') or x.get('id') or x.get('category_id') or x.get('collection_id') or '').strip()
+                        return str(x).strip()
+                    item_coupon_eligible_zoho_ids = {_extract_id(x) for x in pid_list if _extract_id(x)}
+                    item_coupon_eligible_category_ids = {_extract_id(x) for x in cat_list if _extract_id(x)}
+                    item_coupon_eligible_collection_ids = {_extract_id(x) for x in col_list if _extract_id(x)}
+                    # If no restrictions defined → coupon applies to all products
+                    is_item_coupon = True
+        except Exception:
+            pass  # fall back to equal distribution below
 
-    # Zoho Books rejects the top-level 'shipping_charge' field for VAT-registered orgs
-    # (HTTP 400: "Shipping and miscellaneous charges cannot be applied when registered for VAT.").
-    # Always add shipping as a dedicated line item so the request succeeds regardless of whether
-    # ZOHO_BOOKS_VAT_TAX_ID is configured.
+        if is_item_coupon and (item_coupon_eligible_zoho_ids or item_coupon_eligible_category_ids or item_coupon_eligible_collection_ids):
+            # FIXED: assign discount only to eligible product line items by matching zoho IDs.
+            # Fetch the product records for order items so we can check their zoho IDs.
+            from shop.models import OrderItem as OI
+            order_items_map = {
+                oi.pk: oi
+                for oi in OI.objects.filter(order_id=order.pk).select_related('product')
+            }
+            # Match product_line_items (built in same order as OrderItem queryset) to order items.
+            oi_list = list(OI.objects.filter(order_id=order.pk).select_related('product'))
+            eligible_indices = []
+            for idx, oi in enumerate(oi_list):
+                if idx >= len(product_line_items):
+                    break
+                prod = oi.product
+                if prod is None:
+                    continue
+                zoho_pid = (getattr(prod, 'zoho_product_id', '') or '').strip()
+                zoho_cat = (getattr(prod, 'zoho_category_id', '') or '').strip()
+                zoho_col = (getattr(prod, 'zoho_collection_id', '') or '').strip()
+                matched = (
+                    (zoho_pid and zoho_pid in item_coupon_eligible_zoho_ids)
+                    or (zoho_cat and zoho_cat in item_coupon_eligible_category_ids)
+                    or (zoho_col and zoho_col in item_coupon_eligible_collection_ids)
+                )
+                if matched:
+                    eligible_indices.append(idx)
+            if eligible_indices:
+                # FIXED: distribute total_discount only across eligible items.
+                n_eligible = len(eligible_indices)
+                per_eligible_discount = (total_discount / Decimal(str(n_eligible))).quantize(Decimal('0.01'))
+                remainder = total_discount - (per_eligible_discount * n_eligible)
+                for i, idx in enumerate(eligible_indices):
+                    item_discount = per_eligible_discount + (remainder if i == 0 else Decimal('0'))
+                    if item_discount > Decimal('0'):
+                        product_line_items[idx]['discount'] = float(item_discount)
+                        product_line_items[idx]['discount_type'] = 'item_level'
+            else:
+                # FIXED: fallback — no eligible items matched, equal split (should not happen normally).
+                n_product_items = len(product_line_items)
+                if n_product_items > 0:
+                    per_item_discount = (total_discount / Decimal(str(n_product_items))).quantize(Decimal('0.01'))
+                    remainder = total_discount - (per_item_discount * n_product_items)
+                    for idx, row in enumerate(product_line_items):
+                        item_discount = per_item_discount + (remainder if idx == 0 else Decimal('0'))
+                        if item_discount > Decimal('0'):
+                            row['discount'] = float(item_discount)
+                            row['discount_type'] = 'item_level'
+        else:
+            # transaction / loyalty: equal split across all product items.
+            n_product_items = len(product_line_items)
+            if n_product_items > 0:
+                per_item_discount = (total_discount / Decimal(str(n_product_items))).quantize(Decimal('0.01'))
+                remainder = total_discount - (per_item_discount * n_product_items)
+                for idx, row in enumerate(product_line_items):
+                    item_discount = per_item_discount + (remainder if idx == 0 else Decimal('0'))
+                    if item_discount > Decimal('0'):
+                        row['discount'] = float(item_discount)
+                        row['discount_type'] = 'item_level'
+
+    # Zoho Books rejects the top-level 'shipping_charge' field for VAT-registered orgs.
+    # Always add shipping as a dedicated line item.
     line_items = list(product_line_items)
     shipping_amount = Decimal(str(order.shipping_amount or 0))
     if shipping_amount > 0:
@@ -148,10 +236,9 @@ def _build_sales_order_payload(order: Order, customer_id: str) -> dict:
             'quantity': 1.0,
         }
         if is_free_shipping_coupon:
-            # FIXED: free_shipping — shipping line gets 100% discount at item level so
-            # admin and customer both see the shipping charge was waived, but tax stays Exempt.
-            shipping_row['discount'] = float(shipping_amount)  # FIXED: full shipping amount = 100% off
-            shipping_row['discount_type'] = 'item_level'  # FIXED: item-level discount
+            # FIXED: free_shipping — shipping line gets full discount, tax stays Exempt.
+            shipping_row['discount'] = float(shipping_amount)
+            shipping_row['discount_type'] = 'item_level'
         line_items.append(shipping_row)
 
     payload: dict = {
@@ -161,17 +248,16 @@ def _build_sales_order_payload(order: Order, customer_id: str) -> dict:
         'line_items': line_items,
         'currency_code': (order.currency or 'AED').strip() or 'AED',
         'notes': _invoice_summary_notes(order)[:500],
-        # FIXED: top-level discount_type set to 'item_level' so Zoho Books reads
-        # per-line discount values instead of distributing a top-level transaction discount.
-        'discount_type': 'item_level',  # FIXED: was 'entity_level' at top level causing incorrect tax
+        # FIXED: item_level so Zoho Books reads per-line discounts only.
+        'discount_type': 'item_level',
     }
-    # FIXED: NO top-level 'discount' key — discounts are now per line item above.
+    # FIXED: NO top-level 'discount' key.
 
     tax_id = zoho_books_vat_tax_id(store=order.store)
     if tax_id:
-        # Apply VAT tax to product line items only; shipping line item is VAT-exempt.
+        # Apply VAT tax to product line items only; shipping is VAT-exempt.
         for row in payload['line_items']:
-            if row.get('name') != 'Shipping':  # FIXED: shipping always tax-exempt
+            if row.get('name') != 'Shipping':
                 row['tax_id'] = tax_id
 
     return payload

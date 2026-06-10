@@ -1194,9 +1194,12 @@ def _checkout_totals(
     loyalty_discount: Decimal = Decimal('0'),
     coupon_discount: Decimal = Decimal('0'),
     is_free_shipping_coupon: bool = False,  # FIXED: flag for free_shipping coupon type
+    is_bxgy_coupon: bool = False,           # FIXED: flag for buyxgety coupon type
+    bxgy_get_item_net: Decimal = Decimal('0'),  # FIXED: net cost of the bxgy get-item after its discount
 ) -> dict[str, Decimal]:
     """VAT applies to subtotal after loyalty and product-level discounts.
     For free_shipping coupons, shipping is zeroed and VAT is on the full product subtotal.
+    For buyxgety coupons, the cart subtotal VAT is unaffected; only the get-item is discounted.
     """
     if is_free_shipping_coupon:
         # FIXED: free_shipping — coupon_discount IS the shipping amount being waived.
@@ -1206,8 +1209,16 @@ def _checkout_totals(
         taxable_subtotal = max(subtotal - loyalty_only_discount, Decimal('0')).quantize(Decimal('0.01'))
         vat_amount = ((taxable_subtotal * vat_percent) / Decimal('100')).quantize(Decimal('0.01'))
         total = (taxable_subtotal + vat_amount).quantize(Decimal('0.01'))  # FIXED: no shipping added
+    elif is_bxgy_coupon:
+        # FIXED: buyxgety — the discount only applies to the get-item (Y), not to the cart subtotal.
+        # Cart buy-items pay full price + full VAT. Get-item net cost is passed in bxgy_get_item_net.
+        loyalty_only_discount = loyalty_discount.quantize(Decimal('0.01'))
+        taxable_subtotal = max(subtotal - loyalty_only_discount, Decimal('0')).quantize(Decimal('0.01'))
+        vat_amount = ((taxable_subtotal * vat_percent) / Decimal('100')).quantize(Decimal('0.01'))
+        # FIXED: total = buy-items + their VAT + get-item net (0 if 100% off) + shipping
+        total = (taxable_subtotal + vat_amount + bxgy_get_item_net + shipping_amount).quantize(Decimal('0.01'))
     else:
-        # Original logic for transaction / item / buyxgety / loyalty discounts.
+        # Original logic for transaction / item / loyalty discounts.
         discount_total = (loyalty_discount + coupon_discount).quantize(Decimal('0.01'))
         taxable_subtotal = max(subtotal - discount_total, Decimal('0')).quantize(Decimal('0.01'))
         vat_amount = ((taxable_subtotal * vat_percent) / Decimal('100')).quantize(Decimal('0.01'))
@@ -1506,6 +1517,8 @@ class CheckoutAPIView(APIView):
                         loyalty_discount=loyalty_discount,
                         coupon_discount=offer_coupon_discount_value,
                         is_free_shipping_coupon=False,  # FIXED: buyxgety is never free_shipping
+                        is_bxgy_coupon=True,            # FIXED: use bxgy path — don't subtract discount from subtotal
+                        bxgy_get_item_net=net_line_total,  # FIXED: net cost of get-item (0 if 100% off)
                     )
                     vat_amount = checkout_totals['vat_amount']
                     gross_total = checkout_totals['gross_total']
@@ -1653,7 +1666,12 @@ class CheckoutAPIView(APIView):
         coupon_discount = offer_coupon_discount_value.quantize(Decimal('0.01'))
         loyalty_discount_amount = order.loyalty_discount.quantize(Decimal('0.01'))
         discount_amount = (coupon_discount + loyalty_discount_amount).quantize(Decimal('0.01'))
-        taxable_subtotal = max(order.subtotal - discount_amount, Decimal('0')).quantize(Decimal('0.01'))
+        # FIXED: for buyxgety the discount is on the get-item only, not on the cart subtotal.
+        # taxable_subtotal must reflect the actual taxable base (cart buy-items minus loyalty only).
+        if offer_coupon is not None and (offer_coupon.coupon_type or '').lower() == 'buyxgety':
+            taxable_subtotal = max(order.subtotal - loyalty_discount_amount, Decimal('0')).quantize(Decimal('0.01'))  # FIXED
+        else:
+            taxable_subtotal = max(order.subtotal - discount_amount, Decimal('0')).quantize(Decimal('0.01'))
         order_data = OrderSerializer(order).data
         order_data['coupon_discount'] = str(coupon_discount)
         order_data['discount_amount'] = str(discount_amount)

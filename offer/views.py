@@ -259,6 +259,7 @@ class OrderSummaryAPIView(APIView):
         # FIXED: free_shipping coupon — shipping becomes 0, VAT is on full subtotal,
         # discount is NOT subtracted from the taxable base (it only zeroes the shipping charge).
         is_free_shipping_coupon = (coupon.coupon_type or '').lower() == 'free_shipping'  # FIXED: moved up
+        is_bxgy_coupon = (coupon.coupon_type or '').lower() == 'buyxgety'  # FIXED: identify bxgy
 
         if is_free_shipping_coupon:
             # FIXED: For free_shipping the effective shipping charge is 0.
@@ -271,8 +272,27 @@ class OrderSummaryAPIView(APIView):
                 final_total = Decimal('0.00')
             # FIXED: coupon_discount shown to user = original shipping amount (what was waived)
             shipping_discount_display = discount  # the waived shipping amount
+        elif is_bxgy_coupon:
+            # FIXED: For buyxgety, the discount ONLY applies to the get-item (Y).
+            # The buy-item (X) in the cart still pays full price + full VAT.
+            # Do NOT subtract the get-item discount from the cart subtotal when computing VAT.
+            # subtotal here = buy-item(s) only (cart items). VAT must be on the full cart subtotal.
+            # The get-item's net price is already 0 (or reduced) — its VAT contribution is 0.
+            # grand_total = (subtotal + vat_on_subtotal) + (get_item_net = 0) + shipping
+            effective_shipping = shipping_amount
+            vat_amount = (subtotal * vat_percent / Decimal('100')).quantize(Decimal('0.01'))  # FIXED: VAT on full cart subtotal
+            # get-item net cost = get_line_total - discount (e.g. 50 - 50 = 0 for 100% off)
+            bxgy_net = Decimal('0.00')
+            if bxgy_get_item is not None:
+                bxgy_gross = _as_decimal(bxgy_get_item.get('line_total') or '0')
+                bxgy_disc = _as_decimal(bxgy_get_item.get('discount') or '0')
+                bxgy_net = max(bxgy_gross - bxgy_disc, Decimal('0')).quantize(Decimal('0.01'))  # FIXED: net cost of get-item
+            final_total = (subtotal + vat_amount + bxgy_net + effective_shipping).quantize(Decimal('0.01'))  # FIXED
+            if final_total < Decimal('0'):
+                final_total = Decimal('0.00')
+            shipping_discount_display = discount  # the get-item discount amount shown to user
         elif discount > Decimal('0.00'):
-            # FIXED: transaction / item / buyxgety — VAT on subtotal after product discount
+            # FIXED: transaction / item — VAT on subtotal after product discount
             effective_shipping = shipping_amount
             taxable_amount = max(subtotal - discount, Decimal('0')).quantize(Decimal('0.01'))  # FIXED: guard against negative
             vat_amount = (taxable_amount * vat_percent / Decimal('100')).quantize(Decimal('0.01'))
