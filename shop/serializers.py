@@ -868,13 +868,23 @@ class OrderSerializer(serializers.ModelSerializer):
 
 
 class LoyaltyIssueCouponSerializer(serializers.Serializer):
-    points = serializers.IntegerField(min_value=1)
+    points = serializers.IntegerField(
+        min_value=1,
+        required=False,
+        help_text='Super Coins to exchange. Defaults to one block (100) if omitted.',
+    )
 
-    def validate_points(self, value):
-        m = min_points_to_redeem()
-        if value < m:
-            raise serializers.ValidationError(f'At least {m} points are required to issue a coupon.')
-        return value
+    def validate(self, attrs):
+        from shop.loyalty import coupon_points_block, validate_points_for_coupon
+
+        points = attrs.get('points')
+        if points is None:
+            points = coupon_points_block()
+            attrs['points'] = points
+        err = validate_points_for_coupon(points)
+        if err:
+            raise serializers.ValidationError({'points': err})
+        return attrs
 
 
 class CheckoutSerializer(serializers.Serializer):

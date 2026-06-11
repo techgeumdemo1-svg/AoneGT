@@ -35,8 +35,12 @@ from .loyalty import (
     aed_per_point_earned,
     default_coupon_expires_at,
     max_points_redeemable_for_total,
+    coupon_aed_for_points,
+    coupon_credit_aed,
+    coupon_points_block,
     min_points_to_redeem,
     point_value_aed,
+    validate_points_for_coupon,
     points_earned_for_purchase,
 )
 from .models import (
@@ -180,6 +184,56 @@ def _as_decimal(raw, default='0'):
         return Decimal(default).quantize(Decimal('0.01'))
 
 
+def _zoho_price_from_payload(source: dict, first_variant: dict) -> Decimal:
+    """Match Zoho list/detail field names (parent + first variant)."""
+    for raw in (
+        source.get('min_rate'),
+        source.get('rate'),
+        source.get('price'),
+        source.get('selling_price'),
+        source.get('sales_rate'),
+        source.get('list_price'),
+        source.get('actual_price'),
+        source.get('mrp'),
+        source.get('label_rate'),
+        first_variant.get('rate'),
+        first_variant.get('price'),
+        first_variant.get('selling_price'),
+        first_variant.get('sales_rate'),
+        first_variant.get('list_price'),
+        first_variant.get('label_rate'),
+    ):
+        if raw in (None, ''):
+            continue
+        try:
+            val = _as_decimal(raw)
+            if val > Decimal('0'):
+                return val
+        except Exception:
+            continue
+    variants = source.get('variants') if isinstance(source.get('variants'), list) else []
+    for variant in variants:
+        if not isinstance(variant, dict):
+            continue
+        for raw in (
+            variant.get('rate'),
+            variant.get('price'),
+            variant.get('selling_price'),
+            variant.get('sales_rate'),
+            variant.get('list_price'),
+            variant.get('label_rate'),
+        ):
+            if raw in (None, ''):
+                continue
+            try:
+                val = _as_decimal(raw)
+                if val > Decimal('0'):
+                    return val
+            except Exception:
+                continue
+    return Decimal('0')
+
+
 def _upsert_local_product_from_zoho(store: Store, zoho_product_id: str, payload: dict) -> Product:
     product_blob = payload.get('product') if isinstance(payload, dict) else None
     source = product_blob if isinstance(product_blob, dict) else payload
@@ -194,6 +248,7 @@ def _upsert_local_product_from_zoho(store: Store, zoho_product_id: str, payload:
         or source.get('product_name')
         or source.get('item_name')
         or first_variant.get('name')
+        or first_variant.get('product_name')
         or f'Zoho Product {zoho_product_id}'
     ).strip()
     sku = str(
@@ -207,14 +262,7 @@ def _upsert_local_product_from_zoho(store: Store, zoho_product_id: str, payload:
     category = str(source.get('category_name') or source.get('category') or '').strip()
     description = str(source.get('description') or '').strip()
     currency = str(source.get('currency_code') or source.get('currency') or 'AED').strip() or 'AED'
-    price = _as_decimal(
-        source.get('min_rate')
-        or source.get('rate')
-        or source.get('price')
-        or source.get('selling_price')
-        or first_variant.get('rate')
-        or '0'
-    )
+    price = _zoho_price_from_payload(source, first_variant)
     compare_at_price_raw = source.get('regular_price') or source.get('compare_at_price')
     if compare_at_price_raw in (None, ''):
         compare_at_price_raw = first_variant.get('label_rate')
@@ -528,7 +576,7 @@ def _fetch_zoho_product_from_account(
     zoho_product_id: str,
 ):
     """
-    Fetch one Zoho product row from account/org product list response.
+    Fetch one Zoho product row from account/org list, then product detail API.
     """
     service = ZohoAccountService(account)
     data = service.list_products(organization_id=organization_id, page=1, per_page=200)
@@ -539,7 +587,13 @@ def _fetch_zoho_product_from_account(
         pid = str(row.get('product_id') or row.get('id') or '').strip()
         if pid == zoho_product_id:
             return row
-    return None
+    try:
+        return service.get_product_detail(
+            organization_id=organization_id,
+            product_id=zoho_product_id,
+        )
+    except Exception:
+        return None
 
 
 def _perform_cart_add_zoho_product(
@@ -611,6 +665,7 @@ def _perform_cart_add_zoho_product(
     # - price greater than zero
     # When account/org is present, retry once with account-level detail endpoint.
     if product is not None and not _product_is_valid_for_cart(product, zoho_product_id):
+        detail_payload = None
         if account is not None and organization_id:
             try:
                 detail_payload = ZohoAccountService(account).get_product_detail(
@@ -621,9 +676,22 @@ def _perform_cart_add_zoho_product(
             except Exception:
                 pass
         if not _product_is_valid_for_cart(product, zoho_product_id):
+            try:
+                detail_payload = detail_payload or ZohoCommerceService.get_product_detail_storefront(
+                    zoho_product_id,
+                    store=store,
+                )
+                product = _upsert_local_product_from_zoho(store, zoho_product_id, detail_payload)
+            except Exception:
+                pass
+        if not _product_is_valid_for_cart(product, zoho_product_id):
             return (
                 None,
-                'Unable to fetch complete product name/price from Zoho for this item.',
+                (
+                    'Unable to fetch complete product name/price from Zoho for this item. '
+                    'Ensure the product has a name and selling price > 0 in Zoho Commerce, '
+                    'and use the variant product_id if the item has variants.'
+                ),
                 status.HTTP_502_BAD_GATEWAY,
             )
 
@@ -1756,6 +1824,11 @@ class RewardPointsAPIView(APIView):
                     'aed_spend_per_point_earned': aed_per_point_earned(),
                     'point_value_aed': str(point_value_aed()),
                     'min_points_to_redeem': min_points_to_redeem(),
+                    'coupon_points_block': coupon_points_block(),
+                    'coupon_credit_aed_per_block': str(coupon_credit_aed()),
+                    'can_issue_coupon': wallet >= coupon_points_block(),
+                    'max_coupon_blocks_available': wallet // coupon_points_block(),
+                    'issue_coupon_path': '/api/shop/rewards/issue-coupon/',
                     'earn_currency': 'AED',
                     'points_balance_is_account_wide': True,
                     'store_fields_are_for_requested_store_only': True,
@@ -1766,20 +1839,30 @@ class RewardPointsAPIView(APIView):
 
 
 class LoyaltyIssueCouponAPIView(APIView):
-    """Exchange wallet points for a one-time code usable at checkout (same discount rules)."""
+    """
+    Exchange Super Coins for a one-time checkout coupon.
+
+    Default rule: minimum 100 coins, redeemed in blocks of 100 → 100 AED credit each.
+    POST body: {} or omit body → one coupon block (100 coins → 100 AED)
+               { "points": 200 } → coupon worth 200 AED
+    """
 
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        ser = LoyaltyIssueCouponSerializer(data=request.data)
+        ser = LoyaltyIssueCouponSerializer(data=request.data or {})
         ser.is_valid(raise_exception=True)
         points = ser.validated_data['points']
+        block = coupon_points_block()
         with transaction.atomic():
             user = User.objects.select_for_update().get(pk=request.user.pk)
             bal = int(user.points_balance or 0)
             if points > bal:
                 return Response({'detail': 'Insufficient points in wallet.'}, status=status.HTTP_400_BAD_REQUEST)
-            amount_aed = (Decimal(points) * point_value_aed()).quantize(Decimal('0.01'))
+            err = validate_points_for_coupon(points)
+            if err:
+                return Response({'detail': err}, status=status.HTTP_400_BAD_REQUEST)
+            amount_aed = coupon_aed_for_points(points)
             user.points_balance = bal - points
             user.save(update_fields=['points_balance'])
             code = _generate_loyalty_coupon_code()
@@ -1815,8 +1898,15 @@ class LoyaltyIssueCouponAPIView(APIView):
             {
                 'code': coupon.code,
                 'amount_aed': str(coupon.amount_aed),
+                'credit_aed': str(coupon.amount_aed),
                 'points_spent': coupon.points_spent,
+                'points_per_block': block,
+                'credit_aed_per_block': str(coupon_credit_aed()),
                 'expires_at': coupon.expires_at.isoformat(),
+                'message': (
+                    f'Coupon created: {coupon.amount_aed} AED store credit. '
+                    f'Use code {coupon.code} at checkout.'
+                ),
             },
             status=status.HTTP_201_CREATED,
         )
