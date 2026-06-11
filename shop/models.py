@@ -622,3 +622,110 @@ class ZohoBooksJournalLog(models.Model):
 
     def __str__(self):
         return f'{self.journal_type} order={self.order_id} journal_id={self.zoho_journal_id or "failed"}'
+
+
+class SupportTicket(models.Model):
+    class Status(models.TextChoices):
+        OPEN = 'open', 'Open'
+        IN_PROGRESS = 'in_progress', 'In progress'
+        RESOLVED = 'resolved', 'Resolved'
+        CLOSED = 'closed', 'Closed'
+
+    class Priority(models.TextChoices):
+        LOW = 'low', 'Low'
+        NORMAL = 'normal', 'Normal'
+        HIGH = 'high', 'High'
+        URGENT = 'urgent', 'Urgent'
+
+    class Category(models.TextChoices):
+        ORDER = 'order', 'Order issue'
+        DELIVERY = 'delivery', 'Delivery'
+        PAYMENT = 'payment', 'Payment'
+        RETURN = 'return', 'Return / refund'
+        ACCOUNT = 'account', 'Account'
+        OTHER = 'other', 'Other'
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='support_tickets',
+    )
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='support_tickets',
+    )
+    ticket_number = models.CharField(max_length=32, unique=True, blank=True)
+    subject = models.CharField(max_length=255)
+    category = models.CharField(
+        max_length=32,
+        choices=Category.choices,
+        default=Category.OTHER,
+    )
+    status = models.CharField(
+        max_length=32,
+        choices=Status.choices,
+        default=Status.OPEN,
+    )
+    priority = models.CharField(
+        max_length=16,
+        choices=Priority.choices,
+        default=Priority.NORMAL,
+    )
+    assigned_to = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='assigned_support_tickets',
+    )
+    last_message_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-last_message_at', '-created_at']
+
+    def __str__(self):
+        return self.ticket_number or f'Ticket {self.pk}'
+
+    def save(self, *args, **kwargs):
+        if not self.ticket_number:
+            super().save(*args, **kwargs)
+            self.ticket_number = f'TKT-{self.pk:05d}'
+            super().save(update_fields=['ticket_number'])
+        else:
+            super().save(*args, **kwargs)
+
+
+class SupportChatMessage(models.Model):
+    class SenderRole(models.TextChoices):
+        CUSTOMER = 'customer', 'Customer'
+        STAFF = 'staff', 'Staff'
+        SYSTEM = 'system', 'System'
+
+    ticket = models.ForeignKey(
+        SupportTicket,
+        on_delete=models.CASCADE,
+        related_name='messages',
+    )
+    sender = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='support_chat_messages',
+    )
+    sender_role = models.CharField(max_length=16, choices=SenderRole.choices)
+    message = models.TextField()
+    is_read_by_customer = models.BooleanField(default=False)
+    is_read_by_staff = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f'{self.ticket_id} {self.sender_role} @ {self.created_at}'
