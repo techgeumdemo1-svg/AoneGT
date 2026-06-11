@@ -82,7 +82,7 @@ def return_flow_ui_payload():
         },
         'item_selection': {
             'method': 'GET',
-            'path_template': '/api/shop/orders/{order_id}/',
+            'path_template': '/api/shop/orders/detail/?id={order_id}&store_id={store_id}',
             'lines_field': 'return_eligible_lines',
             'price_fields': ('unit_price', 'unit_price_display', 'currency', 'line_total_display'),
         },

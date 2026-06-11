@@ -94,7 +94,48 @@ def _apply_cms_page_list_filters(queryset, request):
     return queryset.order_by("slug")
 
 
+def _parse_faq_id_query_param(request, *, required=True):
+    faq_id = (request.query_params.get('id') or '').strip()
+    if not faq_id:
+        if required:
+            return None, Response(
+                {'detail': 'Query parameter id is required and must be a positive integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return None, None
+    if not faq_id.isdigit():
+        return None, Response(
+            {'detail': 'Query parameter id is required and must be a positive integer.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return int(faq_id), None
+
+
+def _parse_cms_page_id_query_param(request, *, required=True):
+    page_id = (request.query_params.get('id') or '').strip()
+    if not page_id:
+        if required:
+            return None, Response(
+                {'detail': 'Query parameter id is required and must be a positive integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return None, None
+    if not page_id.isdigit():
+        return None, Response(
+            {'detail': 'Query parameter id is required and must be a positive integer.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return int(page_id), None
+
+
 class AdminFAQListCreateAPIView(APIView):
+    """
+    GET    /api/admin/cms/faqs/          — list
+    POST   /api/admin/cms/faqs/          — create
+    PATCH  /api/admin/cms/faqs/?id=<id> — update
+    DELETE /api/admin/cms/faqs/?id=<id> — delete
+    """
+
     permission_classes = [IsAuthenticated, IsStaffUser]
 
     def get(self, request):
@@ -120,12 +161,11 @@ class AdminFAQListCreateAPIView(APIView):
             status=status.HTTP_201_CREATED,
         )
 
-
-class AdminFAQDetailAPIView(APIView):
-    permission_classes = [IsAuthenticated, IsStaffUser]
-
-    def patch(self, request, pk):
-        faq = get_object_or_404(FAQ, pk=pk)
+    def patch(self, request):
+        faq_id, err = _parse_faq_id_query_param(request)
+        if err:
+            return err
+        faq = get_object_or_404(FAQ, pk=faq_id)
         serializer = AdminFAQWriteSerializer(faq, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         faq = serializer.save()
@@ -137,17 +177,25 @@ class AdminFAQDetailAPIView(APIView):
             status=status.HTTP_200_OK,
         )
 
-    def delete(self, request, pk):
-        faq = get_object_or_404(FAQ, pk=pk)
-        faq_id = faq.pk
+    def delete(self, request):
+        faq_id, err = _parse_faq_id_query_param(request)
+        if err:
+            return err
+        faq = get_object_or_404(FAQ, pk=faq_id)
+        deleted_id = faq.pk
         faq.delete()
         return Response(
-            {"message": "FAQ deleted.", "faq_id": faq_id},
+            {"message": "FAQ deleted.", "faq_id": deleted_id},
             status=status.HTTP_200_OK,
         )
 
 
 class AdminCMSPageListAPIView(APIView):
+    """
+    GET   /api/admin/cms/pages/          — list
+    PATCH /api/admin/cms/pages/?id=<id> — update
+    """
+
     permission_classes = [IsAuthenticated, IsStaffUser]
 
     def get(self, request):
@@ -161,12 +209,11 @@ class AdminCMSPageListAPIView(APIView):
             status=status.HTTP_200_OK,
         )
 
-
-class AdminCMSPageDetailAPIView(APIView):
-    permission_classes = [IsAuthenticated, IsStaffUser]
-
-    def patch(self, request, pk):
-        page = get_object_or_404(CMSPage, pk=pk)
+    def patch(self, request):
+        page_id, err = _parse_cms_page_id_query_param(request)
+        if err:
+            return err
+        page = get_object_or_404(CMSPage, pk=page_id)
         serializer = AdminCMSPageUpdateSerializer(page, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         page = serializer.save()
