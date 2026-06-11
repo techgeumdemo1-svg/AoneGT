@@ -8,11 +8,12 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from shop.models import Order
+from shop.models import Order, OrderReturn, SupportTicket, UserAddress
 
 from .activity_log_utils import record_admin_activity
 from .models import AdminActivityLog
 from .orders import AdminOrderListSerializer, _paginate_queryset
+from .returns import AdminReturnListSerializer
 from .super_coins import build_customer_super_coins_payload
 from .views import IsStaffUser
 
@@ -85,6 +86,26 @@ class AdminCustomerDetailSerializer(AdminCustomerListSerializer):
         )
 
 
+class AdminCustomerAddressSerializer(serializers.ModelSerializer):
+    address_id = serializers.IntegerField(source="id", read_only=True)
+
+    class Meta:
+        model = UserAddress
+        fields = (
+            "address_id",
+            "full_name",
+            "phone_number",
+            "address",
+            "city",
+            "state",
+            "address_type",
+            "is_default",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+
 class AdminCustomerStatusUpdateSerializer(serializers.Serializer):
     status = serializers.CharField()
 
@@ -125,6 +146,61 @@ def _customer_detail_queryset():
     )
 
 
+def build_customer_detail_payload(user) -> dict:
+    """Full customer profile for admin detail view."""
+    addresses = UserAddress.objects.filter(user=user).order_by(
+        "-is_default", "-updated_at", "-created_at",
+    )
+    orders = (
+        Order.objects.filter(user=user)
+        .select_related("user", "store")
+        .prefetch_related("items", "returns__lines__order_item")
+        .order_by("-created_at")
+    )
+    returns = (
+        OrderReturn.objects.filter(user=user)
+        .select_related("user", "order", "order__store")
+        .prefetch_related("lines__order_item")
+        .order_by("-created_at")
+    )
+    status_path = f"/api/admin/customers/status/?id={user.pk}"
+    is_active = user.is_active
+
+    return {
+        **AdminCustomerDetailSerializer(user).data,
+        "first_name": user.first_name or "",
+        "last_name": user.last_name or "",
+        "delivery_addresses": AdminCustomerAddressSerializer(addresses, many=True).data,
+        "orders": AdminOrderListSerializer(orders, many=True).data,
+        "return_requests": AdminReturnListSerializer(returns, many=True).data,
+        "support_tickets_summary": {
+            "total_count": support_tickets_qs.count(),
+            "open_count": support_tickets_qs.filter(status__in=open_ticket_statuses).count(),
+            "list_path": f"/api/admin/customers/support-tickets/by-customer/?customer_id={user.pk}",
+        },
+        "actions": {
+            "update_status": {
+                "method": "PATCH",
+                "path": status_path,
+                "allowed_statuses": ["active", "inactive", "blocked"],
+                "current_status": _customer_status_label(user),
+            },
+            "activate": {
+                "method": "PATCH",
+                "path": status_path,
+                "body": {"status": "active"},
+                "available": not is_active,
+            },
+            "deactivate": {
+                "method": "PATCH",
+                "path": status_path,
+                "body": {"status": "inactive"},
+                "available": is_active,
+            },
+        },
+    }
+
+
 def _apply_customer_list_filters(queryset, request):
     status_filter = (request.query_params.get("status") or "").strip().lower()
     if status_filter == "active":
@@ -154,9 +230,21 @@ def _apply_customer_list_filters(queryset, request):
 
 
 class AdminCustomerListAPIView(APIView):
+    """
+    GET /api/admin/customers/          — paginated list
+    GET /api/admin/customers/?id=<id> — full customer profile (detail)
+    """
+
     permission_classes = [IsAuthenticated, IsStaffUser]
 
     def get(self, request):
+        if (request.query_params.get("id") or "").strip():
+            customer_id, err = _parse_customer_id_query_param(request)
+            if err:
+                return err
+            user = get_object_or_404(_customer_detail_queryset(), pk=customer_id)
+            return Response(build_customer_detail_payload(user), status=status.HTTP_200_OK)
+
         qs = _apply_customer_list_filters(
             _customers_queryset().order_by("-created_at"),
             request,
@@ -172,7 +260,7 @@ class AdminCustomerListAPIView(APIView):
 
 
 class AdminCustomerDetailAPIView(APIView):
-    """GET /api/admin/customers/detail/?id=<customer_id>"""
+    """GET /api/admin/customers/detail/?id=<customer_id> — same payload as /customers/?id="""
 
     permission_classes = [IsAuthenticated, IsStaffUser]
 
@@ -181,7 +269,7 @@ class AdminCustomerDetailAPIView(APIView):
         if err:
             return err
         user = get_object_or_404(_customer_detail_queryset(), pk=customer_id)
-        return Response(AdminCustomerDetailSerializer(user).data, status=status.HTTP_200_OK)
+        return Response(build_customer_detail_payload(user), status=status.HTTP_200_OK)
 
 
 class AdminCustomerStatusUpdateAPIView(APIView):

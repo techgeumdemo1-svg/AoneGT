@@ -10,6 +10,8 @@ from .models import (
     OrderItem,
     OrderReturn,
     OrderReturnLine,
+    SupportChatMessage,
+    SupportTicket,
     UserNotification,
 )
 from .services.order_email import handle_customer_tracking_stage_change
@@ -223,3 +225,28 @@ class DeliveryZoneAdmin(admin.ModelAdmin):
         return ', '.join(obj.cities) if obj.cities else '-'
 
     cities_display.short_description = 'Cities / Areas'
+
+
+class SupportChatMessageInline(admin.TabularInline):
+    model = SupportChatMessage
+    extra = 0
+    readonly_fields = ('sender', 'sender_role', 'message', 'created_at')
+
+
+@admin.register(SupportTicket)
+class SupportTicketAdmin(admin.ModelAdmin):
+    list_display = (
+        'ticket_number',
+        'user',
+        'subject',
+        'category',
+        'status',
+        'priority',
+        'assigned_to',
+        'last_message_at',
+        'created_at',
+    )
+    list_filter = ('status', 'priority', 'category')
+    search_fields = ('ticket_number', 'subject', 'user__email')
+    readonly_fields = ('ticket_number', 'created_at', 'updated_at', 'last_message_at')
+    inlines = [SupportChatMessageInline]
