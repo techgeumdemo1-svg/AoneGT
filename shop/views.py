@@ -156,22 +156,21 @@ def _required_store_for_user_scope(request):
 
 
 def _resolve_order_pk(request, pk=None):
-    """Path ``pk`` or query ``order_id`` (used by confirm / detail query-style URLs)."""
+    """Path ``pk`` or query ``id`` / ``order_id`` (detail, confirm, returns, etc.)."""
     if pk is not None:
         return pk, None
-    raw = (request.query_params.get('order_id') or '').strip()
+    raw = (request.query_params.get('id') or request.query_params.get('order_id') or '').strip()
     if not raw:
         return None, Response(
-            {'detail': 'order_id query parameter is required.'},
+            {'detail': 'Query parameter id is required and must be a positive integer.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    try:
-        return int(raw), None
-    except (TypeError, ValueError):
+    if not raw.isdigit():
         return None, Response(
-            {'detail': 'order_id must be an integer.'},
+            {'detail': 'Query parameter id is required and must be a positive integer.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
+    return int(raw), None
 
 
 def _as_decimal(raw, default='0'):
@@ -1846,6 +1845,11 @@ class OrderListAPIView(generics.ListAPIView):
 
 
 class OrderDetailAPIView(APIView):
+    """
+    GET   /api/shop/orders/detail/?id=<id>&store_id=<store_id>
+    PATCH /api/shop/orders/detail/?id=<id>&store_id=<store_id>
+    """
+
     permission_classes = [IsAuthenticated]
 
     def _order_queryset(self, user, store):
@@ -2143,13 +2147,26 @@ class OrderZohoBooksInvoiceAPIView(APIView):
         if err:
             return err
 
-        if order.payment_method == Order.PaymentMethod.CASH_ON_DELIVERY:
+        if order.payment_method in (
+            Order.PaymentMethod.CASH_ON_DELIVERY,
+            Order.PaymentMethod.CARD_ON_DELIVERY,
+        ):
+            method_label = (
+                'Card on delivery'
+                if order.payment_method == Order.PaymentMethod.CARD_ON_DELIVERY
+                else 'Cash on delivery'
+            )
+            after_step = (
+                'Use POST /api/admin/orders/{id}/collect-card/ after Geidea payment.'
+                if order.payment_method == Order.PaymentMethod.CARD_ON_DELIVERY
+                else 'Use POST /api/admin/orders/{id}/collect-cod/ after delivery.'
+            )
             return Response(
                 {
                     'status': 'error',
                     'message': (
-                        'Cash on delivery: create the invoice in Zoho Books. '
-                        'Use POST /api/admin/orders/{id}/collect-cod/ after delivery.'
+                        f'{method_label}: confirm the sales order and create the invoice '
+                        f'in Zoho Books. {after_step}'
                     ),
                 },
                 status=status.HTTP_400_BAD_REQUEST,
@@ -2196,6 +2213,17 @@ class OrderZohoBooksPaymentAPIView(APIView):
                     'message': (
                         'Cash on delivery: use POST /api/admin/orders/{id}/collect-cod/ '
                         'after the delivery boy collects cash.'
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if order.payment_method == Order.PaymentMethod.CARD_ON_DELIVERY:
+            return Response(
+                {
+                    'status': 'error',
+                    'message': (
+                        'Card on delivery: use POST /api/admin/orders/{id}/collect-card/ '
+                        'after Geidea POS payment.'
                     ),
                 },
                 status=status.HTTP_400_BAD_REQUEST,

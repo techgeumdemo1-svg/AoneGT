@@ -172,7 +172,30 @@ def _admin_user_payload(user) -> dict:
     return AdminUserListSerializer(user).data
 
 
+def _parse_user_id_query_param(request, *, required=True):
+    user_id = (request.query_params.get('id') or '').strip()
+    if not user_id:
+        if required:
+            return None, Response(
+                {'detail': 'Query parameter id is required and must be a positive integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return None, None
+    if not user_id.isdigit():
+        return None, Response(
+            {'detail': 'Query parameter id is required and must be a positive integer.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return int(user_id), None
+
+
 class AdminUserListCreateAPIView(APIView):
+    """
+    GET   /api/admin/users/          — list
+    POST  /api/admin/users/          — create
+    PATCH /api/admin/users/?id=<id> — update
+    """
+
     permission_classes = [IsAuthenticated, IsStaffUser]
 
     def get(self, request):
@@ -209,12 +232,11 @@ class AdminUserListCreateAPIView(APIView):
             status=status.HTTP_201_CREATED,
         )
 
-
-class AdminUserDetailAPIView(APIView):
-    permission_classes = [IsAuthenticated, IsStaffUser]
-
-    def patch(self, request, pk):
-        user = get_object_or_404(_admin_users_queryset(), pk=pk)
+    def patch(self, request):
+        user_id, err = _parse_user_id_query_param(request)
+        if err:
+            return err
+        user = get_object_or_404(_admin_users_queryset(), pk=user_id)
         serializer = AdminUserUpdateSerializer(
             data=request.data,
             partial=True,
@@ -252,8 +274,11 @@ class AdminUserDetailAPIView(APIView):
 class AdminUserDeactivateAPIView(APIView):
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def patch(self, request, pk):
-        user = get_object_or_404(_admin_users_queryset(), pk=pk)
+    def patch(self, request):
+        user_id, err = _parse_user_id_query_param(request)
+        if err:
+            return err
+        user = get_object_or_404(_admin_users_queryset(), pk=user_id)
         if user.pk == request.user.pk:
             return Response(
                 {"detail": "You cannot deactivate your own account."},
@@ -293,8 +318,11 @@ class AdminUserDeactivateAPIView(APIView):
 class AdminUserReactivateAPIView(APIView):
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def patch(self, request, pk):
-        user = get_object_or_404(_admin_users_queryset(), pk=pk)
+    def patch(self, request):
+        user_id, err = _parse_user_id_query_param(request)
+        if err:
+            return err
+        user = get_object_or_404(_admin_users_queryset(), pk=user_id)
         if user.is_active:
             return Response(
                 {

@@ -18,6 +18,23 @@ def _admin_stores_queryset():
     return Store.objects.annotate(products_count=Count("products", distinct=True))
 
 
+def _parse_store_id_query_param(request, *, required=True):
+    store_id = (request.query_params.get('store_id') or '').strip()
+    if not store_id:
+        if required:
+            return None, Response(
+                {'detail': 'Query parameter store_id is required and must be a positive integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return None, None
+    if not store_id.isdigit():
+        return None, Response(
+            {'detail': 'Query parameter store_id is required and must be a positive integer.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return int(store_id), None
+
+
 class AdminStoreListSerializer(serializers.ModelSerializer):
     store_id = serializers.IntegerField(source="id", read_only=True)
     is_visible = serializers.BooleanField(source="is_active", read_only=True)
@@ -134,10 +151,15 @@ class AdminStoreListAPIView(APIView):
 
 
 class AdminStoreVisibilityUpdateAPIView(APIView):
+    """PATCH /api/admin/stores/visibility/?store_id=<store_id>"""
+
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def patch(self, request, pk):
-        store = get_object_or_404(Store, pk=pk)
+    def patch(self, request):
+        store_id, err = _parse_store_id_query_param(request)
+        if err:
+            return err
+        store = get_object_or_404(Store, pk=store_id)
         serializer = AdminStoreVisibilitySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         is_active = serializer.validated_data["is_active"]

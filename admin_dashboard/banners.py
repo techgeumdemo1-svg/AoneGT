@@ -109,7 +109,31 @@ def _banner_payload(banner: Banner) -> dict:
     return AdminBannerListSerializer(banner).data
 
 
+def _parse_banner_id_query_param(request, *, required=True):
+    banner_id = (request.query_params.get('id') or '').strip()
+    if not banner_id:
+        if required:
+            return None, Response(
+                {'detail': 'Query parameter id is required and must be a positive integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return None, None
+    if not banner_id.isdigit():
+        return None, Response(
+            {'detail': 'Query parameter id is required and must be a positive integer.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return int(banner_id), None
+
+
 class AdminBannerListCreateAPIView(APIView):
+    """
+    GET    /api/admin/banners/           — list
+    POST   /api/admin/banners/           — create
+    PATCH  /api/admin/banners/?id=<id>  — update
+    DELETE /api/admin/banners/?id=<id>  — delete
+    """
+
     permission_classes = [IsAuthenticated, IsStaffUser]
 
     def get(self, request):
@@ -136,16 +160,15 @@ class AdminBannerListCreateAPIView(APIView):
             status=status.HTTP_201_CREATED,
         )
 
-
-class AdminBannerDetailAPIView(APIView):
-    permission_classes = [IsAuthenticated, IsStaffUser]
-
-    def patch(self, request, pk):
-        banner = get_object_or_404(_admin_banners_queryset(), pk=pk)
+    def patch(self, request):
+        banner_id, err = _parse_banner_id_query_param(request)
+        if err:
+            return err
+        banner = get_object_or_404(_admin_banners_queryset(), pk=banner_id)
         serializer = BannerAdminSerializer(banner, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
-        banner = _admin_banners_queryset().get(pk=pk)
+        banner = _admin_banners_queryset().get(pk=banner_id)
         return Response(
             {
                 "message": "Banner updated.",
@@ -154,14 +177,21 @@ class AdminBannerDetailAPIView(APIView):
             status=status.HTTP_200_OK,
         )
 
-    def delete(self, request, pk):
-        banner = get_object_or_404(Banner, pk=pk)
-        banner_id = banner.pk
+    def delete(self, request):
+        banner_id, err = _parse_banner_id_query_param(request)
+        if err:
+            return err
+        banner = get_object_or_404(Banner, pk=banner_id)
+        deleted_id = banner.pk
         banner.delete()
         return Response(
-            {"message": "Banner deleted.", "banner_id": banner_id},
+            {"message": "Banner deleted.", "banner_id": deleted_id},
             status=status.HTTP_200_OK,
         )
+
+
+class AdminBannerDetailAPIView(AdminBannerListCreateAPIView):
+    """Alias kept for backwards compatibility — use /api/admin/banners/?id=<id> instead."""
 
 
 class AdminBannerReorderAPIView(APIView):

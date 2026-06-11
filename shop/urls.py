@@ -70,7 +70,6 @@ urlpatterns = [
     path('orders/zoho-books/cancel/', OrderZohoBooksCancelAPIView.as_view(), name='shop-order-zoho-books-cancel-by-query'),
     path('orders/payment-success/', OrderPaymentSuccessAPIView.as_view(), name='shop-order-payment-success-by-query'),
     path('orders/<int:pk>/confirm/', OrderConfirmAPIView.as_view(), name='shop-order-confirm'),
-    path('orders/<int:pk>/', OrderDetailAPIView.as_view(), name='shop-order-detail'),
 
     path('notifications/unread-count/', NotificationUnreadCountAPIView.as_view(), name='shop-notifications-unread-count'),
     path('notifications/mark-all-read/', NotificationMarkAllReadAPIView.as_view(), name='shop-notifications-mark-all-read'),
