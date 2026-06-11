@@ -40,6 +40,8 @@ def zoho_books_manual_workflow() -> bool:
 
 
 def _should_create_on_placed() -> bool:
+    if zoho_books_manual_workflow():
+        return False
     mode = (getattr(settings, 'ZOHO_BOOKS_CREATE_INVOICE_ON', 'placed') or 'placed').strip().lower()
     return mode in ('placed', 'both', 'checkout', 'confirmed')
 

@@ -31,14 +31,11 @@ from .returns import (
     AdminReturnZohoSyncAPIView,
 )
 from .banners import (
-    AdminBannerDetailAPIView,
     AdminBannerListCreateAPIView,
     AdminBannerReorderAPIView,
 )
 from .cms import (
-    AdminCMSPageDetailAPIView,
     AdminCMSPageListAPIView,
-    AdminFAQDetailAPIView,
     AdminFAQListCreateAPIView,
 )
 from .stores import (
@@ -63,7 +60,6 @@ from .transactions import (
 )
 from .users import (
     AdminUserDeactivateAPIView,
-    AdminUserDetailAPIView,
     AdminUserListCreateAPIView,
     AdminUserReactivateAPIView,
 )
@@ -88,13 +84,13 @@ urlpatterns = [
     path('dashboard/summary/', AdminDashboardSummaryAPIView.as_view(), name='admin-dashboard-summary'),
     path('dashboard/charts/', AdminDashboardChartsAPIView.as_view(), name='admin-dashboard-charts'),
     path('orders/', AdminOrderListAPIView.as_view(), name='admin-orders-list'),
-    path('orders/<int:pk>/', AdminOrderDetailAPIView.as_view(), name='admin-orders-detail'),
+    path('orders/detail/', AdminOrderDetailAPIView.as_view(), name='admin-orders-detail'),
     path('orders/<int:pk>/status/', AdminOrderStatusUpdateAPIView.as_view(), name='admin-orders-status'),
     path('orders/<int:pk>/collect-cod/', AdminOrderCollectCodAPIView.as_view(), name='admin-orders-collect-cod'),
-    path('orders/<int:pk>/timeline/', AdminOrderTimelineAPIView.as_view(), name='admin-orders-timeline'),
+    path('orders/timeline/', AdminOrderTimelineAPIView.as_view(), name='admin-orders-timeline'),
     path('orders/<int:pk>/geidea-collect/', AdminOrderGeideaCollectAPIView.as_view(), name='admin-orders-geidea-collect'),
     path('orders/<int:pk>/geidea-reconcile/', AdminOrderGeideaReconcileAPIView.as_view(), name='admin-orders-geidea-reconcile'),
-    path('orders/<int:pk>/verify-payment/', AdminOrderVerifyPaymentAPIView.as_view(), name='admin-orders-verify-payment'),
+    path('orders/verify-payment/', AdminOrderVerifyPaymentAPIView.as_view(), name='admin-orders-verify-payment'),
     path('customers/', AdminCustomerListAPIView.as_view(), name='admin-customers-list'),
     path('customers/detail/', AdminCustomerDetailAPIView.as_view(), name='admin-customers-detail'),
     path('customers/status/', AdminCustomerStatusUpdateAPIView.as_view(), name='admin-customers-status'),
@@ -108,18 +104,14 @@ urlpatterns = [
     path('returns/<int:pk>/zoho-sync/', AdminReturnZohoSyncAPIView.as_view(), name='admin-returns-zoho-sync'),
     path('stores/', AdminStoreListAPIView.as_view(), name='admin-stores-list'),
     path('stores/reorder/', AdminStoreReorderAPIView.as_view(), name='admin-stores-reorder'),
-    path('stores/<int:pk>/visibility/', AdminStoreVisibilityUpdateAPIView.as_view(), name='admin-stores-visibility'),
+    path('stores/visibility/', AdminStoreVisibilityUpdateAPIView.as_view(), name='admin-stores-visibility'),
     path('banners/', AdminBannerListCreateAPIView.as_view(), name='admin-banners-list-create'),
     path('banners/reorder/', AdminBannerReorderAPIView.as_view(), name='admin-banners-reorder'),
-    path('banners/<int:pk>/', AdminBannerDetailAPIView.as_view(), name='admin-banners-detail'),
     path('cms/faqs/', AdminFAQListCreateAPIView.as_view(), name='admin-cms-faqs-list-create'),
-    path('cms/faqs/<int:pk>/', AdminFAQDetailAPIView.as_view(), name='admin-cms-faqs-detail'),
     path('cms/pages/', AdminCMSPageListAPIView.as_view(), name='admin-cms-pages-list'),
-    path('cms/pages/<int:pk>/', AdminCMSPageDetailAPIView.as_view(), name='admin-cms-pages-detail'),
     path('users/', AdminUserListCreateAPIView.as_view(), name='admin-users-list-create'),
-    path('users/<int:pk>/deactivate/', AdminUserDeactivateAPIView.as_view(), name='admin-users-deactivate'),
-    path('users/<int:pk>/reactivate/', AdminUserReactivateAPIView.as_view(), name='admin-users-reactivate'),
-    path('users/<int:pk>/', AdminUserDetailAPIView.as_view(), name='admin-users-detail'),
+    path('users/deactivate/', AdminUserDeactivateAPIView.as_view(), name='admin-users-deactivate'),
+    path('users/reactivate/', AdminUserReactivateAPIView.as_view(), name='admin-users-reactivate'),
     path('reports/cart-abandonment/', AdminCartAbandonmentReportAPIView.as_view(), name='admin-reports-cart-abandonment'),
     path('reports/refunds/', AdminRefundsReportAPIView.as_view(), name='admin-reports-refunds'),
     path('reports/export/excel/', AdminReportExcelExportAPIView.as_view(), name='admin-reports-export-excel'),

@@ -185,6 +185,23 @@ def _paginate_queryset(queryset, request):
     }
 
 
+def _parse_order_id_query_param(request, *, required=True):
+    order_id = (request.query_params.get('id') or '').strip()
+    if not order_id:
+        if required:
+            return None, Response(
+                {'detail': 'Query parameter id is required and must be a positive integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return None, None
+    if not order_id.isdigit():
+        return None, Response(
+            {'detail': 'Query parameter id is required and must be a positive integer.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return int(order_id), None
+
+
 def _parse_order_list_date(raw: str) -> Optional[date]:
     value = (raw or "").strip()
     if not value:
@@ -421,10 +438,15 @@ class AdminOrderListAPIView(APIView):
 
 
 class AdminOrderDetailAPIView(APIView):
+    """GET /api/admin/orders/detail/?id=<order_id>"""
+
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def get(self, request, pk):
-        order = get_object_or_404(_admin_orders_queryset(), pk=pk)
+    def get(self, request):
+        order_id, err = _parse_order_id_query_param(request)
+        if err:
+            return err
+        order = get_object_or_404(_admin_orders_queryset(), pk=order_id)
         data = OrderSerializer(order).data
         data["customer"] = {
             "id": order.user_id,
@@ -537,10 +559,15 @@ class AdminOrderCollectCodAPIView(APIView):
 
 
 class AdminOrderTimelineAPIView(APIView):
+    """GET /api/admin/orders/timeline/?id=<order_id>"""
+
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def get(self, request, pk):
-        order = get_object_or_404(_admin_orders_queryset(), pk=pk)
+    def get(self, request):
+        order_id, err = _parse_order_id_query_param(request)
+        if err:
+            return err
+        order = get_object_or_404(_admin_orders_queryset(), pk=order_id)
         tracking = OrderSerializer(order).data.get("tracking", {})
         return Response(
             {
@@ -623,14 +650,19 @@ class AdminOrderVerifyPaymentAPIView(APIView):
     """
     Verify / record payment for an order.
 
+    POST /api/admin/orders/verify-payment/?id=<order_id>
+
     - Prepaid (gateway / pay-by-link): marks payment_status paid and credits user account.
     - If invoice exists: records Zoho Books customer payment against the invoice.
     """
 
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def post(self, request, pk):
-        order = get_object_or_404(_admin_orders_queryset(), pk=pk)
+    def post(self, request):
+        order_id, err = _parse_order_id_query_param(request)
+        if err:
+            return err
+        order = get_object_or_404(_admin_orders_queryset(), pk=order_id)
         if is_cod_order(order):
             return Response(
                 {
@@ -658,7 +690,7 @@ class AdminOrderVerifyPaymentAPIView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             ok, message, order = record_prepaid_payment_success(
-                pk,
+                order_id,
                 amount=amount,
                 gateway_reference=gateway_reference,
             )
@@ -668,11 +700,11 @@ class AdminOrderVerifyPaymentAPIView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             steps.append(message)
-            order = _reload_admin_order(pk)
+            order = _reload_admin_order(order_id)
 
         if (order.zoho_books_invoice_id or "").strip() and not (order.zoho_books_payment_id or "").strip():
             ok, message = staff_record_zoho_books_payment_for_order(
-                pk,
+                order_id,
                 amount=amount,
                 payment_method=payment_method,
                 gateway_reference=gateway_reference,
@@ -683,17 +715,17 @@ class AdminOrderVerifyPaymentAPIView(APIView):
                         "status": "error",
                         "message": message,
                         "steps_completed": steps,
-                        "order": _admin_order_payload(_reload_admin_order(pk)),
+                        "order": _admin_order_payload(_reload_admin_order(order_id)),
                     },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             steps.append(message)
-            order = _reload_admin_order(pk)
+            order = _reload_admin_order(order_id)
             if order.payment_method == Order.PaymentMethod.CARD_ON_DELIVERY:
-                changed, deliver_msg = maybe_auto_mark_delivered_on_payment(pk)
+                changed, deliver_msg = maybe_auto_mark_delivered_on_payment(order_id)
                 if changed:
                     steps.append(deliver_msg)
-                    order = _reload_admin_order(pk)
+                    order = _reload_admin_order(order_id)
         elif not steps:
             if order.payment_status == Order.PaymentStatus.PAID and (order.zoho_books_payment_id or "").strip():
                 message = "Payment already verified."
