@@ -200,6 +200,8 @@ OTP_PURGE_RUN_ON_START = os.getenv('OTP_PURGE_RUN_ON_START', 'True').strip().low
 LOYALTY_AED_PER_POINT_EARNED = int(os.getenv('LOYALTY_AED_PER_POINT_EARNED', '100'))
 LOYALTY_POINT_VALUE_AED = Decimal(os.getenv('LOYALTY_POINT_VALUE_AED', '1'))
 LOYALTY_MIN_POINTS_TO_REDEEM = int(os.getenv('LOYALTY_MIN_POINTS_TO_REDEEM', '100'))
+LOYALTY_COUPON_POINTS_BLOCK = int(os.getenv('LOYALTY_COUPON_POINTS_BLOCK', '100'))
+LOYALTY_COUPON_CREDIT_AED = Decimal(os.getenv('LOYALTY_COUPON_CREDIT_AED', '100'))
 LOYALTY_COUPON_EXPIRY_DAYS = int(os.getenv('LOYALTY_COUPON_EXPIRY_DAYS', '90'))
 
 # --- Checkout: do not trust client shipping by default (set true only for dev / custom quotes). ---

@@ -12,7 +12,9 @@ from rest_framework.views import APIView
 
 from shop.loyalty import (
     aed_per_point_earned,
+    coupon_credit_aed,
     coupon_expiry_days,
+    coupon_points_block,
     min_points_to_redeem,
     point_value_aed,
 )
@@ -43,14 +45,22 @@ def _loyalty_settings_payload() -> dict:
     point_value = point_value_aed()
     min_redeem = min_points_to_redeem()
     expiry_days = coupon_expiry_days()
+    block = coupon_points_block()
+    block_credit = coupon_credit_aed()
     return {
         "aed_per_point_earned": earn_step,
         "point_value_aed": _quantize_decimal(point_value),
         "min_points_to_redeem": min_redeem,
+        "coupon_points_block": block,
+        "coupon_credit_aed_per_block": _quantize_decimal(block_credit),
         "coupon_expiry_days": expiry_days,
         "earn_rule": f"Earn 1 Super Coin per {earn_step} AED spent (AED orders only).",
         "redeem_rule": f"1 Super Coin = {_quantize_decimal(point_value)} AED discount at checkout.",
         "min_redeem_rule": f"Minimum {min_redeem} Super Coins required to redeem.",
+        "coupon_rule": (
+            f"Exchange Super Coins in blocks of {block} for a coupon worth "
+            f"{_quantize_decimal(block_credit)} AED store credit each."
+        ),
         "coupon_expiry_rule": f"Issued coupons expire after {expiry_days} days.",
     }
 
