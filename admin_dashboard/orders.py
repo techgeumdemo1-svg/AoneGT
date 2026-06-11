@@ -460,10 +460,15 @@ class AdminOrderDetailAPIView(APIView):
 
 
 class AdminOrderStatusUpdateAPIView(APIView):
+    """PATCH /api/admin/orders/status/?id=<order_id>"""
+
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def patch(self, request, pk):
-        order = get_object_or_404(_admin_orders_queryset(), pk=pk)
+    def patch(self, request):
+        order_id, err = _parse_order_id_query_param(request)
+        if err:
+            return err
+        order = get_object_or_404(_admin_orders_queryset(), pk=order_id)
         serializer = AdminOrderStatusUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         new_status = serializer.validated_data["status"]
@@ -585,15 +590,18 @@ class AdminOrderGeideaCollectAPIView(APIView):
     """
     Delivery boy / staff: start Geidea card payment for a card-on-delivery order.
 
-    POST /api/admin/orders/<pk>/geidea-collect/
+    POST /api/admin/orders/geidea-collect/?id=<order_id>
     Order must be out_for_delivery with invoice created. Returns session_id for HPP.
     On Geidea callback: paid → delivered → notification → Zoho invoice paid.
     """
 
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def post(self, request, pk):
-        order = get_object_or_404(_admin_orders_queryset(), pk=pk)
+    def post(self, request):
+        order_id, err = _parse_order_id_query_param(request)
+        if err:
+            return err
+        order = get_object_or_404(_admin_orders_queryset(), pk=order_id)
         ready, reason = order_ready_for_card_on_delivery_collect(order)
         if not ready:
             return Response({"detail": reason}, status=status.HTTP_400_BAD_REQUEST)
