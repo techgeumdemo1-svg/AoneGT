@@ -5,11 +5,6 @@ from .delivery_zones import (
     AdminDeliveryZoneListCreateAPIView,
     AdminDeliveryZoneToggleAPIView,
 )
-from .customer_support import (
-    AdminCustomerSupportChatAPIView,
-    AdminCustomerSupportTicketAPIView,
-    AdminCustomerSupportTicketsByCustomerAPIView,
-)
 from .customers import (
     AdminCustomerDetailAPIView,
     AdminCustomerListAPIView,
@@ -109,21 +104,6 @@ urlpatterns = [
     path('customers/status/', AdminCustomerStatusUpdateAPIView.as_view(), name='admin-customers-status'),
     path('customers/orders/', AdminCustomerOrdersAPIView.as_view(), name='admin-customers-orders'),
     path('customers/super-coins/', AdminCustomerSuperCoinsAPIView.as_view(), name='admin-customers-super-coins'),
-    path(
-        'customers/support-tickets/by-customer/',
-        AdminCustomerSupportTicketsByCustomerAPIView.as_view(),
-        name='admin-customers-support-tickets-by-customer',
-    ),
-    path(
-        'customers/support-tickets/chat/',
-        AdminCustomerSupportChatAPIView.as_view(),
-        name='admin-customers-support-tickets-chat',
-    ),
-    path(
-        'customers/support-tickets/',
-        AdminCustomerSupportTicketAPIView.as_view(),
-        name='admin-customers-support-tickets',
-    ),
     path('returns/', AdminReturnListAPIView.as_view(), name='admin-returns-list'),
     path('returns/logs/', AdminReturnLogsAPIView.as_view(), name='admin-returns-logs'),
     path('returns/approve/', AdminReturnApproveAPIView.as_view(), name='admin-returns-approve'),

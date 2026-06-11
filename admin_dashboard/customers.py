@@ -8,7 +8,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from shop.models import Order, OrderReturn, SupportTicket, UserAddress
+from shop.models import Order, OrderReturn, UserAddress
 
 from .activity_log_utils import record_admin_activity
 from .models import AdminActivityLog
@@ -173,11 +173,6 @@ def build_customer_detail_payload(user) -> dict:
         "delivery_addresses": AdminCustomerAddressSerializer(addresses, many=True).data,
         "orders": AdminOrderListSerializer(orders, many=True).data,
         "return_requests": AdminReturnListSerializer(returns, many=True).data,
-        "support_tickets_summary": {
-            "total_count": support_tickets_qs.count(),
-            "open_count": support_tickets_qs.filter(status__in=open_ticket_statuses).count(),
-            "list_path": f"/api/admin/customers/support-tickets/by-customer/?customer_id={user.pk}",
-        },
         "actions": {
             "update_status": {
                 "method": "PATCH",
