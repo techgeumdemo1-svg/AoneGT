@@ -38,7 +38,10 @@ from shop.services.order_delivery_payment import (
     maybe_auto_mark_delivered_on_payment,
     order_ready_for_cod_collect,
 )
-from shop.services.zoho_books_invoice import staff_create_zoho_books_invoice_for_order
+from shop.services.zoho_books_invoice import (
+    resolve_invoice_detail_for_order,
+    staff_create_zoho_books_invoice_for_order,
+)
 from shop.services.zoho_books_payment import (
     is_pay_on_delivery_payment_method,
     is_prepaid_at_checkout_payment_method,
@@ -83,6 +86,86 @@ def _normalize_admin_status(raw: str) -> Optional[str]:
 
 def _display_status_for_order(order: Order) -> str:
     return OrderSerializer(order).data.get("display_status", "Pending")
+
+
+def _status_history_label(stage_key: str) -> str:
+    key = (stage_key or "").strip().lower()
+    if key == "cancelled":
+        return "Cancelled"
+    return ORDER_CUSTOMER_TRACKING_STAGE_LABELS.get(
+        key,
+        key.replace("_", " ").title(),
+    )
+
+
+def _status_history_actor(log: AdminActivityLog) -> dict:
+    if log.actor_id:
+        user = log.actor
+        parts = [user.first_name or "", user.last_name or ""]
+        name = " ".join(p for p in parts if p).strip() or user.email
+        return {
+            "id": log.actor_id,
+            "email": log.actor_email or user.email,
+            "name": name,
+        }
+    if log.actor_email:
+        return {"id": None, "email": log.actor_email, "name": log.actor_email}
+    return {"id": None, "email": "", "name": "System"}
+
+
+def _build_order_status_history(order: Order) -> list:
+    """Who changed each order tracking status and when."""
+    history: list[dict] = []
+    admin_stage_keys: set[str] = set()
+
+    status_from_action = {
+        "order.status_updated": lambda meta: (meta or {}).get("status"),
+        "order.cod_collected": lambda meta: Order.CustomerTrackingStage.DELIVERED,
+        "order.card_collected": lambda meta: Order.CustomerTrackingStage.DELIVERED,
+    }
+
+    logs = (
+        AdminActivityLog.objects.filter(
+            category=AdminActivityLog.Category.ORDERS,
+            target_type="order",
+            target_id=order.pk,
+            action__in=status_from_action.keys(),
+        )
+        .select_related("actor")
+        .order_by("created_at")
+    )
+    for log in logs:
+        stage_key = status_from_action[log.action](log.metadata)
+        if not stage_key:
+            continue
+        stage_key = str(stage_key).strip().lower()
+        admin_stage_keys.add(stage_key)
+        history.append({
+            "status_key": stage_key,
+            "status_label": _status_history_label(stage_key),
+            "changed_at": log.created_at.isoformat(),
+            "changed_by": _status_history_actor(log),
+            "source": "admin",
+            "action": log.action,
+            "message": log.message,
+        })
+
+    for stage_event in tracking_stage_events(order):
+        stage_key = stage_event["key"]
+        if stage_key in admin_stage_keys:
+            continue
+        history.append({
+            "status_key": stage_key,
+            "status_label": stage_event["label"],
+            "changed_at": stage_event["at"],
+            "changed_by": {"id": None, "email": "", "name": "System"},
+            "source": "system",
+            "action": "tracking_stage_recorded",
+            "message": f"Status set to {stage_event['label']}.",
+        })
+
+    history.sort(key=lambda row: row["changed_at"])
+    return history
 
 
 def _reload_admin_order(pk: int) -> Order:
@@ -608,6 +691,7 @@ class AdminOrderCollectCodAPIView(APIView):
             message=f"Collected COD cash for order #{order.pk}.",
             target_type="order",
             target_id=order.pk,
+            metadata={"status": Order.CustomerTrackingStage.DELIVERED},
         )
         return Response(
             {
@@ -642,6 +726,7 @@ class AdminOrderTimelineAPIView(APIView):
                 "display_status": _display_status_for_order(order),
                 "tracking": tracking,
                 "timeline": _build_order_timeline(order),
+                "status_history": _build_order_status_history(order),
             },
             status=status.HTTP_200_OK,
         )
@@ -745,6 +830,7 @@ class AdminOrderCollectCardAPIView(APIView):
                 message=f"Collected card payment for order #{order.pk}.",
                 target_type="order",
                 target_id=order.pk,
+                metadata={"status": Order.CustomerTrackingStage.DELIVERED},
             )
 
         return Response(
@@ -840,6 +926,12 @@ class AdminOrderCreateInvoiceAPIView(APIView):
             "invoice_number": order.zoho_books_invoice_number or "",
             "order": build_admin_order_detail_payload(order),
         }
+        if (order.zoho_books_invoice_id or "").strip():
+            invoice_detail, invoice_fetch_error = resolve_invoice_detail_for_order(order)
+            if invoice_detail is not None:
+                payload["invoice"] = invoice_detail
+            if invoice_fetch_error:
+                payload["invoice_fetch_error"] = invoice_fetch_error
         if ok and is_pay_on_delivery_payment_method(order.payment_method):
             if is_card_on_delivery_order(order):
                 payload["next_step"] = (

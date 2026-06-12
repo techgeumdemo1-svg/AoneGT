@@ -23,6 +23,7 @@ from .models import (
     Cart,
     CartItem,
     FCMDeviceToken,
+    LoyaltyIssuedCoupon,
     Order,
     OrderItem,
     OrderReturn,
@@ -900,6 +901,44 @@ class LoyaltyIssueCouponSerializer(serializers.Serializer):
         if err:
             raise serializers.ValidationError({'points': err})
         return attrs
+
+
+class LoyaltyIssuedCouponSerializer(serializers.ModelSerializer):
+    coupon_id = serializers.IntegerField(source='id', read_only=True)
+    status = serializers.SerializerMethodField()
+    days_until_expiry = serializers.SerializerMethodField()
+
+    class Meta:
+        model = LoyaltyIssuedCoupon
+        fields = (
+            'coupon_id',
+            'code',
+            'amount_aed',
+            'points_spent',
+            'status',
+            'created_at',
+            'expires_at',
+            'days_until_expiry',
+        )
+        read_only_fields = fields
+
+    def get_status(self, obj) -> str:
+        from django.utils import timezone
+
+        if obj.used_at:
+            return 'used'
+        if obj.expires_at and obj.expires_at <= timezone.now():
+            return 'expired'
+        return 'active'
+
+    def get_days_until_expiry(self, obj):
+        from django.utils import timezone
+
+        if not obj.expires_at or obj.used_at:
+            return None
+        delta = obj.expires_at - timezone.now()
+        days = delta.days
+        return max(days, 0)
 
 
 class CheckoutSerializer(serializers.Serializer):
