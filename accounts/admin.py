@@ -6,11 +6,12 @@ from .models import User, PasswordResetOTP, RegistrationOTP
 @admin.register(User)
 class UserAdmin(BaseUserAdmin):
     ordering = ('id',)
-    list_display = ('id', 'email', 'phone', 'first_name', 'last_name', 'is_staff', 'is_active')
+    list_display = ('id', 'email', 'phone', 'first_name', 'last_name', 'points_balance', 'is_staff', 'is_active')
     search_fields = ('email', 'phone', 'first_name', 'last_name')
     fieldsets = (
         (None, {'fields': ('email', 'password')}),
         ('Personal info', {'fields': ('first_name', 'last_name', 'phone')}),
+        ('Loyalty & Wallet', {'fields': ('points_balance', 'credit_balance_aed')}),
         ('Zoho Books', {'fields': ('zoho_books_contact_id',)}),
         ('Permissions', {'fields': ('is_active', 'is_staff', 'is_superuser', 'groups', 'user_permissions')}),
         ('Important dates', {'fields': ('last_login',)}),
