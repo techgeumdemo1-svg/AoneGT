@@ -84,7 +84,14 @@ def return_flow_ui_payload():
             'method': 'GET',
             'path_template': '/api/shop/orders/detail/?id={order_id}&store_id={store_id}',
             'lines_field': 'return_eligible_lines',
-            'price_fields': ('unit_price', 'unit_price_display', 'currency', 'line_total_display'),
+            'price_fields': (
+                'unit_price',
+                'unit_price_display',
+                'currency',
+                'line_total_display',
+                'returnable_amount',
+                'returnable_amount_display',
+            ),
         },
     }
 
@@ -727,6 +734,12 @@ class OrderSerializer(serializers.ModelSerializer):
                 continue
             unit = Decimal(str(oi.unit_price)).quantize(Decimal('0.01'))
             lt = Decimal(str(oi.line_total)).quantize(Decimal('0.01'))
+            if oi.quantity > 0:
+                returnable = (lt / Decimal(oi.quantity) * Decimal(remaining)).quantize(
+                    Decimal('0.01'),
+                )
+            else:
+                returnable = (unit * Decimal(remaining)).quantize(Decimal('0.01'))
             result.append({
                 'order_item_id': oi.pk,
                 'product_id': oi.product_id,
@@ -739,6 +752,8 @@ class OrderSerializer(serializers.ModelSerializer):
                 'quantity_returnable': remaining,
                 'line_total': str(lt),
                 'line_total_display': f'{currency} {lt}',
+                'returnable_amount': str(returnable),
+                'returnable_amount_display': f'{currency} {returnable}',
             })
         return result
 
