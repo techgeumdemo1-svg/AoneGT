@@ -35,10 +35,15 @@ from .serializers import (
     ProductDetailSerializer,
     ProductReviewCreateSerializer,
     ProductReviewReadSerializer,
+    UserReviewedProductSerializer,
     StoreAdminSerializer,
     ProductAdminSerializer,
     BannerSerializer,
     BannerAdminSerializer,
+)
+from .services.product_reviews import (
+    user_can_review_product,
+    user_review_for_product,
 )
 
 
@@ -297,6 +302,25 @@ def _resolve_store_product_by_zoho_query(request):
     return store, product
 
 
+def _product_review_user_status(request, product) -> dict:
+    """Flags for the authenticated user on a product's review page."""
+    if not request.user.is_authenticated:
+        return {
+            'user_has_reviewed': False,
+            'can_review': False,
+            'user_review': None,
+        }
+    user_review = user_review_for_product(request.user, product)
+    has_reviewed = user_review is not None
+    return {
+        'user_has_reviewed': has_reviewed,
+        'can_review': user_can_review_product(request.user, product),
+        'user_review': (
+            ProductReviewReadSerializer(user_review).data if user_review is not None else None
+        ),
+    }
+
+
 class StoreProductReviewListCreateAPIView(generics.ListCreateAPIView):
     """
     GET — list reviews for a product (public).
@@ -338,6 +362,83 @@ class StoreProductReviewListCreateAPIView(generics.ListCreateAPIView):
 
     def perform_create(self, serializer):
         serializer.save()
+
+    def list(self, request, *args, **kwargs):
+        from django.db.models import Avg
+
+        store, product = self._review_store_product()
+        queryset = self.filter_queryset(self.get_queryset())
+        serializer = self.get_serializer(queryset, many=True)
+        reviews = ProductReview.objects.filter(product=product)
+        review_count = reviews.count()
+        row = reviews.aggregate(a=Avg('rating'))
+        avg = row.get('a')
+        average_rating = round(float(avg), 2) if avg is not None else None
+        return Response(
+            {
+                'store_id': store.pk,
+                'zoho_product_id': product.zoho_product_id,
+                'product_id': product.pk,
+                'review_count': review_count,
+                'average_rating': average_rating,
+                **_product_review_user_status(request, product),
+                'reviews': serializer.data,
+            },
+        )
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        review = serializer.instance
+        return Response(
+            {
+                'message': 'Review submitted.',
+                'user_has_reviewed': True,
+                'can_review': False,
+                'review': ProductReviewReadSerializer(review).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class UserReviewedProductListAPIView(generics.ListAPIView):
+    """
+    GET — products the authenticated user has already reviewed.
+
+    Optional query: ``store_id`` to filter by store.
+    Example: ``/api/catalog/stores/products/reviews/mine/?store_id=4``
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = UserReviewedProductSerializer
+
+    def get_queryset(self):
+        qs = (
+            ProductReview.objects.filter(user=self.request.user)
+            .select_related('product', 'product__store')
+            .order_by('-created_at')
+        )
+        raw = self.request.query_params.get('store_id')
+        if raw is not None and str(raw).strip() != '':
+            try:
+                store_id = int(raw)
+            except (TypeError, ValueError):
+                raise ValidationError({'store_id': 'store_id must be an integer.'})
+            qs = qs.filter(product__store_id=store_id)
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        serializer = self.get_serializer(queryset, many=True)
+        payload = {
+            'count': queryset.count(),
+            'results': serializer.data,
+        }
+        raw = request.query_params.get('store_id')
+        if raw is not None and str(raw).strip() != '':
+            payload['store_id'] = int(raw)
+        return Response(payload)
 
 
 class StoreProductRatingAPIView(APIView):
