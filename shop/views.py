@@ -2247,7 +2247,7 @@ class OrderZohoBooksInvoiceAPIView(APIView):
                 else 'Cash on delivery'
             )
             after_step = (
-                'Use POST /api/admin/orders/{id}/collect-card/ after Geidea payment.'
+                'Use POST /api/admin/orders/collect-card/?id=<order_id> after Geidea payment.'
                 if order.payment_method == Order.PaymentMethod.CARD_ON_DELIVERY
                 else 'Use POST /api/admin/orders/{id}/collect-cod/ after delivery.'
             )
@@ -2312,7 +2312,7 @@ class OrderZohoBooksPaymentAPIView(APIView):
                 {
                     'status': 'error',
                     'message': (
-                        'Card on delivery: use POST /api/admin/orders/{id}/collect-card/ '
+                        'Card on delivery: use POST /api/admin/orders/collect-card/?id=<order_id> '
                         'after Geidea POS payment.'
                     ),
                 },
