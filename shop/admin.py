@@ -64,13 +64,14 @@ class OrderAdmin(admin.ModelAdmin):
         'user',
         'store',
         'status',
+        'payment_status',
         'customer_tracking_stage',
         'total',
         'currency',
         'zoho_synced_at',
         'created_at',
     )
-    list_filter = ('status', 'customer_tracking_stage', 'store')
+    list_filter = ('status', 'payment_status', 'customer_tracking_stage', 'store')
     search_fields = ('user__email', 'shipping_name', 'zoho_salesorder_id')
     inlines = [OrderItemInline]
     readonly_fields = (
@@ -88,6 +89,7 @@ class OrderAdmin(admin.ModelAdmin):
                     'user',
                     'store',
                     'status',
+                    'payment_status',
                     'customer_tracking_stage',
                     'out_for_delivery_email_sent_at',
                     'payment_method',
