@@ -449,6 +449,18 @@ def books_get_invoice(invoice_id: str, *, store=None) -> dict[str, Any]:
     return invoice
 
 
+def books_get_organization(*, store=None) -> dict[str, Any]:
+    """Fetch Zoho Books organization profile (seller name, TRN, contact)."""
+    org_id = zoho_books_organization_id(store=store)
+    if not org_id:
+        raise ZohoBooksError('organization_id is required to fetch organization.')
+    payload = _books_request('GET', f'organizations/{org_id}', store=store)
+    organization = payload.get('organization')
+    if not isinstance(organization, dict):
+        raise ZohoBooksError('Zoho Books did not return organization payload.')
+    return organization
+
+
 def books_create_credit_note(
     credit_note_body: dict[str, Any],
     *,

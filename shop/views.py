@@ -78,6 +78,7 @@ from .serializers import (
     CartItemDeltaSerializer,
     CheckoutSerializer,
     LoyaltyIssueCouponSerializer,
+    LoyaltyIssuedCouponSerializer,
     OrderSerializer,
     OrderEditSerializer,
     FCMDeviceTokenSerializer,
@@ -1608,9 +1609,9 @@ class CheckoutAPIView(APIView):
                     pass
 
             if coupon_row:
-                coupon_row.used_at = timezone.now()
-                coupon_row.order = order
-                coupon_row.save(update_fields=['used_at', 'order'])
+                from shop.services.loyalty_coupons import remove_loyalty_coupon_after_use
+
+                remove_loyalty_coupon_after_use(coupon_row)
 
             points_awarded = points_earned_for_purchase(final_total, currency)
             if points_awarded > 0:
@@ -1806,6 +1807,13 @@ class RewardPointsAPIView(APIView):
         credit_balance = Decimal(str(getattr(request.user, 'credit_balance_aed', 0) or 0)).quantize(
             Decimal('0.01'),
         )
+        from shop.services.loyalty_coupons import build_loyalty_redeem_history
+
+        redeem_history = build_loyalty_redeem_history(
+            request.user,
+            store=store,
+            limit=20,
+        )
         return Response(
             {
                 # Redeemable balance for checkout / issue-coupon — one wallet for the whole account.
@@ -1820,6 +1828,7 @@ class RewardPointsAPIView(APIView):
                 # Sum of all earn entries in PurchasePointsLedger (all stores); wallet is lower if points were redeemed.
                 'ledger_points_awarded_total_all_stores': ledger_awarded_all_stores,
                 'history': PurchasePointsLedgerSerializer(entries, many=True).data,
+                'redeem_history': redeem_history,
                 'loyalty': {
                     'aed_spend_per_point_earned': aed_per_point_earned(),
                     'point_value_aed': str(point_value_aed()),
@@ -1829,10 +1838,42 @@ class RewardPointsAPIView(APIView):
                     'can_issue_coupon': wallet >= coupon_points_block(),
                     'max_coupon_blocks_available': wallet // coupon_points_block(),
                     'issue_coupon_path': '/api/shop/rewards/issue-coupon/',
+                    'list_coupons_path': '/api/shop/rewards/coupons/',
                     'earn_currency': 'AED',
                     'points_balance_is_account_wide': True,
                     'store_fields_are_for_requested_store_only': True,
                 },
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class LoyaltyIssuedCouponListAPIView(APIView):
+    """
+    List active loyalty reward coupons for the authenticated user.
+
+    GET /api/shop/rewards/coupons/
+
+    Expired unused coupons are removed automatically (default TTL: 90 days).
+    Used coupons are removed when applied at checkout.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from shop.loyalty import coupon_expiry_days
+        from shop.services.loyalty_coupons import (
+            active_loyalty_coupons_queryset,
+            purge_stale_loyalty_coupons,
+        )
+
+        purge_stale_loyalty_coupons(user=request.user)
+        coupons = active_loyalty_coupons_queryset(user=request.user)
+        return Response(
+            {
+                'count': coupons.count(),
+                'coupon_expiry_days': coupon_expiry_days(),
+                'results': LoyaltyIssuedCouponSerializer(coupons, many=True).data,
             },
             status=status.HTTP_200_OK,
         )
@@ -2247,7 +2288,7 @@ class OrderZohoBooksInvoiceAPIView(APIView):
                 else 'Cash on delivery'
             )
             after_step = (
-                'Use POST /api/admin/orders/{id}/collect-card/ after Geidea payment.'
+                'Use POST /api/admin/orders/collect-card/?id=<order_id> after Geidea payment.'
                 if order.payment_method == Order.PaymentMethod.CARD_ON_DELIVERY
                 else 'Use POST /api/admin/orders/{id}/collect-cod/ after delivery.'
             )
@@ -2312,7 +2353,7 @@ class OrderZohoBooksPaymentAPIView(APIView):
                 {
                     'status': 'error',
                     'message': (
-                        'Card on delivery: use POST /api/admin/orders/{id}/collect-card/ '
+                        'Card on delivery: use POST /api/admin/orders/collect-card/?id=<order_id> '
                         'after Geidea POS payment.'
                     ),
                 },

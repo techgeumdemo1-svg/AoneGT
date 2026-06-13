@@ -23,6 +23,7 @@ from .models import (
     Cart,
     CartItem,
     FCMDeviceToken,
+    LoyaltyIssuedCoupon,
     Order,
     OrderItem,
     OrderReturn,
@@ -84,7 +85,14 @@ def return_flow_ui_payload():
             'method': 'GET',
             'path_template': '/api/shop/orders/detail/?id={order_id}&store_id={store_id}',
             'lines_field': 'return_eligible_lines',
-            'price_fields': ('unit_price', 'unit_price_display', 'currency', 'line_total_display'),
+            'price_fields': (
+                'unit_price',
+                'unit_price_display',
+                'currency',
+                'line_total_display',
+                'returnable_amount',
+                'returnable_amount_display',
+            ),
         },
     }
 
@@ -727,6 +735,12 @@ class OrderSerializer(serializers.ModelSerializer):
                 continue
             unit = Decimal(str(oi.unit_price)).quantize(Decimal('0.01'))
             lt = Decimal(str(oi.line_total)).quantize(Decimal('0.01'))
+            if oi.quantity > 0:
+                returnable = (lt / Decimal(oi.quantity) * Decimal(remaining)).quantize(
+                    Decimal('0.01'),
+                )
+            else:
+                returnable = (unit * Decimal(remaining)).quantize(Decimal('0.01'))
             result.append({
                 'order_item_id': oi.pk,
                 'product_id': oi.product_id,
@@ -739,6 +753,8 @@ class OrderSerializer(serializers.ModelSerializer):
                 'quantity_returnable': remaining,
                 'line_total': str(lt),
                 'line_total_display': f'{currency} {lt}',
+                'returnable_amount': str(returnable),
+                'returnable_amount_display': f'{currency} {returnable}',
             })
         return result
 
@@ -885,6 +901,44 @@ class LoyaltyIssueCouponSerializer(serializers.Serializer):
         if err:
             raise serializers.ValidationError({'points': err})
         return attrs
+
+
+class LoyaltyIssuedCouponSerializer(serializers.ModelSerializer):
+    coupon_id = serializers.IntegerField(source='id', read_only=True)
+    status = serializers.SerializerMethodField()
+    days_until_expiry = serializers.SerializerMethodField()
+
+    class Meta:
+        model = LoyaltyIssuedCoupon
+        fields = (
+            'coupon_id',
+            'code',
+            'amount_aed',
+            'points_spent',
+            'status',
+            'created_at',
+            'expires_at',
+            'days_until_expiry',
+        )
+        read_only_fields = fields
+
+    def get_status(self, obj) -> str:
+        from django.utils import timezone
+
+        if obj.used_at:
+            return 'used'
+        if obj.expires_at and obj.expires_at <= timezone.now():
+            return 'expired'
+        return 'active'
+
+    def get_days_until_expiry(self, obj):
+        from django.utils import timezone
+
+        if not obj.expires_at or obj.used_at:
+            return None
+        delta = obj.expires_at - timezone.now()
+        days = delta.days
+        return max(days, 0)
 
 
 class CheckoutSerializer(serializers.Serializer):

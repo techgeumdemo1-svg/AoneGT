@@ -5,7 +5,7 @@ from rest_framework import serializers
 from zoho_integration.models import ZohoCommerceAccount
 from zoho_integration.services import ZohoCommerceService as ZohoAccountService
 from .models import Store, Product, Banner, ProductReview
-from .services.product_reviews import user_has_delivered_purchase
+from .services.product_reviews import user_can_review_product, user_has_delivered_purchase
 from .text_utils import html_to_plain_text
 
 
@@ -143,6 +143,35 @@ class ProductReviewReadSerializer(serializers.ModelSerializer):
         return 'Customer'
 
 
+class UserReviewedProductSerializer(serializers.ModelSerializer):
+    """A product the authenticated user has already reviewed."""
+
+    product_id = serializers.IntegerField(source='product.pk', read_only=True)
+    zoho_product_id = serializers.CharField(source='product.zoho_product_id', read_only=True)
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    product_image_url = serializers.CharField(source='product.image_url', read_only=True)
+    store_id = serializers.IntegerField(source='product.store_id', read_only=True)
+    store_name = serializers.CharField(source='product.store.name', read_only=True)
+    reviewed_at = serializers.DateTimeField(source='created_at', read_only=True)
+
+    class Meta:
+        model = ProductReview
+        fields = (
+            'id',
+            'rating',
+            'title',
+            'body',
+            'reviewed_at',
+            'product_id',
+            'zoho_product_id',
+            'product_name',
+            'product_image_url',
+            'store_id',
+            'store_name',
+        )
+        read_only_fields = fields
+
+
 class ProductReviewCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductReview
@@ -160,27 +189,35 @@ class ProductReviewCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({'detail': 'Authentication required.'})
         if product is None:
             raise serializers.ValidationError({'detail': 'Product not found.'})
-        if ProductReview.objects.filter(user=request.user, product=product).exists():
-            raise serializers.ValidationError(
-                {'detail': 'You have already submitted a review for this product.'},
-            )
-        if not user_has_delivered_purchase(request.user, product):
-            raise serializers.ValidationError(
-                {
-                    'detail': (
-                        'You can only review this product after it appears on a delivered order '
-                        '(order status synced).'
-                    ),
-                },
-            )
+        if not user_can_review_product(request.user, product):
+            if ProductReview.objects.filter(user=request.user, product=product).exists():
+                raise serializers.ValidationError(
+                    {'detail': 'You have already submitted a review for this product.'},
+                )
+            if not user_has_delivered_purchase(request.user, product):
+                raise serializers.ValidationError(
+                    {
+                        'detail': (
+                            'You can only review this product after it appears on a delivered order '
+                            '(order status synced).'
+                        ),
+                    },
+                )
         return attrs
 
     def create(self, validated_data):
-        return ProductReview.objects.create(
-            user=self.context['request'].user,
-            product=self.context['product'],
-            **validated_data,
-        )
+        from django.db import IntegrityError
+
+        try:
+            return ProductReview.objects.create(
+                user=self.context['request'].user,
+                product=self.context['product'],
+                **validated_data,
+            )
+        except IntegrityError:
+            raise serializers.ValidationError(
+                {'detail': 'You have already submitted a review for this product.'},
+            )
 
 
 class StoreAdminSerializer(serializers.ModelSerializer):

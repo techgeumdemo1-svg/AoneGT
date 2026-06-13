@@ -14,6 +14,7 @@ from shop.services.order_delivery_payment import maybe_auto_mark_delivered_on_pa
 from shop.services.zoho_books import (
     ZohoBooksError,
     books_get_invoice,
+    books_list_invoices_for_sales_order,
     invoice_belongs_to_sales_order,
 )
 from shop.services.zoho_books_invoice import ensure_zoho_books_invoice_for_order
@@ -66,12 +67,17 @@ def find_geidea_paid_entry_for_order(
     if not merchant_ref:
         return None, (
             'No Geidea merchant reference on this order. '
-            'Call POST /api/admin/orders/{id}/geidea-collect/ before collecting payment.'
+            'Call POST /api/admin/orders/geidea-collect/?id=<order_id> before collecting payment.'
         )
 
     orders_list = fetch_geidea_orders_by_merchant_ref(merchant_ref)
     if not orders_list:
-        return None, 'No Geidea payment found for this order.'
+        return None, (
+            'No Geidea payment found for this order. '
+            'Complete card payment on the Geidea device using the session from '
+            'POST /api/admin/orders/geidea-collect/?id=<order_id>, then call '
+            'collect-card again (or geidea-reconcile if the callback was missed).'
+        )
 
     gateway_reference = (gateway_reference or '').strip()
     if gateway_reference:
@@ -122,10 +128,79 @@ def order_ready_for_card_on_delivery_collect(order: Order) -> tuple[bool, str]:
     return True, ''
 
 
+def _normalize_invoice_number(value: str) -> str:
+    return (value or '').strip().upper()
+
+
+def _invoice_number_variants(value: str) -> set[str]:
+    """Accept common human-entry variants (e.g. NV- vs INV-)."""
+    norm = _normalize_invoice_number(value)
+    variants = {norm}
+    if norm.startswith('NV-'):
+        variants.add(f'INV-{norm[3:]}')
+    if norm.startswith('INV-'):
+        variants.add(f'NV-{norm[4:]}')
+    return variants
+
+
+def resolve_zoho_books_invoice_id(order: Order, raw_ref: str) -> tuple[str, str]:
+    """
+    Resolve Zoho Books invoice_id from numeric id, invoice number (INV-000030), or order link.
+    """
+    raw = (raw_ref or '').strip()
+    linked_id = (order.zoho_books_invoice_id or '').strip()
+    linked_number = (order.zoho_books_invoice_number or '').strip()
+
+    if not raw:
+        if linked_id:
+            return linked_id, ''
+        return '', 'invoice_id is required.'
+
+    if linked_id and raw == linked_id:
+        return linked_id, ''
+
+    if linked_number and _normalize_invoice_number(raw) in _invoice_number_variants(linked_number):
+        return linked_id, ''
+
+    salesorder_id = (order.zoho_books_salesorder_id or '').strip()
+    if not salesorder_id:
+        return '', 'Order has no Zoho Books sales order.'
+
+    if raw.isdigit():
+        try:
+            invoice = books_get_invoice(raw, store=order.store)
+            if invoice_belongs_to_sales_order(invoice, salesorder_id):
+                return str(invoice.get('invoice_id') or raw).strip(), ''
+        except ZohoBooksError:
+            pass
+
+    try:
+        for invoice in books_list_invoices_for_sales_order(salesorder_id, store=order.store):
+            number = _normalize_invoice_number(str(invoice.get('invoice_number') or ''))
+            invoice_id = str(invoice.get('invoice_id') or '').strip()
+            if invoice_id == raw or number in _invoice_number_variants(raw):
+                return invoice_id, ''
+    except ZohoBooksError as exc:
+        return '', str(exc)
+
+    try:
+        invoice = books_get_invoice(raw, store=order.store)
+    except ZohoBooksError as exc:
+        hint = ''
+        if linked_id:
+            number_hint = f' or {linked_number}' if linked_number else ''
+            hint = f' Use invoice_id {linked_id}{number_hint} from the order.'
+        return '', f'{exc}{hint}'
+
+    if not invoice_belongs_to_sales_order(invoice, salesorder_id):
+        return '', 'invoice_id does not belong to this order sales order.'
+    return str(invoice.get('invoice_id') or raw).strip(), ''
+
+
 def _validate_and_link_invoice(order: Order, invoice_id: str) -> tuple[bool, str]:
-    invoice_id = (invoice_id or '').strip()
-    if not invoice_id:
-        return False, 'invoice_id is required.'
+    invoice_id, err = resolve_zoho_books_invoice_id(order, invoice_id)
+    if err:
+        return False, err
 
     salesorder_id = (order.zoho_books_salesorder_id or '').strip()
     if not salesorder_id:

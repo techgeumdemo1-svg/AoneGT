@@ -25,7 +25,11 @@ from shop.services.order_tracking import (
 )
 from shop.services.order_email import handle_customer_tracking_stage_change
 from shop.services.order_status_notifications import notify_order_tracking_status_change
-from shop.services.card_on_delivery_payment import order_ready_for_card_on_delivery_collect
+from shop.services.card_on_delivery_payment import (
+    is_card_on_delivery_order,
+    order_ready_for_card_on_delivery_collect,
+    submit_card_on_delivery_collection,
+)
 from shop.services.geidea import GeideaSessionError, create_geidea_session
 from shop.services.geidea_reconcile import reconcile_missed_geidea_callback
 from shop.services.order_delivery_payment import (
@@ -34,7 +38,12 @@ from shop.services.order_delivery_payment import (
     maybe_auto_mark_delivered_on_payment,
     order_ready_for_cod_collect,
 )
+from shop.services.zoho_books_invoice import (
+    resolve_invoice_detail_for_order,
+    staff_create_zoho_books_invoice_for_order,
+)
 from shop.services.zoho_books_payment import (
+    is_pay_on_delivery_payment_method,
     is_prepaid_at_checkout_payment_method,
     staff_record_zoho_books_payment_for_order,
 )
@@ -79,20 +88,138 @@ def _display_status_for_order(order: Order) -> str:
     return OrderSerializer(order).data.get("display_status", "Pending")
 
 
+def _status_history_label(stage_key: str) -> str:
+    key = (stage_key or "").strip().lower()
+    if key == "cancelled":
+        return "Cancelled"
+    return ORDER_CUSTOMER_TRACKING_STAGE_LABELS.get(
+        key,
+        key.replace("_", " ").title(),
+    )
+
+
+def _status_history_actor(log: AdminActivityLog) -> dict:
+    if log.actor_id:
+        user = log.actor
+        parts = [user.first_name or "", user.last_name or ""]
+        name = " ".join(p for p in parts if p).strip() or user.email
+        return {
+            "id": log.actor_id,
+            "email": log.actor_email or user.email,
+            "name": name,
+        }
+    if log.actor_email:
+        return {"id": None, "email": log.actor_email, "name": log.actor_email}
+    return {"id": None, "email": "", "name": "System"}
+
+
+def _build_order_status_history(order: Order) -> list:
+    """Who changed each order tracking status and when."""
+    history: list[dict] = []
+    admin_stage_keys: set[str] = set()
+
+    status_from_action = {
+        "order.status_updated": lambda meta: (meta or {}).get("status"),
+        "order.cod_collected": lambda meta: Order.CustomerTrackingStage.DELIVERED,
+        "order.card_collected": lambda meta: Order.CustomerTrackingStage.DELIVERED,
+    }
+
+    logs = (
+        AdminActivityLog.objects.filter(
+            category=AdminActivityLog.Category.ORDERS,
+            target_type="order",
+            target_id=order.pk,
+            action__in=status_from_action.keys(),
+        )
+        .select_related("actor")
+        .order_by("created_at")
+    )
+    for log in logs:
+        stage_key = status_from_action[log.action](log.metadata)
+        if not stage_key:
+            continue
+        stage_key = str(stage_key).strip().lower()
+        admin_stage_keys.add(stage_key)
+        history.append({
+            "status_key": stage_key,
+            "status_label": _status_history_label(stage_key),
+            "changed_at": log.created_at.isoformat(),
+            "changed_by": _status_history_actor(log),
+            "source": "admin",
+            "action": log.action,
+            "message": log.message,
+        })
+
+    for stage_event in tracking_stage_events(order):
+        stage_key = stage_event["key"]
+        if stage_key in admin_stage_keys:
+            continue
+        history.append({
+            "status_key": stage_key,
+            "status_label": stage_event["label"],
+            "changed_at": stage_event["at"],
+            "changed_by": {"id": None, "email": "", "name": "System"},
+            "source": "system",
+            "action": "tracking_stage_recorded",
+            "message": f"Status set to {stage_event['label']}.",
+        })
+
+    history.sort(key=lambda row: row["changed_at"])
+    return history
+
+
 def _reload_admin_order(pk: int) -> Order:
     return get_object_or_404(_admin_orders_queryset(), pk=pk)
 
 
 def _admin_order_payload(order: Order) -> dict:
-    data = OrderSerializer(order).data
-    data["customer"] = {
-        "id": order.user_id,
-        "email": order.user.email,
-        "first_name": order.user.first_name,
-        "last_name": order.user.last_name,
-        "phone": order.user.phone,
+    return build_admin_order_detail_payload(order)
+
+
+def build_admin_order_detail_payload(order: Order) -> dict:
+    """Admin order detail: list fields + delivery address, items, tracking."""
+    data = AdminOrderListSerializer(order).data
+    currency = ((order.currency or '') or 'AED').strip() or 'AED'
+    data['delivery_address'] = {
+        'name': order.shipping_name or '',
+        'phone': order.shipping_phone or '',
+        'address': order.shipping_address or '',
+        'city': order.shipping_city or '',
+        'state': order.shipping_state or '',
+        'postal_code': order.shipping_postal_code or '',
+        'country': order.shipping_country or '',
     }
-    data["store_name"] = order.store.name
+    items = []
+    for it in order.items.all():
+        unit = Decimal(str(it.unit_price or 0)).quantize(Decimal('0.01'))
+        line = Decimal(str(it.line_total or 0)).quantize(Decimal('0.01'))
+        items.append({
+            'item_id': it.pk,
+            'product_id': it.product_id,
+            'product_name': it.product_name,
+            'sku': it.sku or '',
+            'quantity': int(it.quantity or 0),
+            'unit_price': str(unit),
+            'unit_price_display': f'{currency} {unit}',
+            'line_total': str(line),
+            'line_total_display': f'{currency} {line}',
+        })
+    data['items'] = items
+    tracking = OrderSerializer(order).data.get('tracking') or {}
+    data['tracking_status'] = {
+        'order_status': order.status,
+        'customer_tracking_stage': order.customer_tracking_stage or '',
+        'display_status': data.get('display_status') or _display_status_for_order(order),
+        'tracking': tracking,
+    }
+    data['customer'] = {
+        'id': order.user_id,
+        'email': order.user.email,
+        'first_name': order.user.first_name,
+        'last_name': order.user.last_name,
+        'phone': order.user.phone,
+    }
+    data['store_name'] = order.store.name
     return data
 
 
@@ -147,6 +274,17 @@ class AdminOrderListSerializer(serializers.ModelSerializer):
 
     def get_items_count(self, obj):
         return int(sum((int(it.quantity or 0) for it in obj.items.all()), 0))
+
+
+class AdminOrderCollectCardSerializer(serializers.Serializer):
+    invoice_id = serializers.CharField(required=False, allow_blank=True)
+    gateway_reference = serializers.CharField(required=False, allow_blank=True)
+    amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        required=False,
+    )
+    transaction_status = serializers.CharField(required=False, allow_blank=True, default='paid')
 
 
 class AdminOrderStatusUpdateSerializer(serializers.Serializer):
@@ -417,9 +555,21 @@ def _build_order_timeline(order: Order) -> list:
 
 
 class AdminOrderListAPIView(APIView):
+    """
+    GET /api/admin/orders/          — paginated list
+    GET /api/admin/orders/?id=<id> — order detail with delivery, items, tracking
+    """
+
     permission_classes = [IsAuthenticated, IsStaffUser]
 
     def get(self, request):
+        if (request.query_params.get('id') or '').strip():
+            order_id, err = _parse_order_id_query_param(request)
+            if err:
+                return err
+            order = get_object_or_404(_admin_orders_queryset(), pk=order_id)
+            return Response(build_admin_order_detail_payload(order), status=status.HTTP_200_OK)
+
         qs, date_err, date_filter = _apply_order_list_filters(
             _admin_orders_queryset().order_by("-created_at"),
             request,
@@ -438,7 +588,7 @@ class AdminOrderListAPIView(APIView):
 
 
 class AdminOrderDetailAPIView(APIView):
-    """GET /api/admin/orders/detail/?id=<order_id>"""
+    """GET /api/admin/orders/detail/?id=<order_id> — same payload as /orders/?id="""
 
     permission_classes = [IsAuthenticated, IsStaffUser]
 
@@ -447,16 +597,7 @@ class AdminOrderDetailAPIView(APIView):
         if err:
             return err
         order = get_object_or_404(_admin_orders_queryset(), pk=order_id)
-        data = OrderSerializer(order).data
-        data["customer"] = {
-            "id": order.user_id,
-            "email": order.user.email,
-            "first_name": order.user.first_name,
-            "last_name": order.user.last_name,
-            "phone": order.user.phone,
-        }
-        data["store_name"] = order.store.name
-        return Response(data, status=status.HTTP_200_OK)
+        return Response(build_admin_order_detail_payload(order), status=status.HTTP_200_OK)
 
 
 class AdminOrderStatusUpdateAPIView(APIView):
@@ -478,7 +619,7 @@ class AdminOrderStatusUpdateAPIView(APIView):
                     {
                         "detail": (
                             "Cash on delivery orders cannot be marked delivered here. "
-                            "Use POST /api/admin/orders/{id}/collect-cod/ after collecting cash."
+                            "Use POST /api/admin/orders/collect-cod/?id=<order_id> after collecting cash."
                         ),
                     },
                     status=status.HTTP_400_BAD_REQUEST,
@@ -526,19 +667,22 @@ class AdminOrderCollectCodAPIView(APIView):
     COD only: delivery boy collects cash → delivered + paid + Zoho invoice payment.
 
     Invoice must already exist in Zoho Books (staff creates it in Zoho UI).
-    POST /api/admin/orders/<pk>/collect-cod/
+    POST /api/admin/orders/collect-cod/?id=<order_id>
     """
 
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def post(self, request, pk):
-        order = get_object_or_404(_admin_orders_queryset(), pk=pk)
+    def post(self, request):
+        order_id, err = _parse_order_id_query_param(request)
+        if err:
+            return err
+        order = get_object_or_404(_admin_orders_queryset(), pk=order_id)
         ready, reason = order_ready_for_cod_collect(order)
         if not ready:
             return Response({"detail": reason}, status=status.HTTP_400_BAD_REQUEST)
 
-        ok, steps = finalize_cod_delivery_and_payment(pk)
-        order = _reload_admin_order(pk)
+        ok, steps = finalize_cod_delivery_and_payment(order_id)
+        order = _reload_admin_order(order_id)
 
         record_admin_activity(
             request,
@@ -547,6 +691,7 @@ class AdminOrderCollectCodAPIView(APIView):
             message=f"Collected COD cash for order #{order.pk}.",
             target_type="order",
             target_id=order.pk,
+            metadata={"status": Order.CustomerTrackingStage.DELIVERED},
         )
         return Response(
             {
@@ -581,6 +726,7 @@ class AdminOrderTimelineAPIView(APIView):
                 "display_status": _display_status_for_order(order),
                 "tracking": tracking,
                 "timeline": _build_order_timeline(order),
+                "status_history": _build_order_status_history(order),
             },
             status=status.HTTP_200_OK,
         )
@@ -621,24 +767,108 @@ class AdminOrderGeideaCollectAPIView(APIView):
         )
 
 
-class AdminOrderGeideaReconcileAPIView(APIView):
+class AdminOrderCollectCardAPIView(APIView):
     """
-    Staff fallback when Geidea callback was missed after card collection.
+    Card on delivery: after Geidea POS/HPP payment, verify payment and complete delivery.
 
-    POST /api/admin/orders/<pk>/geidea-reconcile/
+    POST /api/admin/orders/collect-card/?id=<order_id>
+    Body (invoice_id optional if already linked on the order):
+      invoice_id          — Zoho Books invoice_id or invoice number (e.g. INV-000030)
+      gateway_reference   — Geidea orderId / POS reference (optional if one paid payment exists)
+      amount              — defaults to order total
+      transaction_status  — defaults to paid
     """
 
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def post(self, request, pk):
-        order = get_object_or_404(_admin_orders_queryset(), pk=pk)
+    def post(self, request):
+        order_id, err = _parse_order_id_query_param(request)
+        if err:
+            return err
+        order = get_object_or_404(_admin_orders_queryset(), pk=order_id)
+        if not is_card_on_delivery_order(order):
+            return Response(
+                {"detail": "Order is not card on delivery."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = AdminOrderCollectCardSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        invoice_id = (data.get("invoice_id") or order.zoho_books_invoice_id or "").strip()
+        if not invoice_id:
+            return Response(
+                {
+                    "detail": (
+                        "invoice_id is required when the order has no linked Zoho Books invoice."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        amount = data.get("amount")
+        if amount is None:
+            amount = Decimal(str(order.total or "0")).quantize(Decimal("0.01"))
+        else:
+            amount = Decimal(str(amount)).quantize(Decimal("0.01"))
+
+        ok, steps = submit_card_on_delivery_collection(
+            order_id,
+            invoice_id=invoice_id,
+            gateway_reference=(data.get("gateway_reference") or "").strip(),
+            amount=amount,
+            transaction_status=(data.get("transaction_status") or "paid").strip(),
+        )
+        order = _reload_admin_order(order_id)
+
+        if ok:
+            record_admin_activity(
+                request,
+                category=AdminActivityLog.Category.ORDERS,
+                action="order.card_collected",
+                message=f"Collected card payment for order #{order.pk}.",
+                target_type="order",
+                target_id=order.pk,
+                metadata={"status": Order.CustomerTrackingStage.DELIVERED},
+            )
+
+        return Response(
+            {
+                "status": "success" if ok else "error",
+                "message": (
+                    "Card payment collected. Order delivered and invoice paid."
+                    if ok
+                    else (steps[-1] if steps else "Could not complete card collection.")
+                ),
+                "steps_completed": steps,
+                "order": _admin_order_payload(order),
+            },
+            status=status.HTTP_200_OK if ok else status.HTTP_400_BAD_REQUEST,
+        )
+
+
+class AdminOrderGeideaReconcileAPIView(APIView):
+    """
+    Staff fallback when Geidea callback was missed after card collection.
+
+    POST /api/admin/orders/geidea-reconcile/?id=<order_id>
+    """
+
+    permission_classes = [IsAuthenticated, IsStaffUser]
+
+    def post(self, request):
+        order_id, err = _parse_order_id_query_param(request)
+        if err:
+            return err
+        order = get_object_or_404(_admin_orders_queryset(), pk=order_id)
         if order.payment_method != Order.PaymentMethod.CARD_ON_DELIVERY:
             return Response(
                 {"detail": "Only card-on-delivery orders use this reconcile endpoint."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         reconcile_status, steps = reconcile_missed_geidea_callback(order)
-        order = _reload_admin_order(pk)
+        order = _reload_admin_order(order_id)
         return Response(
             {
                 "status": reconcile_status,
@@ -651,6 +881,71 @@ class AdminOrderGeideaReconcileAPIView(APIView):
                 "order": _admin_order_payload(order),
             },
             status=status.HTTP_200_OK,
+        )
+
+
+class AdminOrderCreateInvoiceAPIView(APIView):
+    """
+    Create a Zoho Books invoice from the order's sales order.
+
+    POST /api/admin/orders/create-invoice/?id=<order_id>
+    """
+
+    permission_classes = [IsAuthenticated, IsStaffUser]
+
+    def post(self, request):
+        order_id, err = _parse_order_id_query_param(request)
+        if err:
+            return err
+        order = get_object_or_404(_admin_orders_queryset(), pk=order_id)
+
+        ok, message = staff_create_zoho_books_invoice_for_order(order_id)
+        order = _reload_admin_order(order_id)
+
+        if ok:
+            record_admin_activity(
+                request,
+                category=AdminActivityLog.Category.ORDERS,
+                action="order.invoice_created",
+                message=(
+                    f"Created Zoho Books invoice for order #{order.pk} "
+                    f"({order.zoho_books_invoice_number or order.zoho_books_invoice_id})."
+                ),
+                target_type="order",
+                target_id=order.pk,
+                metadata={
+                    "invoice_id": order.zoho_books_invoice_id,
+                    "invoice_number": order.zoho_books_invoice_number,
+                },
+            )
+
+        payload = {
+            "status": "success" if ok else "error",
+            "message": message,
+            "invoice_id": order.zoho_books_invoice_id or "",
+            "invoice_number": order.zoho_books_invoice_number or "",
+            "order": build_admin_order_detail_payload(order),
+        }
+        if (order.zoho_books_invoice_id or "").strip():
+            invoice_detail, invoice_fetch_error = resolve_invoice_detail_for_order(order)
+            if invoice_detail is not None:
+                payload["invoice"] = invoice_detail
+            if invoice_fetch_error:
+                payload["invoice_fetch_error"] = invoice_fetch_error
+        if ok and is_pay_on_delivery_payment_method(order.payment_method):
+            if is_card_on_delivery_order(order):
+                payload["next_step"] = (
+                    "POST /api/admin/orders/geidea-collect/?id=<order_id> then "
+                    "collect-card after Geidea payment."
+                )
+            else:
+                payload["next_step"] = (
+                    "POST /api/admin/orders/collect-cod/?id=<order_id> after cash collection."
+                )
+
+        return Response(
+            payload,
+            status=status.HTTP_200_OK if ok else status.HTTP_400_BAD_REQUEST,
         )
 
 
@@ -676,7 +971,7 @@ class AdminOrderVerifyPaymentAPIView(APIView):
                 {
                     "status": "error",
                     "message": (
-                        "Cash on delivery orders use POST /api/admin/orders/{id}/collect-cod/ "
+                        "Cash on delivery orders use POST /api/admin/orders/collect-cod/?id=<order_id> "
                         "after the delivery boy collects cash."
                     ),
                 },
@@ -769,7 +1064,7 @@ class AdminOrderMarkCodPaidAPIView(APIView):
     After a successful payment recording, triggers journal automation
     (payment charge + VAT on charge) using COD rates from ZohoBooksStoreConfig.
 
-    POST /api/admin/orders/<pk>/mark-cod-paid/
+    POST /api/admin/orders/mark-cod-paid/?id=<order_id>
     Body (all optional):
       payment_reference  — POS machine reference ID
       payment_date       — ISO date string (defaults to today)
@@ -778,7 +1073,11 @@ class AdminOrderMarkCodPaidAPIView(APIView):
 
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def post(self, request, pk):
+    def post(self, request):
+        order_id, err = _parse_order_id_query_param(request)
+        if err:
+            return err
+        pk = order_id
         from decimal import Decimal
 
         from django.utils import timezone as dj_tz

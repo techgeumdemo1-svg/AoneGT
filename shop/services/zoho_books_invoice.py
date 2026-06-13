@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from django.conf import settings
@@ -21,6 +21,7 @@ from shop.services.zoho_books import (
     books_find_contact_id_by_name,
     books_get_contact,
     books_get_invoice,
+    books_get_organization,
     books_get_sales_order,
     books_list_invoices_for_sales_order,
     books_mark_invoice_sent,
@@ -831,3 +832,476 @@ def sync_zoho_books_invoice_for_order_from_books(order: Order) -> tuple[bool, st
         invoice_number,
     )
     return True, f'Linked Zoho Books invoice {invoice_number or invoice_id}.'
+
+
+def _invoice_money(value, *, precision: int = 2) -> str:
+    return str(Decimal(str(value or 0)).quantize(Decimal('1.' + '0' * precision)))
+
+
+def _invoice_money_display(value, currency: str, *, precision: int = 2) -> str:
+    amount = _invoice_money(value, precision=precision)
+    return f'{currency}{amount}'
+
+
+def _invoice_payment_display(value, currency: str, *, precision: int = 2) -> str:
+    amount = _invoice_money(value, precision=precision)
+    if Decimal(amount) == 0:
+        return f'{currency}0.00'
+    return f'(-) {amount}'
+
+
+def _invoice_format_date(raw) -> str:
+    text = (str(raw or '')).strip()
+    if not text:
+        return ''
+    for fmt in ('%Y-%m-%d', '%d/%m/%Y'):
+        try:
+            return datetime.strptime(text[:10], fmt).strftime('%d %b %Y')
+        except ValueError:
+            continue
+    return text
+
+
+def _invoice_join_address_parts(*parts) -> str:
+    seen: list[str] = []
+    for part in parts:
+        piece = (part or '').strip()
+        if piece and piece not in seen:
+            seen.append(piece)
+    return ', '.join(seen)
+
+
+def _invoice_billing_address_lines(invoice: dict, order: Order | None = None) -> list[str]:
+    billing = invoice.get('billing_address') or {}
+    if isinstance(billing, dict):
+        line = _invoice_join_address_parts(
+            billing.get('address'),
+            billing.get('street2'),
+            billing.get('city'),
+            billing.get('state'),
+            billing.get('country'),
+        )
+        if line:
+            return [line]
+    if order is not None:
+        line = _invoice_join_address_parts(
+            order.shipping_address,
+            order.shipping_city,
+            order.shipping_state,
+            order.shipping_country,
+        )
+        if line:
+            return [line]
+    return []
+
+
+def _invoice_default_vat_percent(order: Order) -> Decimal:
+    return Decimal(str(order.vat_percent or 5)).quantize(Decimal('0.01'))
+
+
+def _invoice_line_vat_percent(row: dict, order: Order) -> Decimal:
+    if (row.get('name') or '').strip().lower() == 'shipping':
+        return Decimal('0.00')
+    raw = row.get('tax_percentage')
+    if raw is not None and str(raw).strip() != '':
+        return Decimal(str(raw)).quantize(Decimal('0.01'))
+    return _invoice_default_vat_percent(order)
+
+
+def _invoice_seller_payload(organization: dict | None, *, store) -> dict:
+    if organization:
+        address = organization.get('address') or {}
+        street = _invoice_join_address_parts(
+            address.get('street_address1'),
+            address.get('street_address2'),
+            address.get('address'),
+        )
+        city_state = _invoice_join_address_parts(address.get('city'), address.get('state'))
+        country = (address.get('country') or '').strip()
+        address_lines = [row for row in (street, city_state, country) if row]
+        if not address_lines:
+            org_address = (organization.get('org_address') or '').strip()
+            if org_address:
+                address_lines = [org_address]
+        trn_label = (
+            organization.get('tax_id_label')
+            or organization.get('taxid_label')
+            or 'TRN'
+        )
+        trn = organization.get('tax_id_value') or organization.get('taxid_value') or ''
+        return {
+            'name': (organization.get('name') or getattr(store, 'name', '') or '').strip(),
+            'address_lines': address_lines,
+            'trn': str(trn).strip(),
+            'trn_label': str(trn_label).strip() or 'TRN',
+            'phone': (organization.get('phone') or '').strip(),
+            'email': (organization.get('email') or '').strip(),
+        }
+    return {
+        'name': (getattr(store, 'name', '') or '').strip(),
+        'address_lines': [],
+        'trn': '',
+        'trn_label': 'TRN',
+        'phone': '',
+        'email': (getattr(store, 'contact_email', '') or '').strip(),
+    }
+
+
+def _invoice_line_tax_amount(row: dict, *, order: Order | None = None) -> Decimal:
+    raw = row.get('tax_amount')
+    if raw is not None and str(raw).strip() != '':
+        return Decimal(str(raw)).quantize(Decimal('0.01'))
+    pct = Decimal(str(row.get('tax_percentage') or 0))
+    if pct <= 0 and order is not None:
+        pct = _invoice_line_vat_percent(row, order)
+    taxable = Decimal(str(row.get('item_total') or 0)).quantize(Decimal('0.01'))
+    if pct > 0 and taxable > 0:
+        return (taxable * pct / Decimal('100')).quantize(Decimal('0.01'))
+    return Decimal('0.00')
+
+
+def _invoice_tax_summary_label(row: dict, order: Order | None = None) -> str:
+    pct = Decimal(str(row.get('tax_percentage') or 0))
+    if pct <= 0 and order is not None:
+        pct = _invoice_line_vat_percent(row, order)
+    pct = pct.quantize(Decimal('0.01'))
+    tax_name = (row.get('tax_name') or '').strip()
+    if pct <= 0 and not tax_name:
+        return 'Exempt'
+    if tax_name:
+        if '(' in tax_name:
+            return tax_name
+        if pct > 0:
+            return f'{tax_name} ({pct}%)'
+        return tax_name
+    return f'Standard Rate ({pct}%)'
+
+
+def _invoice_build_tax_summary(line_items: list[dict], *, order: Order | None = None) -> list[dict]:
+    buckets: dict[str, dict] = {}
+    for row in line_items:
+        if not isinstance(row, dict):
+            continue
+        label = _invoice_tax_summary_label(row, order)
+        taxable = Decimal(str(row.get('item_total') or 0)).quantize(Decimal('0.01'))
+        tax_amount = _invoice_line_tax_amount(row, order=order)
+        bucket = buckets.setdefault(
+            label,
+            {'label': label, 'taxable_amount': Decimal('0.00'), 'tax_amount': Decimal('0.00')},
+        )
+        bucket['taxable_amount'] += taxable
+        bucket['tax_amount'] += tax_amount
+    summary = []
+    for bucket in buckets.values():
+        summary.append({
+            'label': bucket['label'],
+            'taxable_amount': _invoice_money(bucket['taxable_amount']),
+            'tax_amount': _invoice_money(bucket['tax_amount']),
+        })
+    return summary
+
+
+def _invoice_status_display(raw_status: str) -> str:
+    status = (raw_status or '').strip().lower()
+    if not status:
+        return ''
+    return status.replace('_', ' ').title()
+
+
+def build_zoho_books_invoice_detail_payload(
+    order: Order,
+    invoice: dict,
+    *,
+    organization: dict | None = None,
+) -> dict:
+    """
+    Structured tax-invoice view (seller, bill-to, line items, totals, tax summary).
+    """
+    currency = (
+        (invoice.get('currency_code') or order.currency or 'AED').strip() or 'AED'
+    )
+    precision = int(invoice.get('price_precision') or 2)
+    default_vat_percent = _invoice_default_vat_percent(order)
+    line_items_raw = [
+        row for row in (invoice.get('line_items') or []) if isinstance(row, dict)
+    ]
+    line_items: list[dict] = []
+    subtotal_taxable = Decimal('0.00')
+    subtotal_tax = Decimal('0.00')
+    subtotal_amount = Decimal('0.00')
+
+    for index, row in enumerate(line_items_raw, start=1):
+        quantity = Decimal(str(row.get('quantity') or 0)).quantize(Decimal('0.01'))
+        rate = Decimal(str(row.get('rate') or 0)).quantize(Decimal('0.01'))
+        taxable_amount = Decimal(str(row.get('item_total') or 0)).quantize(Decimal('0.01'))
+        if taxable_amount <= 0 and quantity > 0 and rate > 0:
+            taxable_amount = (quantity * rate).quantize(Decimal('0.01'))
+        tax_percent = _invoice_line_vat_percent(row, order)
+        tax_amount = _invoice_line_tax_amount(row, order=order)
+        line_total = (taxable_amount + tax_amount).quantize(Decimal('0.01'))
+        subtotal_taxable += taxable_amount
+        subtotal_tax += tax_amount
+        subtotal_amount += line_total
+        line_items.append({
+            'line_number': index,
+            'name': (row.get('name') or '').strip(),
+            'description': (row.get('description') or row.get('sku') or '').strip(),
+            'quantity': _invoice_money(quantity, precision=2),
+            'rate': _invoice_money(rate, precision=2),
+            'taxable_amount': _invoice_money(taxable_amount, precision=2),
+            'tax_percent': _invoice_money(tax_percent, precision=2) if tax_percent > 0 else '',
+            'tax_amount': _invoice_money(tax_amount, precision=2) if tax_amount > 0 else '',
+            'tax_display': _invoice_money(tax_amount, precision=2) if tax_amount > 0 else '-',
+            'amount': _invoice_money(line_total, precision=2),
+        })
+
+    invoice_number = (invoice.get('invoice_number') or order.zoho_books_invoice_number or '').strip()
+    balance_due = Decimal(str(invoice.get('balance', 0) or 0)).quantize(Decimal('0.01'))
+    payment_made = Decimal(str(invoice.get('payment_made', 0) or 0)).quantize(Decimal('0.01'))
+    total = Decimal(str(invoice.get('total', 0) or 0)).quantize(Decimal('0.01'))
+    tax_total = Decimal(str(invoice.get('tax_total', 0) or 0)).quantize(Decimal('0.01'))
+    sub_total = Decimal(str(invoice.get('sub_total', 0) or 0)).quantize(Decimal('0.01'))
+    if sub_total <= 0:
+        sub_total = subtotal_taxable
+    if tax_total <= 0:
+        tax_total = subtotal_tax
+    if total <= 0:
+        total = subtotal_amount
+    if payment_made <= 0 and total > 0 and balance_due <= 0:
+        payment_made = total
+
+    tax_summary = _invoice_build_tax_summary(line_items_raw, order=order)
+    tax_summary_taxable = sum(
+        Decimal(row['taxable_amount']) for row in tax_summary
+    ).quantize(Decimal('0.01'))
+    tax_summary_tax = sum(
+        Decimal(row['tax_amount']) for row in tax_summary
+    ).quantize(Decimal('0.01'))
+
+    sales_order_number = (
+        (invoice.get('salesorder_number') or order.zoho_books_salesorder_number or '').strip()
+    )
+    raw_status = (invoice.get('status') or '').strip()
+    if balance_due <= 0 and payment_made > 0 and raw_status not in ('void', 'cancelled'):
+        status = 'paid'
+        status_display = 'Paid'
+    else:
+        status = raw_status or 'sent'
+        status_display = _invoice_status_display(status)
+
+    customer_name = (invoice.get('customer_name') or order.shipping_name or '').strip()
+    if not customer_name and order.user_id:
+        first = (getattr(order.user, 'first_name', '') or '').strip()
+        last = (getattr(order.user, 'last_name', '') or '').strip()
+        customer_name = f'{first} {last}'.strip()
+
+    invoice_date_iso = (invoice.get('date') or '')[:10]
+    due_date_iso = (invoice.get('due_date') or '')[:10]
+    if not invoice_date_iso and order.zoho_books_invoiced_at:
+        invoice_date_iso = order.zoho_books_invoiced_at.date().isoformat()
+    terms = (invoice.get('payment_terms_label') or '').strip()
+    if not terms:
+        from shop.services.zoho_books_payment import is_pay_on_delivery_payment_method
+
+        terms = 'Due on Delivery' if is_pay_on_delivery_payment_method(order.payment_method) else 'Due on Receipt'
+    if not due_date_iso and invoice_date_iso:
+        from shop.services.zoho_books_payment import is_pay_on_delivery_payment_method
+
+        if is_pay_on_delivery_payment_method(order.payment_method):
+            due_days = int(getattr(settings, 'ZOHO_BOOKS_PAY_ON_DELIVERY_DUE_DAYS', 7) or 7)
+            due_date_iso = (
+                datetime.strptime(invoice_date_iso, '%Y-%m-%d').date() + timedelta(days=due_days)
+            ).isoformat()
+        else:
+            due_date_iso = invoice_date_iso
+
+    return {
+        'document_title': 'TAX INVOICE',
+        'status': status,
+        'status_display': status_display,
+        'currency': currency,
+        'vat_percent': _invoice_money(default_vat_percent, precision=2),
+        'invoice_id': str(invoice.get('invoice_id') or order.zoho_books_invoice_id or '').strip(),
+        'invoice_number': invoice_number,
+        'invoice_number_display': f'# {invoice_number}' if invoice_number else '',
+        'balance_due': _invoice_money(balance_due, precision=precision),
+        'balance_due_display': _invoice_money_display(balance_due, currency, precision=precision),
+        'seller': _invoice_seller_payload(organization, store=order.store),
+        'bill_to': {
+            'name': customer_name,
+            'address_lines': _invoice_billing_address_lines(invoice, order),
+        },
+        'invoice_date': _invoice_format_date(invoice_date_iso),
+        'invoice_date_iso': invoice_date_iso,
+        'terms': terms,
+        'due_date': _invoice_format_date(due_date_iso),
+        'due_date_iso': due_date_iso,
+        'sales_order_number': sales_order_number,
+        'order_id': order.pk,
+        'order_code': order_code_for_order(order),
+        'line_items': line_items,
+        'summary': {
+            'subtotal': {
+                'taxable_amount': _invoice_money(sub_total, precision=precision),
+                'tax': _invoice_money(tax_total, precision=precision),
+                'amount': _invoice_money(total, precision=precision),
+            },
+            'total': _invoice_money(total, precision=precision),
+            'total_display': _invoice_money_display(total, currency, precision=precision),
+            'payment_made': _invoice_money(payment_made, precision=precision),
+            'payment_made_display': _invoice_payment_display(payment_made, currency, precision=precision),
+            'balance_due': _invoice_money(balance_due, precision=precision),
+            'balance_due_display': _invoice_money_display(balance_due, currency, precision=precision),
+        },
+        'tax_summary': tax_summary,
+        'tax_summary_totals': {
+            'taxable_amount': _invoice_money(tax_summary_taxable, precision=precision),
+            'tax_amount': _invoice_money(tax_summary_tax, precision=precision),
+            'taxable_amount_display': _invoice_money_display(
+                tax_summary_taxable,
+                currency,
+                precision=precision,
+            ),
+            'tax_amount_display': _invoice_money_display(
+                tax_summary_tax,
+                currency,
+                precision=precision,
+            ),
+        },
+        'notes': (invoice.get('notes') or '').strip(),
+        'invoice_url': (invoice.get('invoice_url') or '').strip(),
+    }
+
+
+def fetch_zoho_books_invoice_detail_for_order(order: Order) -> dict:
+    """Load invoice + organization from Zoho Books and return the detail payload."""
+    invoice_id = (order.zoho_books_invoice_id or '').strip()
+    if not invoice_id:
+        raise ZohoBooksError('Order has no linked Zoho Books invoice.')
+    invoice = books_get_invoice(invoice_id, store=order.store)
+    organization = None
+    try:
+        organization = books_get_organization(store=order.store)
+    except ZohoBooksError as exc:
+        logger.warning(
+            'zoho-books: organization fetch failed order=%s (%s)',
+            order.pk,
+            exc,
+        )
+    return build_zoho_books_invoice_detail_payload(
+        order,
+        invoice,
+        organization=organization,
+    )
+
+
+def build_invoice_detail_fallback_from_order(order: Order) -> dict:
+    """Build invoice-shaped payload from the local order when Zoho fetch is unavailable."""
+    from shop.models import OrderItem
+    from shop.services.zoho_books_payment import is_pay_on_delivery_payment_method
+
+    currency = (order.currency or 'AED').strip() or 'AED'
+    vat_percent = _invoice_default_vat_percent(order)
+    organization = None
+    try:
+        organization = books_get_organization(store=order.store)
+    except ZohoBooksError:
+        pass
+
+    zoho_line_items: list[dict] = []
+    for item in OrderItem.objects.filter(order_id=order.pk):
+        qty = float(item.quantity or 0)
+        rate = float(Decimal(str(item.unit_price or 0)))
+        row = {
+            'name': (item.product_name or 'Item')[:200],
+            'description': (item.sku or '')[:200],
+            'quantity': qty,
+            'rate': rate,
+            'item_total': float(Decimal(str(item.line_total or 0))),
+            'tax_percentage': float(vat_percent),
+        }
+        if row['item_total'] <= 0 and qty > 0 and rate > 0:
+            row['item_total'] = float((Decimal(str(qty)) * Decimal(str(rate))).quantize(Decimal('0.01')))
+        zoho_line_items.append(row)
+
+    shipping_amount = Decimal(str(order.shipping_amount or 0)).quantize(Decimal('0.01'))
+    if shipping_amount > 0:
+        zoho_line_items.append({
+            'name': 'Shipping',
+            'quantity': 1.0,
+            'rate': float(shipping_amount),
+            'item_total': float(shipping_amount),
+            'tax_percentage': 0.0,
+        })
+
+    invoice_dt = order.zoho_books_invoiced_at or order.created_at
+    invoice_date_iso = invoice_dt.date().isoformat() if invoice_dt else ''
+    if is_pay_on_delivery_payment_method(order.payment_method):
+        terms = 'Due on Delivery'
+        due_days = int(getattr(settings, 'ZOHO_BOOKS_PAY_ON_DELIVERY_DUE_DAYS', 7) or 7)
+        due_date_iso = (
+            invoice_dt.date() + timedelta(days=due_days)
+        ).isoformat() if invoice_dt else ''
+        status = 'sent'
+    else:
+        terms = 'Due on Receipt'
+        due_date_iso = invoice_date_iso
+        status = 'paid' if order.payment_status == Order.PaymentStatus.PAID else 'sent'
+
+    invoice_stub = {
+        'invoice_id': order.zoho_books_invoice_id,
+        'invoice_number': order.zoho_books_invoice_number,
+        'currency_code': currency,
+        'date': invoice_date_iso,
+        'due_date': due_date_iso,
+        'payment_terms_label': terms,
+        'status': status,
+        'line_items': zoho_line_items,
+        'sub_total': float(Decimal(str(order.subtotal or 0))),
+        'tax_total': float(Decimal(str(order.vat_amount or 0))),
+        'total': float(Decimal(str(order.total or 0))),
+        'balance': float(Decimal(str(order.total or 0))),
+        'payment_made': 0.0,
+        'salesorder_number': order.zoho_books_salesorder_number or '',
+        'notes': '',
+    }
+    if order.payment_status == Order.PaymentStatus.PAID:
+        invoice_stub['balance'] = 0.0
+        invoice_stub['payment_made'] = invoice_stub['total']
+
+    detail = build_zoho_books_invoice_detail_payload(
+        order,
+        invoice_stub,
+        organization=organization,
+    )
+    detail['source'] = 'order_fallback'
+    return detail
+
+
+def resolve_invoice_detail_for_order(order: Order) -> tuple[dict | None, str | None]:
+    """
+    Return invoice detail for API responses.
+
+    Tries Zoho Books first; falls back to local order data if the fetch fails.
+    """
+    if not (order.zoho_books_invoice_id or '').strip():
+        return None, None
+    try:
+        detail = fetch_zoho_books_invoice_detail_for_order(order)
+        detail['source'] = 'zoho_books'
+        return detail, None
+    except Exception as exc:
+        logger.warning(
+            'zoho-books: invoice detail fetch failed order=%s (%s)',
+            order.pk,
+            exc,
+        )
+        try:
+            detail = build_invoice_detail_fallback_from_order(order)
+            return detail, str(exc)
+        except Exception as fallback_exc:
+            logger.exception(
+                'zoho-books: invoice detail fallback failed order=%s',
+                order.pk,
+            )
+            return None, f'{exc}; fallback failed: {fallback_exc}'

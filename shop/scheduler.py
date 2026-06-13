@@ -57,6 +57,17 @@ def _acquire_process_lock():
         return False
 
 
+def _run_loyalty_coupon_cleanup():
+    """Remove expired unused and used loyalty reward coupons."""
+    from shop.services.loyalty_coupons import purge_stale_loyalty_coupons
+
+    try:
+        deleted = purge_stale_loyalty_coupons()
+        logger.info('loyalty-coupon-cleanup: purged %d coupon row(s)', deleted)
+    except Exception:
+        logger.exception('loyalty-coupon-cleanup: scheduled job failed')
+
+
 def _run_stale_order_cleanup():
     """
     Finds payment_gateway orders that are still PENDING after 2 hours
@@ -119,6 +130,14 @@ def start_geidea_cleanup_scheduler():
             _run_stale_order_cleanup,
             trigger=IntervalTrigger(hours=1),
             id='cleanup_stale_payment_gateway_orders',
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            _run_loyalty_coupon_cleanup,
+            trigger=IntervalTrigger(hours=24),
+            id='purge_stale_loyalty_coupons',
             replace_existing=True,
             max_instances=1,
             coalesce=True,

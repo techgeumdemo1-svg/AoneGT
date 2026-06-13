@@ -550,12 +550,20 @@ class AdminReturnApproveAPIView(AdminReturnDetailAPIViewMixin, APIView):
 
 
 class AdminReturnZohoSyncAPIView(AdminReturnDetailAPIViewMixin, APIView):
-    """Retry pushing an approved return to Zoho when zoho_salesreturn_id is still empty."""
+    """
+    Retry pushing an approved return to Zoho when zoho_salesreturn_id is still empty.
+
+    POST /api/admin/returns/zoho-sync/?id=<return_id>
+    """
 
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def post(self, request, pk):
-        ret = get_object_or_404(_admin_returns_queryset(), pk=pk)
+    def post(self, request):
+        return_id, err = _parse_return_id_query_param(request)
+        if err:
+            return err
+        ret = get_object_or_404(_admin_returns_queryset(), pk=return_id)
+        pk = return_id
         if (ret.zoho_salesreturn_id or '').strip():
             return Response(
                 {
