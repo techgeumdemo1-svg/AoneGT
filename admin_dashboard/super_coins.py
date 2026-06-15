@@ -120,6 +120,23 @@ def build_customer_super_coins_payload(user, *, history_limit: int = 50) -> dict
     }
 
 
+def _parse_customer_id_query_param(request, *, required=True):
+    customer_id = (request.query_params.get('id') or request.query_params.get('customer_id') or '').strip()
+    if not customer_id:
+        if required:
+            return None, Response(
+                {'detail': 'Query parameter id is required and must be a positive integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return None, None
+    if not customer_id.isdigit():
+        return None, Response(
+            {'detail': 'Query parameter id is required and must be a positive integer.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return int(customer_id), None
+
+
 def _super_coins_summary_payload(request) -> tuple[dict, Optional[str]]:
     customers = _customers_queryset()
     point_value = point_value_aed()
@@ -198,7 +215,10 @@ class AdminSuperCoinsSummaryAPIView(APIView):
 class AdminSuperCoinsCustomerAPIView(APIView):
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def get(self, request, customer_id):
+    def get(self, request):
+        customer_id, err = _parse_customer_id_query_param(request)
+        if err:
+            return err
         user = get_object_or_404(_customers_queryset(), pk=customer_id)
         return Response(
             {

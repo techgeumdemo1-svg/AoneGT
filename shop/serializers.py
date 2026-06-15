@@ -673,6 +673,10 @@ class OrderSerializer(serializers.ModelSerializer):
     refunded_amount = serializers.SerializerMethodField()
     net_paid = serializers.SerializerMethodField()
     return_eligible_lines = serializers.SerializerMethodField()
+    review_pending_lines = serializers.SerializerMethodField()
+    review_pending_count = serializers.SerializerMethodField()
+    points_earned = serializers.SerializerMethodField()
+    payment_method_label = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
@@ -683,7 +687,8 @@ class OrderSerializer(serializers.ModelSerializer):
             'subtotal', 'vat_percent', 'vat_amount', 'shipping_amount', 'total',
             'order_code', 'display_status', 'tracking', 'items_count',
             'can_reorder', 'can_return', 'return_status', 'order_date',
-            'return_eligible_lines',
+            'return_eligible_lines', 'review_pending_lines', 'review_pending_count',
+            'points_earned', 'payment_method_label',
             'shipping_name', 'shipping_phone', 'shipping_address', 'shipping_city',
             'shipping_state', 'shipping_postal_code', 'shipping_country',
             'billing_same_as_shipping',
@@ -714,7 +719,8 @@ class OrderSerializer(serializers.ModelSerializer):
             'zoho_books_payment_id', 'zoho_books_paid_at', 'zoho_books_payment_error',
             'order_code', 'display_status', 'tracking', 'items_count',
             'can_reorder', 'can_return', 'return_status', 'order_date',
-            'return_eligible_lines',
+            'return_eligible_lines', 'review_pending_lines', 'review_pending_count',
+            'points_earned', 'payment_method_label',
             'returned_total', 'balance_remaining', 'refunded_amount', 'net_paid',
             'loyalty_points_redeemed', 'loyalty_discount',
             'created_at', 'updated_at',
@@ -722,6 +728,18 @@ class OrderSerializer(serializers.ModelSerializer):
 
     def get_order_code(self, obj):
         return order_code_for_order(obj)
+
+    def get_points_earned(self, obj) -> int:
+        try:
+            return int(obj.points_ledger_entry.points_awarded or 0)
+        except PurchasePointsLedger.DoesNotExist:
+            return 0
+
+    def get_payment_method_label(self, obj) -> str:
+        try:
+            return Order.PaymentMethod(obj.payment_method).label
+        except (ValueError, TypeError):
+            return str(obj.payment_method or '')
 
     def get_return_eligible_lines(self, obj):
         """Lines still returnable (for select-items-to-return modal). Empty if order not eligible."""
@@ -757,6 +775,25 @@ class OrderSerializer(serializers.ModelSerializer):
                 'returnable_amount_display': f'{currency} {returnable}',
             })
         return result
+
+    def _review_pending_lines_cached(self, obj):
+        cache = self.context.setdefault('_review_pending_lines_cache', {})
+        if obj.pk not in cache:
+            from catalog.services.product_reviews import pending_review_lines_for_order
+
+            request = self.context.get('request')
+            user = getattr(request, 'user', None) if request else None
+            if user is None or not getattr(user, 'is_authenticated', False):
+                user = obj.user
+            cache[obj.pk] = pending_review_lines_for_order(user, obj)
+        return cache[obj.pk]
+
+    def get_review_pending_lines(self, obj):
+        """Products on this delivered order the user has not reviewed yet."""
+        return self._review_pending_lines_cached(obj)
+
+    def get_review_pending_count(self, obj):
+        return len(self._review_pending_lines_cached(obj))
 
     def get_display_status(self, obj):
         if obj.status == Order.Status.CANCELLED:

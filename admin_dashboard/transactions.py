@@ -135,6 +135,23 @@ class AdminTransactionListSerializer(serializers.ModelSerializer):
         )
 
 
+def _parse_transaction_id_query_param(request, *, required=True):
+    transaction_id = (request.query_params.get('id') or '').strip()
+    if not transaction_id:
+        if required:
+            return None, Response(
+                {'detail': 'Query parameter id is required and must be a positive integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return None, None
+    if not transaction_id.isdigit():
+        return None, Response(
+            {'detail': 'Query parameter id is required and must be a positive integer.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return int(transaction_id), None
+
+
 def _apply_transaction_list_filters(queryset, request) -> Tuple[object, Optional[str], Optional[dict]]:
     kind_filter = (request.query_params.get("kind") or request.query_params.get("type") or "").strip()
     if kind_filter:
@@ -218,6 +235,13 @@ class AdminTransactionListAPIView(APIView):
     permission_classes = [IsAuthenticated, IsStaffUser]
 
     def get(self, request):
+        if (request.query_params.get('id') or '').strip():
+            transaction_id, err = _parse_transaction_id_query_param(request)
+            if err:
+                return err
+            entry = get_object_or_404(_transactions_queryset(), pk=transaction_id)
+            return Response(_transaction_detail_payload(entry), status=status.HTTP_200_OK)
+
         qs, date_err, date_filter = _apply_transaction_list_filters(
             _transactions_queryset().order_by("-created_at"),
             request,
@@ -238,6 +262,9 @@ class AdminTransactionListAPIView(APIView):
 class AdminTransactionDetailAPIView(APIView):
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def get(self, request, pk):
-        entry = get_object_or_404(_transactions_queryset(), pk=pk)
+    def get(self, request):
+        transaction_id, err = _parse_transaction_id_query_param(request)
+        if err:
+            return err
+        entry = get_object_or_404(_transactions_queryset(), pk=transaction_id)
         return Response(_transaction_detail_payload(entry), status=status.HTTP_200_OK)

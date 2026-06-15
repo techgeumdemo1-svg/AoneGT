@@ -1675,7 +1675,7 @@ class CheckoutAPIView(APIView):
         else:
             maybe_create_zoho_sales_order_for_order(order.pk)
 
-        order = Order.objects.prefetch_related(
+        order = Order.objects.select_related('points_ledger_entry').prefetch_related(
             'items', 'returns__lines__order_item',
         ).get(pk=order.pk)
         code = order_code_for_order(order)
@@ -1745,6 +1745,10 @@ class CheckoutAPIView(APIView):
         order_data['coupon_discount'] = str(coupon_discount)
         order_data['discount_amount'] = str(discount_amount)
         order_data['taxable_subtotal'] = str(taxable_subtotal)
+        loyalty_coupon_applied = coupon_row is not None
+        from shop.services.loyalty_coupons import active_loyalty_coupons_queryset
+
+        has_loyalty_coupons = active_loyalty_coupons_queryset(user=request.user).exists()
         from shop.services.account_credit import get_user_credit_balance
 
         request.user.refresh_from_db(fields=['credit_balance_aed'])
@@ -1774,6 +1778,8 @@ class CheckoutAPIView(APIView):
                     'gross_total': str(gross_total.quantize(Decimal('0.01'))),
                     'points_redeemed': order.loyalty_points_redeemed,
                     'points_earned': points_awarded,
+                    'loyalty_coupon_applied': loyalty_coupon_applied,
+                    'has_loyalty_coupons': has_loyalty_coupons,
                     'total': str(order.total.quantize(Decimal('0.01'))),
                     'currency': order.currency,
                 },
@@ -2009,12 +2015,12 @@ class OrderDetailAPIView(APIView):
         if err:
             return err
         qs = Order.objects.filter(store=store).select_related('store').prefetch_related(
-            'items', 'returns__lines__order_item',
+            'items__product', 'returns__lines__order_item',
         )
         if not (request.user.is_staff or request.user.is_superuser):
             qs = qs.filter(user=request.user)
         order = get_object_or_404(qs, pk=pk)
-        return Response(OrderSerializer(order).data)
+        return Response(OrderSerializer(order, context={'request': request}).data)
 
     def patch(self, request, pk=None):
         store = self._resolve_store(request)

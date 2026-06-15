@@ -172,33 +172,96 @@ def _admin_user_payload(user) -> dict:
     return AdminUserListSerializer(user).data
 
 
-def _parse_user_id_query_param(request, *, required=True):
-    user_id = (request.query_params.get('id') or '').strip()
+def _parse_user_id_query_param(request, *, required=True, path_pk=None):
+    user_id = (request.query_params.get('id') or request.query_params.get('user_id') or '').strip()
+    if not user_id and path_pk is not None:
+        user_id = str(path_pk).strip()
+    if not user_id and hasattr(request, 'data') and request.data is not None:
+        body_id = request.data.get('id') or request.data.get('user_id')
+        if body_id is not None and str(body_id).strip() != '':
+            user_id = str(body_id).strip()
     if not user_id:
         if required:
             return None, Response(
-                {'detail': 'Query parameter id is required and must be a positive integer.'},
+                {
+                    'detail': (
+                        'User id is required. Use ?id=<id>, path /users/<id>/, '
+                        'or include id in the request body.'
+                    ),
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return None, None
-    if not user_id.isdigit():
+    if not str(user_id).isdigit():
         return None, Response(
-            {'detail': 'Query parameter id is required and must be a positive integer.'},
+            {
+                'detail': (
+                    'User id must be a positive integer. Use ?id=<id> or /users/<id>/.'
+                ),
+            },
             status=status.HTTP_400_BAD_REQUEST,
         )
     return int(user_id), None
 
 
+def _admin_user_detail_response(user) -> Response:
+    return Response(_admin_user_payload(user), status=status.HTTP_200_OK)
+
+
+def _update_admin_user(request, user_id: int):
+    user = get_object_or_404(_admin_users_queryset(), pk=user_id)
+    serializer = AdminUserUpdateSerializer(
+        data=request.data,
+        partial=True,
+        context={'user': user},
+    )
+    serializer.is_valid(raise_exception=True)
+
+    if user.pk == request.user.pk:
+        if 'is_staff' in serializer.validated_data and not serializer.validated_data['is_staff']:
+            return Response(
+                {'detail': 'You cannot remove your own staff access.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    serializer.update(user, serializer.validated_data)
+    user.refresh_from_db()
+    record_admin_activity(
+        request,
+        category=AdminActivityLog.Category.USERS,
+        action='user.updated',
+        message=f'Updated admin user #{user.pk} ({user.email}).',
+        target_type='user',
+        target_id=user.pk,
+        metadata={'fields': sorted(serializer.validated_data.keys())},
+    )
+    return Response(
+        {
+            'message': 'Admin user updated.',
+            'user': _admin_user_payload(user),
+        },
+        status=status.HTTP_200_OK,
+    )
+
+
 class AdminUserListCreateAPIView(APIView):
     """
     GET   /api/admin/users/          — list
+    GET   /api/admin/users/?id=<id>  — single admin user detail
     POST  /api/admin/users/          — create
-    PATCH /api/admin/users/?id=<id> — update
+    PATCH /api/admin/users/?id=<id>  — update (query param)
     """
 
     permission_classes = [IsAuthenticated, IsStaffUser]
 
     def get(self, request):
+        if (request.query_params.get('id') or request.query_params.get('user_id') or '').strip():
+            user_id, err = _parse_user_id_query_param(request)
+            if err:
+                return err
+            user = get_object_or_404(_admin_users_queryset(), pk=user_id)
+            return _admin_user_detail_response(user)
+
         qs = _apply_admin_user_list_filters(
             _admin_users_queryset().order_by("-created_at"),
             request,
@@ -236,39 +299,23 @@ class AdminUserListCreateAPIView(APIView):
         user_id, err = _parse_user_id_query_param(request)
         if err:
             return err
-        user = get_object_or_404(_admin_users_queryset(), pk=user_id)
-        serializer = AdminUserUpdateSerializer(
-            data=request.data,
-            partial=True,
-            context={"user": user},
-        )
-        serializer.is_valid(raise_exception=True)
+        return _update_admin_user(request, user_id)
 
-        if user.pk == request.user.pk:
-            if "is_staff" in serializer.validated_data and not serializer.validated_data["is_staff"]:
-                return Response(
-                    {"detail": "You cannot remove your own staff access."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
 
-        serializer.update(user, serializer.validated_data)
-        user.refresh_from_db()
-        record_admin_activity(
-            request,
-            category=AdminActivityLog.Category.USERS,
-            action="user.updated",
-            message=f"Updated admin user #{user.pk} ({user.email}).",
-            target_type="user",
-            target_id=user.pk,
-            metadata={"fields": sorted(serializer.validated_data.keys())},
-        )
-        return Response(
-            {
-                "message": "Admin user updated.",
-                "user": _admin_user_payload(user),
-            },
-            status=status.HTTP_200_OK,
-        )
+class AdminUserDetailUpdateAPIView(APIView):
+    """
+    GET   /api/admin/users/<id>/ — admin user detail
+    PATCH /api/admin/users/<id>/ — update admin user
+    """
+
+    permission_classes = [IsAuthenticated, IsStaffUser]
+
+    def get(self, request, pk):
+        user = get_object_or_404(_admin_users_queryset(), pk=pk)
+        return _admin_user_detail_response(user)
+
+    def patch(self, request, pk):
+        return _update_admin_user(request, pk)
 
 
 class AdminUserDeactivateAPIView(APIView):
