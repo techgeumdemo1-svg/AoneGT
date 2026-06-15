@@ -373,68 +373,10 @@ def void_zoho_books_sales_order_for_order(order: Order) -> bool:
 
 
 def staff_cancel_zoho_books_order(order_id: int) -> tuple[bool, str]:
-    """
-    Staff: void Books sales order and cancel local order.
-    Prepaid credit already on user account remains available for future orders.
-    """
-    from shop.models import AccountCreditLedger
-    from shop.services.account_credit import get_user_credit_balance
-    from shop.services.order_sync_state import apply_order_sync_transition
+    """Staff: void Books sales order and cancel local order."""
+    from shop.services.order_cancel import cancel_order
 
-    try:
-        order = Order.objects.select_related('user', 'store').get(pk=order_id)
-    except Order.DoesNotExist:
-        return False, 'Order not found.'
-
-    if order.status == Order.Status.CANCELLED:
-        return False, 'Order is already cancelled.'
-
-    if (order.zoho_books_invoice_id or '').strip():
-        return False, 'Cannot cancel: invoice already exists for this order.'
-
-    try:
-        with transaction.atomic():
-            locked = Order.objects.select_for_update().select_related('user', 'store').get(pk=order_id)
-            if locked.status == Order.Status.CANCELLED:
-                return False, 'Order is already cancelled.'
-            if (locked.zoho_books_invoice_id or '').strip():
-                return False, 'Cannot cancel: invoice already exists for this order.'
-
-            if (locked.zoho_books_salesorder_id or '').strip():
-                void_zoho_books_sales_order_for_order(locked)
-
-            apply_order_sync_transition(locked, Order.Status.CANCELLED)
-
-            if (
-                locked.payment_status == Order.PaymentStatus.PAID
-                and Decimal(str(locked.prepaid_credited_amount or 0)).quantize(Decimal('0.01')) > 0
-                and Decimal(str(locked.credit_applied_on_invoice or 0)).quantize(Decimal('0.01')) == 0
-            ):
-                AccountCreditLedger.objects.create(
-                    user=locked.user,
-                    order=locked,
-                    kind=AccountCreditLedger.Kind.ORDER_CANCEL,
-                    amount=Decimal('0'),
-                    balance_after=get_user_credit_balance(locked.user),
-                    note=(
-                        f'Order #{locked.pk} cancelled; '
-                        f'{locked.prepaid_credited_amount} AED remains on account credit.'
-                    ),
-                )
-    except ZohoBooksError as exc:
-        logger.exception('zoho-books: cancel failed order=%s (%s)', order_id, exc)
-        Order.objects.filter(pk=order_id).update(
-            zoho_books_salesorder_error=str(exc)[:5000],
-            updated_at=dj_tz.now(),
-        )
-        return False, str(exc)
-    except ValueError as exc:
-        return False, str(exc)
-    except Exception as exc:
-        logger.exception('zoho-books: unexpected cancel error order=%s', order_id)
-        return False, str(exc)
-
-    return True, 'Order cancelled and Zoho Books sales order voided.'
+    return cancel_order(order_id, customer=False, notify=True)
 
 
 def maybe_create_zoho_books_sales_order_for_order(order_id: int, *, trigger: str = 'synced') -> None:

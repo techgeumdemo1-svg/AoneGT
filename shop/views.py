@@ -1675,7 +1675,7 @@ class CheckoutAPIView(APIView):
         else:
             maybe_create_zoho_sales_order_for_order(order.pk)
 
-        order = Order.objects.prefetch_related(
+        order = Order.objects.select_related('points_ledger_entry').prefetch_related(
             'items', 'returns__lines__order_item',
         ).get(pk=order.pk)
         code = order_code_for_order(order)
@@ -1745,6 +1745,10 @@ class CheckoutAPIView(APIView):
         order_data['coupon_discount'] = str(coupon_discount)
         order_data['discount_amount'] = str(discount_amount)
         order_data['taxable_subtotal'] = str(taxable_subtotal)
+        loyalty_coupon_applied = coupon_row is not None
+        from shop.services.loyalty_coupons import active_loyalty_coupons_queryset
+
+        has_loyalty_coupons = active_loyalty_coupons_queryset(user=request.user).exists()
         from shop.services.account_credit import get_user_credit_balance
 
         request.user.refresh_from_db(fields=['credit_balance_aed'])
@@ -1774,6 +1778,8 @@ class CheckoutAPIView(APIView):
                     'gross_total': str(gross_total.quantize(Decimal('0.01'))),
                     'points_redeemed': order.loyalty_points_redeemed,
                     'points_earned': points_awarded,
+                    'loyalty_coupon_applied': loyalty_coupon_applied,
+                    'has_loyalty_coupons': has_loyalty_coupons,
                     'total': str(order.total.quantize(Decimal('0.01'))),
                     'currency': order.currency,
                 },
@@ -2009,12 +2015,12 @@ class OrderDetailAPIView(APIView):
         if err:
             return err
         qs = Order.objects.filter(store=store).select_related('store').prefetch_related(
-            'items', 'returns__lines__order_item',
+            'items__product', 'returns__lines__order_item',
         )
         if not (request.user.is_staff or request.user.is_superuser):
             qs = qs.filter(user=request.user)
         order = get_object_or_404(qs, pk=pk)
-        return Response(OrderSerializer(order).data)
+        return Response(OrderSerializer(order, context={'request': request}).data)
 
     def patch(self, request, pk=None):
         store = self._resolve_store(request)
@@ -2484,13 +2490,49 @@ class OrderZohoBooksCancelAPIView(APIView):
         )
 
 
+class OrderCancelAPIView(APIView):
+    """
+    Customer: cancel an order while it is still Pending.
+
+    POST /api/shop/orders/<pk>/cancel/?store_id=<store_id>
+    POST /api/shop/orders/cancel/?id=<order_id>&store_id=<store_id>
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk=None):
+        _, order, err = _order_for_owner_or_staff_action(request, pk)
+        if err:
+            return err
+
+        from shop.services.order_cancel import cancel_order
+
+        customer_flow = order.user_id == request.user.pk
+        ok, message = cancel_order(order.pk, customer=customer_flow, notify=True)
+
+        order = (
+            Order.objects.filter(pk=order.pk)
+            .select_related('store')
+            .prefetch_related('items', 'returns__lines__order_item')
+            .first()
+        )
+        return Response(
+            {
+                'status': 'success' if ok else 'error',
+                'message': message,
+                'order': OrderSerializer(order).data,
+            },
+            status=status.HTTP_200_OK if ok else status.HTTP_400_BAD_REQUEST,
+        )
+
+
 class OrderReturnFlowMetaAPIView(APIView):
     """
     Return-flow metadata: reason codes/labels, cancel vs confirm wiring, and where prices live.
 
     Item selection: GET order detail → ``return_eligible_lines`` (``unit_price_display`` per line).
     Confirm return: POST ``/api/shop/orders/returns/?order_id=<id>`` (or path ``.../orders/<id>/returns/``).
-    Cancel: client-only (close modal); no server endpoint.
+    Cancel: POST ``/api/shop/orders/cancel/?id=<order_id>&store_id=<store_id>`` while ``can_cancel`` is true.
     """
 
     permission_classes = [IsAuthenticated]

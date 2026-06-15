@@ -30,6 +30,12 @@ class OrderSummaryRequestSerializer(serializers.Serializer):
         required=False, default=Decimal('5.00'),
     )
     coupon_code = serializers.CharField(max_length=120, required=False, allow_blank=True, trim_whitespace=True)
+    loyalty_coupon_code = serializers.CharField(
+        max_length=32,
+        required=False,
+        allow_blank=True,
+        trim_whitespace=True,
+    )
     # Address resolution: provide address_id (preferred) OR city (fallback). Both optional.
     address_id = serializers.IntegerField(min_value=1, required=False, allow_null=True)
     city = serializers.CharField(max_length=120, required=False, allow_blank=True, trim_whitespace=True)

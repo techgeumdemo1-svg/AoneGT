@@ -9,6 +9,7 @@ from rest_framework.views import APIView
 from catalog.models import Product, Store
 from shop.models import UserAddress
 from shop.services.delivery_zones import get_shipping_fee_breakdown
+from shop.services.loyalty_coupons import active_loyalty_coupons_queryset
 
 from .models import Coupon
 from .serializers import OrderSummaryRequestSerializer, StoreIdQuerySerializer
@@ -44,6 +45,7 @@ class OrderSummaryAPIView(APIView):
         _default_vat = getattr(_settings, 'DEFAULT_VAT_PERCENT', '5.00')
         vat_percent = Decimal(str(_default_vat)).quantize(Decimal('0.01'))
         coupon_code = (ser.validated_data.get('coupon_code') or '').strip()
+        loyalty_coupon_code = (ser.validated_data.get('loyalty_coupon_code') or '').strip()
         _cart, cart_items, subtotal = get_cart_context(request.user, store)
         # Use serializer-validated payment_method. None/blank = no method selected yet
         # → no COD surcharge applied (surcharge only activates when explicitly 'cash_on_delivery').
@@ -146,6 +148,17 @@ class OrderSummaryAPIView(APIView):
             'address_details': address_details,  # None if city was passed directly
         }
 
+        has_loyalty_coupons = active_loyalty_coupons_queryset(user=request.user).exists()
+        loyalty_coupon_applied = False
+        if loyalty_coupon_code:
+            loyalty_coupon_applied = active_loyalty_coupons_queryset(user=request.user).filter(
+                code__iexact=loyalty_coupon_code,
+            ).exists()
+        loyalty_meta = {
+            'loyalty_coupon_applied': loyalty_coupon_applied,
+            'has_loyalty_coupons': has_loyalty_coupons,
+        }
+
         coupon = None
         if not coupon_code:
             applicable = get_applicable_coupons_for_store(request.user, store)
@@ -173,6 +186,7 @@ class OrderSummaryAPIView(APIView):
                         'vat_percent': str(vat_percent),
                         'vat_amount': vat_amount,
                         **shipping_meta,
+                        **loyalty_meta,
                         'coupon_discount': Decimal('0.00'),
                         'total': base_total,
                         'breakdown': breakdown,
@@ -194,6 +208,7 @@ class OrderSummaryAPIView(APIView):
                     'vat_percent': str(vat_percent),
                     'vat_amount': vat_amount,
                     **shipping_meta,
+                    **loyalty_meta,
                     'coupon_discount': Decimal('0.00'),
                     'total': base_total,
                     'breakdown': breakdown,
@@ -214,6 +229,7 @@ class OrderSummaryAPIView(APIView):
                     'vat_percent': str(vat_percent),
                     'vat_amount': vat_amount,
                     **shipping_meta,
+                    **loyalty_meta,
                     'coupon_discount': Decimal('0.00'),
                     'total': base_total,
                     'breakdown': breakdown,
@@ -332,6 +348,7 @@ class OrderSummaryAPIView(APIView):
             'vat_percent': str(vat_percent),
             'vat_amount': vat_amount,
             **shipping_meta,
+            **loyalty_meta,
             'shipping_amount': effective_shipping,  # FIXED: Decimal('0.00') for free_shipping, not string 'FREE'
             'coupon_discount': shipping_discount_display,
             'total': final_total,
