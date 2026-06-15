@@ -2490,13 +2490,49 @@ class OrderZohoBooksCancelAPIView(APIView):
         )
 
 
+class OrderCancelAPIView(APIView):
+    """
+    Customer: cancel an order while it is still Pending.
+
+    POST /api/shop/orders/<pk>/cancel/?store_id=<store_id>
+    POST /api/shop/orders/cancel/?id=<order_id>&store_id=<store_id>
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk=None):
+        _, order, err = _order_for_owner_or_staff_action(request, pk)
+        if err:
+            return err
+
+        from shop.services.order_cancel import cancel_order
+
+        customer_flow = order.user_id == request.user.pk
+        ok, message = cancel_order(order.pk, customer=customer_flow, notify=True)
+
+        order = (
+            Order.objects.filter(pk=order.pk)
+            .select_related('store')
+            .prefetch_related('items', 'returns__lines__order_item')
+            .first()
+        )
+        return Response(
+            {
+                'status': 'success' if ok else 'error',
+                'message': message,
+                'order': OrderSerializer(order).data,
+            },
+            status=status.HTTP_200_OK if ok else status.HTTP_400_BAD_REQUEST,
+        )
+
+
 class OrderReturnFlowMetaAPIView(APIView):
     """
     Return-flow metadata: reason codes/labels, cancel vs confirm wiring, and where prices live.
 
     Item selection: GET order detail → ``return_eligible_lines`` (``unit_price_display`` per line).
     Confirm return: POST ``/api/shop/orders/returns/?order_id=<id>`` (or path ``.../orders/<id>/returns/``).
-    Cancel: client-only (close modal); no server endpoint.
+    Cancel: POST ``/api/shop/orders/cancel/?id=<order_id>&store_id=<store_id>`` while ``can_cancel`` is true.
     """
 
     permission_classes = [IsAuthenticated]
