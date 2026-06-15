@@ -69,6 +69,7 @@ from .transactions import (
 )
 from .users import (
     AdminUserDeactivateAPIView,
+    AdminUserDetailUpdateAPIView,
     AdminUserListCreateAPIView,
     AdminUserReactivateAPIView,
 )
@@ -122,6 +123,7 @@ urlpatterns = [
     path('cms/faqs/', AdminFAQListCreateAPIView.as_view(), name='admin-cms-faqs-list-create'),
     path('cms/pages/', AdminCMSPageListAPIView.as_view(), name='admin-cms-pages-list'),
     path('users/', AdminUserListCreateAPIView.as_view(), name='admin-users-list-create'),
+    path('users/<int:pk>/', AdminUserDetailUpdateAPIView.as_view(), name='admin-users-detail'),
     path('users/deactivate/', AdminUserDeactivateAPIView.as_view(), name='admin-users-deactivate'),
     path('users/reactivate/', AdminUserReactivateAPIView.as_view(), name='admin-users-reactivate'),
     path('reports/cart-abandonment/', AdminCartAbandonmentReportAPIView.as_view(), name='admin-reports-cart-abandonment'),
@@ -129,13 +131,13 @@ urlpatterns = [
     path('reports/export/excel/', AdminReportExcelExportAPIView.as_view(), name='admin-reports-export-excel'),
     path('reports/export/pdf/', AdminReportPdfExportAPIView.as_view(), name='admin-reports-export-pdf'),
     path('transactions/', AdminTransactionListAPIView.as_view(), name='admin-transactions-list'),
-    path('transactions/<int:pk>/', AdminTransactionDetailAPIView.as_view(), name='admin-transactions-detail'),
+    path('transactions/detail/', AdminTransactionDetailAPIView.as_view(), name='admin-transactions-detail'),
     path('delivery-zones/', AdminDeliveryZoneListCreateAPIView.as_view(), name='admin-delivery-zones-list-create'),
-    path('delivery-zones/<int:pk>/toggle/', AdminDeliveryZoneToggleAPIView.as_view(), name='admin-delivery-zones-toggle'),
-    path('delivery-zones/<int:pk>/', AdminDeliveryZoneDetailAPIView.as_view(), name='admin-delivery-zones-detail'),
+    path('delivery-zones/detail/', AdminDeliveryZoneDetailAPIView.as_view(), name='admin-delivery-zones-detail'),
+    path('delivery-zones/toggle/', AdminDeliveryZoneToggleAPIView.as_view(), name='admin-delivery-zones-toggle'),
     path('super-coins/summary/', AdminSuperCoinsSummaryAPIView.as_view(), name='admin-super-coins-summary'),
     path('super-coins/settings/', AdminSuperCoinsSettingsAPIView.as_view(), name='admin-super-coins-settings'),
-    path('super-coins/customers/<int:customer_id>/', AdminSuperCoinsCustomerAPIView.as_view(), name='admin-super-coins-customer'),
+    path('super-coins/customers/', AdminSuperCoinsCustomerAPIView.as_view(), name='admin-super-coins-customer'),
     path('activity-logs/', AdminActivityLogListAPIView.as_view(), name='admin-activity-logs-list'),
 
     # Finance — Zoho Books store config and journal audit logs

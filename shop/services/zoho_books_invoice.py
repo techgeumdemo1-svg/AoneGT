@@ -130,6 +130,7 @@ def _invoice_summary_notes(order: Order) -> str:
 
     lines = [
         f'AoneGt order #{order.pk}',
+        f'Payment method\t{order.get_payment_method_display()}',
         '',
         'Order summary:',
         f'Subtotal\t{_decimal_str(subtotal)} {currency}',

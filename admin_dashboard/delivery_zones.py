@@ -116,6 +116,23 @@ class AdminDeliveryZoneToggleSerializer(serializers.Serializer):
     is_active = serializers.BooleanField(required=False)
 
 
+def _parse_delivery_zone_id_query_param(request, *, required=True):
+    zone_id = (request.query_params.get('id') or '').strip()
+    if not zone_id:
+        if required:
+            return None, Response(
+                {'detail': 'Query parameter id is required and must be a positive integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return None, None
+    if not zone_id.isdigit():
+        return None, Response(
+            {'detail': 'Query parameter id is required and must be a positive integer.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return int(zone_id), None
+
+
 def _apply_delivery_zone_list_filters(queryset, request):
     is_active = (request.query_params.get("is_active") or "").strip().lower()
     if is_active in ("true", "1", "yes"):
@@ -135,6 +152,36 @@ def _apply_delivery_zone_list_filters(queryset, request):
 
 def _zone_payload(zone: DeliveryZone) -> dict:
     return AdminDeliveryZoneListSerializer(zone).data
+
+
+def _patch_delivery_zone(request):
+    zone_id, err = _parse_delivery_zone_id_query_param(request)
+    if err:
+        return err
+    zone = get_object_or_404(_delivery_zones_queryset(), pk=zone_id)
+    serializer = AdminDeliveryZoneWriteSerializer(zone, data=request.data, partial=True)
+    serializer.is_valid(raise_exception=True)
+    zone = serializer.save()
+    return Response(
+        {
+            "message": "Delivery zone updated.",
+            "zone": _zone_payload(zone),
+        },
+        status=status.HTTP_200_OK,
+    )
+
+
+def _delete_delivery_zone(request):
+    zone_id, err = _parse_delivery_zone_id_query_param(request)
+    if err:
+        return err
+    zone = get_object_or_404(_delivery_zones_queryset(), pk=zone_id)
+    deleted_zone_id = zone.pk
+    zone.delete()
+    return Response(
+        {"message": "Delivery zone deleted.", "zone_id": deleted_zone_id},
+        status=status.HTTP_200_OK,
+    )
 
 
 class AdminDeliveryZoneListCreateAPIView(APIView):
@@ -163,38 +210,31 @@ class AdminDeliveryZoneListCreateAPIView(APIView):
             status=status.HTTP_201_CREATED,
         )
 
+    def patch(self, request):
+        return _patch_delivery_zone(request)
+
+    def delete(self, request):
+        return _delete_delivery_zone(request)
+
 
 class AdminDeliveryZoneDetailAPIView(APIView):
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def patch(self, request, pk):
-        zone = get_object_or_404(_delivery_zones_queryset(), pk=pk)
-        serializer = AdminDeliveryZoneWriteSerializer(zone, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        zone = serializer.save()
-        return Response(
-            {
-                "message": "Delivery zone updated.",
-                "zone": _zone_payload(zone),
-            },
-            status=status.HTTP_200_OK,
-        )
+    def patch(self, request):
+        return _patch_delivery_zone(request)
 
-    def delete(self, request, pk):
-        zone = get_object_or_404(_delivery_zones_queryset(), pk=pk)
-        zone_id = zone.pk
-        zone.delete()
-        return Response(
-            {"message": "Delivery zone deleted.", "zone_id": zone_id},
-            status=status.HTTP_200_OK,
-        )
+    def delete(self, request):
+        return _delete_delivery_zone(request)
 
 
 class AdminDeliveryZoneToggleAPIView(APIView):
     permission_classes = [IsAuthenticated, IsStaffUser]
 
-    def patch(self, request, pk):
-        zone = get_object_or_404(_delivery_zones_queryset(), pk=pk)
+    def patch(self, request):
+        zone_id, err = _parse_delivery_zone_id_query_param(request)
+        if err:
+            return err
+        zone = get_object_or_404(_delivery_zones_queryset(), pk=zone_id)
         serializer = AdminDeliveryZoneToggleSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
