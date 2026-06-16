@@ -39,6 +39,10 @@ class User(AbstractBaseUser, PermissionsMixin):
     )
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
+    admin_mfa_enabled = models.BooleanField(
+        default=False,
+        help_text='When enabled, admin dashboard login requires email OTP after password.',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     USERNAME_FIELD = 'email'

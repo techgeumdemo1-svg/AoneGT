@@ -13,6 +13,7 @@ from shop.models import Order
 from shop.serializers import order_code_for_order
 from shop.services.zoho_books import (
     ZohoBooksError,
+    books_add_sales_order_comment,
     books_create_sales_order,
     books_update_sales_order,
     books_void_sales_order,
@@ -74,6 +75,99 @@ def order_ready_for_books_sales_order(order: Order, *, trigger: str) -> bool:
     if trigger == 'synced':
         return _should_create_on_synced()
     return False
+
+
+def _payment_method_label_for_zoho(order: Order) -> str:
+    try:
+        return Order.PaymentMethod(order.payment_method).label
+    except (ValueError, TypeError):
+        return (order.payment_method or '').replace('_', ' ').title()
+
+
+def _sales_order_hover_text(order: Order) -> str:
+    """Compact two-line summary for Sales Order list hover / custom field."""
+    return (
+        f'AoneGt order #{order.pk}\n'
+        f'Payment method - {_payment_method_label_for_zoho(order)}'
+    )
+
+
+def _books_sales_order_custom_fields(order: Order) -> list[dict]:
+    """Custom fields surfaced on the Zoho Books Sales Order list."""
+    fields: list[dict] = []
+
+    payment_api = (
+        getattr(settings, 'ZOHO_BOOKS_SO_PAYMENT_METHOD_CF_API_NAME', '') or ''
+    ).strip()
+    if payment_api:
+        label = _payment_method_label_for_zoho(order)
+        if label:
+            fields.append({'api_name': payment_api, 'value': label[:255]})
+
+    hover_api = (getattr(settings, 'ZOHO_BOOKS_SO_HOVER_CF_API_NAME', '') or '').strip()
+    if hover_api:
+        fields.append({'api_name': hover_api, 'value': _sales_order_hover_text(order)[:255]})
+
+    return fields
+
+
+def _maybe_add_sales_order_hover_comment(order: Order, salesorder_id: str) -> None:
+    """Best-effort list/history note; does not fail sales order creation."""
+    try:
+        books_add_sales_order_comment(
+            salesorder_id,
+            _sales_order_hover_text(order),
+            store=order.store,
+        )
+    except Exception as exc:
+        logger.warning(
+            'zoho-books: sales order hover comment failed order=%s salesorder_id=%s (%s)',
+            order.pk,
+            salesorder_id,
+            exc,
+        )
+
+
+def _books_unknown_custom_field_error(exc: ZohoBooksError) -> bool:
+    msg = str(exc).lower()
+    return 'custom field' in msg and ('doesnot exist' in msg or 'does not exist' in msg)
+
+
+def _books_create_sales_order_with_custom_field_fallback(
+    salesorder_body: dict,
+    *,
+    store,
+) -> dict:
+    try:
+        return books_create_sales_order(salesorder_body, store=store)
+    except ZohoBooksError as exc:
+        if salesorder_body.get('custom_fields') and _books_unknown_custom_field_error(exc):
+            logger.warning(
+                'zoho-books: payment-method custom field rejected; retrying without custom_fields (%s)',
+                exc,
+            )
+            retry_body = {key: value for key, value in salesorder_body.items() if key != 'custom_fields'}
+            return books_create_sales_order(retry_body, store=store)
+        raise
+
+
+def _books_update_sales_order_with_custom_field_fallback(
+    salesorder_id: str,
+    salesorder_body: dict,
+    *,
+    store,
+) -> dict:
+    try:
+        return books_update_sales_order(salesorder_id, salesorder_body, store=store)
+    except ZohoBooksError as exc:
+        if salesorder_body.get('custom_fields') and _books_unknown_custom_field_error(exc):
+            logger.warning(
+                'zoho-books: payment-method custom field rejected on update; retrying without custom_fields (%s)',
+                exc,
+            )
+            retry_body = {key: value for key, value in salesorder_body.items() if key != 'custom_fields'}
+            return books_update_sales_order(salesorder_id, retry_body, store=store)
+        raise
 
 
 def _build_sales_order_payload(order: Order, customer_id: str) -> dict:
@@ -260,6 +354,10 @@ def _build_sales_order_payload(order: Order, customer_id: str) -> dict:
             if row.get('name') != 'Shipping':
                 row['tax_id'] = tax_id
 
+    custom_fields = _books_sales_order_custom_fields(order)
+    if custom_fields:
+        payload['custom_fields'] = custom_fields
+
     return payload
 
 
@@ -268,7 +366,10 @@ def create_zoho_books_sales_order_for_order(order: Order) -> bool:
     order = Order.objects.select_related('user', 'store').prefetch_related('items').get(pk=order.pk)
     customer_id = _resolve_customer_id(order)
     salesorder_body = _build_sales_order_payload(order, customer_id)
-    salesorder = books_create_sales_order(salesorder_body, store=order.store)
+    salesorder = _books_create_sales_order_with_custom_field_fallback(
+        salesorder_body,
+        store=order.store,
+    )
 
     salesorder_id = str(salesorder.get('salesorder_id') or '').strip()
     salesorder_number = str(salesorder.get('salesorder_number') or '').strip()
@@ -296,6 +397,7 @@ def create_zoho_books_sales_order_for_order(order: Order) -> bool:
         salesorder_id,
         salesorder_number,
     )
+    _maybe_add_sales_order_hover_comment(order, salesorder_id)
     return True
 
 
@@ -308,7 +410,11 @@ def update_zoho_books_sales_order_for_order(order: Order) -> bool:
 
     customer_id = _resolve_customer_id(order)
     salesorder_body = _build_sales_order_payload(order, customer_id)
-    salesorder = books_update_sales_order(salesorder_id, salesorder_body, store=order.store)
+    salesorder = _books_update_sales_order_with_custom_field_fallback(
+        salesorder_id,
+        salesorder_body,
+        store=order.store,
+    )
     persist_books_sales_order_line_item_ids(order, salesorder)
 
     salesorder_number = str(salesorder.get('salesorder_number') or '').strip()

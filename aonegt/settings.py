@@ -281,6 +281,17 @@ ZOHO_BOOKS_INVOICE_FROM_SALES_ORDER = os.getenv(
 ZOHO_BOOKS_VAT_TAX_ID = os.getenv('ZOHO_BOOKS_VAT_TAX_ID', '').strip()
 # Days until due date for cash/card on delivery invoices (Zoho default without this is due same day).
 ZOHO_BOOKS_PAY_ON_DELIVERY_DUE_DAYS = int(os.getenv('ZOHO_BOOKS_PAY_ON_DELIVERY_DUE_DAYS', '7') or '7')
+# Zoho Books Sales Order custom field API name for payment method (e.g. cf_payment_method).
+# Create the field in Zoho Books first, then set this env var. Leave empty to skip.
+ZOHO_BOOKS_SO_PAYMENT_METHOD_CF_API_NAME = os.getenv(
+    'ZOHO_BOOKS_SO_PAYMENT_METHOD_CF_API_NAME',
+    '',
+).strip()
+# Optional combined hover text for Sales Order list (e.g. cf_order_hover).
+ZOHO_BOOKS_SO_HOVER_CF_API_NAME = os.getenv(
+    'ZOHO_BOOKS_SO_HOVER_CF_API_NAME',
+    '',
+).strip()
 
 # Optional image fallback used by /api/shop/zoho-products/<id>/image/ when Zoho has no image URL.
 ZOHO_IMAGE_PLACEHOLDER_URL = os.getenv(

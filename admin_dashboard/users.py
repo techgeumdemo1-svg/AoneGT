@@ -46,6 +46,7 @@ class AdminUserListSerializer(serializers.ModelSerializer):
             "is_staff",
             "is_superuser",
             "is_active",
+            "admin_mfa_enabled",
             "status",
             "last_login",
             "created_at",
@@ -66,6 +67,7 @@ class AdminUserCreateSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True)
     phone = serializers.CharField(max_length=32, required=False, allow_blank=True, default="")
     is_staff = serializers.BooleanField(required=False, default=True)
+    admin_mfa_enabled = serializers.BooleanField(required=False, default=False)
 
     def validate_email(self, value):
         email = (value or "").strip().lower()
@@ -101,6 +103,7 @@ class AdminUserUpdateSerializer(serializers.Serializer):
     phone = serializers.CharField(max_length=32, required=False, allow_blank=True)
     password = serializers.CharField(write_only=True, required=False)
     is_staff = serializers.BooleanField(required=False)
+    admin_mfa_enabled = serializers.BooleanField(required=False)
 
     def validate_email(self, value):
         email = (value or "").strip().lower()

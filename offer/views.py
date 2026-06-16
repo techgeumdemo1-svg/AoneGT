@@ -157,6 +157,7 @@ class OrderSummaryAPIView(APIView):
         loyalty_meta = {
             'loyalty_coupon_applied': loyalty_coupon_applied,
             'has_loyalty_coupons': has_loyalty_coupons,
+            'loyalty_discount': '100.00',  # TODO: replace with real loyalty discount calculation
         }
 
         coupon = None
