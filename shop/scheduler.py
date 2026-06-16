@@ -68,6 +68,21 @@ def _run_loyalty_coupon_cleanup():
         logger.exception('loyalty-coupon-cleanup: scheduled job failed')
 
 
+def _run_notification_cleanup():
+    """Remove in-app notifications older than NOTIFICATION_RETENTION_DAYS."""
+    if not getattr(settings, 'NOTIFICATION_PURGE_SCHEDULER_ENABLED', True):
+        return
+
+    from shop.services.notification_cleanup import purge_old_notifications
+
+    try:
+        deleted = purge_old_notifications()
+        if deleted:
+            logger.info('notification-purge: deleted %d notification row(s)', deleted)
+    except Exception:
+        logger.exception('notification-purge: scheduled job failed')
+
+
 def _run_stale_order_cleanup():
     """
     Finds payment_gateway orders that are still PENDING after 2 hours
@@ -142,7 +157,21 @@ def start_geidea_cleanup_scheduler():
             max_instances=1,
             coalesce=True,
         )
+        if getattr(settings, 'NOTIFICATION_PURGE_SCHEDULER_ENABLED', True):
+            scheduler.add_job(
+                _run_notification_cleanup,
+                trigger=IntervalTrigger(hours=24),
+                id='purge_old_notifications',
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
         scheduler.start()
         _scheduler = scheduler
+
+        if getattr(settings, 'NOTIFICATION_PURGE_RUN_ON_START', True) and getattr(
+            settings, 'NOTIFICATION_PURGE_SCHEDULER_ENABLED', True
+        ):
+            threading.Thread(target=_run_notification_cleanup, daemon=True).start()
 
         logger.info('geidea-cleanup: scheduler started (every 60 min)')

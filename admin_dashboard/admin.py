@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import AdminLoginOTP, CMSPage, FAQ
+from .models import AdminLoginOTP, AdminPermission, AdminRole, AdminUserRole, CMSPage, FAQ
 
 
 @admin.register(AdminLoginOTP)
@@ -24,3 +24,24 @@ class CMSPageAdmin(admin.ModelAdmin):
     list_filter = ('is_active',)
     search_fields = ('slug', 'title', 'content')
     readonly_fields = ('slug', 'created_at', 'updated_at')
+
+
+@admin.register(AdminPermission)
+class AdminPermissionAdmin(admin.ModelAdmin):
+    list_display = ("id", "code", "name", "module")
+    search_fields = ("code", "name", "module")
+    list_filter = ("module",)
+
+
+@admin.register(AdminRole)
+class AdminRoleAdmin(admin.ModelAdmin):
+    list_display = ("id", "name", "is_system", "updated_at")
+    search_fields = ("name",)
+    list_filter = ("is_system",)
+    filter_horizontal = ("permissions",)
+
+
+@admin.register(AdminUserRole)
+class AdminUserRoleAdmin(admin.ModelAdmin):
+    list_display = ("id", "user", "role", "updated_at")
+    search_fields = ("user__email", "role__name")

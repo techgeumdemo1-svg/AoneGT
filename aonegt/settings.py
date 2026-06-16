@@ -94,6 +94,18 @@ DATABASES = {
     )
 }
 
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+    },
+    'zoho': {
+        'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
+        'LOCATION': str(BASE_DIR / '.zoho_api_cache'),
+        'TIMEOUT': 600,
+        'OPTIONS': {'MAX_ENTRIES': 20000},
+    },
+}
+
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
     {
@@ -196,6 +208,18 @@ OTP_PURGE_RUN_ON_START = os.getenv('OTP_PURGE_RUN_ON_START', 'True').strip().low
     'yes',
 )
 
+# --- In-app notification retention (shop.UserNotification) ---
+try:
+    NOTIFICATION_RETENTION_DAYS = max(0, int(os.getenv('NOTIFICATION_RETENTION_DAYS', '30') or '30'))
+except ValueError:
+    NOTIFICATION_RETENTION_DAYS = 30
+NOTIFICATION_PURGE_SCHEDULER_ENABLED = os.getenv(
+    'NOTIFICATION_PURGE_SCHEDULER_ENABLED', 'True',
+).strip().lower() in ('true', '1', 'yes')
+NOTIFICATION_PURGE_RUN_ON_START = os.getenv(
+    'NOTIFICATION_PURGE_RUN_ON_START', 'True',
+).strip().lower() in ('true', '1', 'yes')
+
 # --- Loyalty (AED): earn 1 point per LOYALTY_AED_PER_POINT_EARNED spent; 1 point = LOYALTY_POINT_VALUE_AED off.
 LOYALTY_AED_PER_POINT_EARNED = int(os.getenv('LOYALTY_AED_PER_POINT_EARNED', '100'))
 LOYALTY_POINT_VALUE_AED = Decimal(os.getenv('LOYALTY_POINT_VALUE_AED', '1'))
@@ -211,6 +235,11 @@ CHECKOUT_TRUST_CLIENT_SHIPPING = os.getenv(
 # When True, prepaid checkout requires payment_success + gateway_reference (production).
 CHECKOUT_REQUIRE_PREPAID_PAYMENT_SUCCESS = os.getenv(
     'CHECKOUT_REQUIRE_PREPAID_PAYMENT_SUCCESS', 'True',
+).strip().lower() in ('true', '1', 'yes')
+# When true (default), confirmation email is sent in a background thread after checkout.
+# Zoho sales-order sync always runs before the checkout response so SO ids are included.
+CHECKOUT_ASYNC_EMAIL = os.getenv(
+    'CHECKOUT_ASYNC_EMAIL', 'True',
 ).strip().lower() in ('true', '1', 'yes')
 try:
     DEFAULT_SHIPPING_AMOUNT = Decimal(os.getenv('DEFAULT_SHIPPING_AMOUNT', '0'))
@@ -301,6 +330,9 @@ ZOHO_IMAGE_PLACEHOLDER_URL = os.getenv(
 # Comma-separated Zoho storefront collection ids to probe when saving a product
 # (Storefront Get Collection API). See zoho_integration.storefront_collections.
 ZOHO_COLLECTION_PROBE_IDS = os.getenv('ZOHO_COLLECTION_PROBE_IDS', '').strip()
+# In-memory cache TTL (seconds) for GET /zoho/multi/accounts/.../products/.../ full-list responses.
+ZOHO_PRODUCT_LIST_CACHE_SECONDS = int(os.getenv('ZOHO_PRODUCT_LIST_CACHE_SECONDS', '300') or '300')
+ZOHO_PRODUCT_DETAIL_CACHE_SECONDS = int(os.getenv('ZOHO_PRODUCT_DETAIL_CACHE_SECONDS', '600') or '600')
 # GET /zoho/multi/best-deals/ source: admin | category | collection
 # Set SOURCE=collection + COLLECTION_ID to drive best deals from a Zoho storefront collection.
 ZOHO_BEST_DEALS_COLLECTION_ID = os.getenv('ZOHO_BEST_DEALS_COLLECTION_ID', '').strip()

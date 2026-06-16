@@ -3,7 +3,10 @@ from django.conf import settings
 import re
 import requests
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
+from decimal import Decimal
+from typing import Optional, Tuple
+
+from django.core.cache import caches
 from urllib.parse import quote, urlencode
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -944,6 +947,7 @@ def _zoho_product_rows_for_org(
     category_id: Optional[str],
     include_descendants: bool,
     max_pages: int = 100,
+    max_rows: Optional[int] = None,
 ) -> list[dict]:
     """Load raw product dicts from Zoho (same rules as GET /zoho/multi/products/)."""
     cat = (category_id or "").strip() or None
@@ -962,6 +966,7 @@ def _zoho_product_rows_for_org(
                 category_id=current_category_id,
                 per_page=200,
                 max_pages=max_pages,
+                max_rows=max_rows,
             )
             for row in rows:
                 if not isinstance(row, dict):
@@ -977,6 +982,8 @@ def _zoho_product_rows_for_org(
                 if pid:
                     seen_product_ids.add(pid)
                 products.append(row)
+                if max_rows is not None and len(products) >= max_rows:
+                    return products[:max_rows]
         return products
 
     return service.list_products_all_pages(
@@ -984,60 +991,247 @@ def _zoho_product_rows_for_org(
         category_id=cat,
         per_page=200,
         max_pages=max_pages,
+        max_rows=max_rows,
     )
+
+
+def _local_products_by_zoho_id(store: Store, products: list[dict]) -> dict[str, Product]:
+    """One DB query for list rows that still need price/sku/image enrichment."""
+    pids: list[str] = []
+    for product in products:
+        if _extract_price(product) not in ("0", "0.00"):
+            continue
+        pid = str(product.get("product_id") or product.get("item_id") or product.get("id") or "").strip()
+        if pid:
+            pids.append(pid)
+    if not pids:
+        return {}
+    return {
+        str(row.zoho_product_id): row
+        for row in Product.objects.filter(
+            store=store,
+            zoho_product_id__in=pids,
+            is_active=True,
+        ).only("zoho_product_id", "price", "sku", "image_url")
+    }
+
+
+def _apply_local_product_to_zoho_list_row(product: dict, local: Product) -> bool:
+    """Fill rate/sku/image from local catalog when Zoho list row is incomplete."""
+    updated = False
+    try:
+        local_price = Decimal(str(local.price or 0))
+    except Exception:
+        local_price = Decimal("0")
+    if local_price > 0 and _extract_price(product) in ("0", "0.00"):
+        product["rate"] = str(local_price.quantize(Decimal("0.01")))
+        updated = True
+    if not (product.get("sku") or product.get("product_sku")) and local.sku:
+        product["sku"] = local.sku
+        updated = True
+    if not (product.get("image_url") or product.get("image_name")) and local.image_url:
+        product["image_url"] = local.image_url
+        updated = True
+    return updated
+
+
+def _enrich_single_zoho_list_product_row(
+    service: ZohoCommerceService,
+    organization_id: str,
+    product: dict,
+    *,
+    local_by_zoho_id: Optional[dict[str, Product]] = None,
+) -> None:
+    if _extract_price(product) not in ("0", "0.00"):
+        return
+    pid = str(product.get("product_id") or product.get("item_id") or product.get("id") or "").strip()
+    if not pid:
+        return
+    if local_by_zoho_id:
+        local = local_by_zoho_id.get(pid)
+        if local and _apply_local_product_to_zoho_list_row(product, local):
+            if _extract_price(product) not in ("0", "0.00"):
+                return
+    try:
+        detail_data = service.get_product_detail(
+            organization_id=organization_id,
+            product_id=pid,
+        )
+    except Exception:
+        return
+
+    detail_product = (
+        detail_data.get("product")
+        or detail_data.get("item")
+        or detail_data.get("data")
+        or {}
+    )
+    if not isinstance(detail_product, dict):
+        return
+    detail_price = _extract_price(detail_product)
+    if detail_price not in ("0", "0.00"):
+        product["rate"] = detail_price
+    if not (product.get("sku") or product.get("product_sku")):
+        detail_sku = detail_product.get("sku") or detail_product.get("product_sku")
+        if detail_sku:
+            product["sku"] = detail_sku
+    if not (product.get("image_url") or product.get("image_name")):
+        detail_image = _extract_image_url(detail_product)
+        if detail_image:
+            product["image_url"] = detail_image
 
 
 def _enrich_zoho_list_product_rows_from_detail(
     service: ZohoCommerceService,
     organization_id: str,
     products: list[dict],
+    *,
+    store: Optional[Store] = None,
 ) -> None:
-    """Fill missing rate/sku/image on list rows using product detail (in place)."""
+    """Fill missing rate/sku/image on list rows using local catalog then product detail."""
+    local_by_zoho_id = _local_products_by_zoho_id(store, products) if store else {}
     for product in products:
-        if _extract_price(product) not in ("0", "0.00"):
-            continue
-        pid = str(product.get("product_id") or product.get("item_id") or product.get("id") or "").strip()
-        if not pid:
-            continue
-        try:
-            detail_data = service.get_product_detail(
-                organization_id=organization_id,
-                product_id=pid,
-            )
-        except Exception:
-            continue
-
-        detail_product = (
-            detail_data.get("product")
-            or detail_data.get("item")
-            or detail_data.get("data")
-            or {}
+        _enrich_single_zoho_list_product_row(
+            service,
+            organization_id,
+            product,
+            local_by_zoho_id=local_by_zoho_id,
         )
-        if isinstance(detail_product, dict):
-            detail_price = _extract_price(detail_product)
-            if detail_price not in ("0", "0.00"):
-                product["rate"] = detail_price
-            if not (product.get("sku") or product.get("product_sku")):
-                detail_sku = detail_product.get("sku") or detail_product.get("product_sku")
-                if detail_sku:
-                    product["sku"] = detail_sku
-            if not (product.get("image_url") or product.get("image_name")):
-                detail_image = _extract_image_url(detail_product)
-                if detail_image:
-                    product["image_url"] = detail_image
+
+
+def _zoho_response_cache():
+    return caches['zoho']
+
+
+_PRODUCT_LIST_DEFAULT_PER_PAGE = 50
+
+
+def _product_list_fetch_mode(request) -> str:
+    """paginated (default) or all (full catalog via ?all=true or legacy ?limit=)."""
+    if _as_bool(request.GET.get("all"), default=False):
+        return "all"
+    limit_raw = (request.GET.get("limit") or "").strip()
+    page_raw = (request.GET.get("page") or "").strip()
+    per_page_raw = (request.GET.get("per_page") or "").strip()
+    if limit_raw and not page_raw and not per_page_raw:
+        return "all"
+    return "paginated"
+
+
+def _product_list_cache_key(
+    account_id: int,
+    organization_id: str,
+    request,
+    *,
+    fetch_mode: str,
+    page_num: int,
+    per_page: int,
+) -> str:
+    exclude_pid = (
+        request.GET.get("exclude_product_id")
+        or request.GET.get("exclude_zoho_product_id")
+        or ""
+    ).strip()
+    parts = [
+        str(account_id),
+        str(organization_id),
+        (request.GET.get("category_id") or "").strip(),
+        str(_as_bool(request.GET.get("include_descendants"), default=True)),
+        fetch_mode,
+    ]
+    if fetch_mode == "paginated":
+        parts.extend([str(page_num), str(per_page)])
+    else:
+        parts.append((request.GET.get("limit") or "").strip())
+    parts.extend([exclude_pid, request.get_host()])
+    return "|".join(parts)
+
+
+def _get_cached_product_list_payload(cache_key: str) -> Optional[dict]:
+    ttl = max(0, int(getattr(settings, "ZOHO_PRODUCT_LIST_CACHE_SECONDS", 300) or 0))
+    if ttl <= 0:
+        return None
+    cached = _zoho_response_cache().get(f"plist_resp:{cache_key}")
+    return cached if isinstance(cached, dict) else None
+
+
+def _set_cached_product_list_payload(cache_key: str, payload: dict) -> None:
+    ttl = max(0, int(getattr(settings, "ZOHO_PRODUCT_LIST_CACHE_SECONDS", 300) or 0))
+    if ttl <= 0:
+        return
+    _zoho_response_cache().set(f"plist_resp:{cache_key}", payload, timeout=ttl)
+
+
+def _parse_product_list_limit(request) -> Optional[int]:
+    limit_raw = (request.GET.get("limit") or "").strip()
+    if not limit_raw:
+        return None
+    try:
+        lim = int(limit_raw)
+    except ValueError:
+        return None
+    if lim > 0:
+        return min(lim, 200)
+    return None
+
+
+def _parse_product_list_page_params(request) -> Tuple[int, int]:
+    page_raw = (request.GET.get("page") or "").strip()
+    per_page_raw = (request.GET.get("per_page") or "").strip()
+    try:
+        page = max(1, int(page_raw or 1))
+    except ValueError:
+        page = 1
+    try:
+        per_page = int(per_page_raw or _PRODUCT_LIST_DEFAULT_PER_PAGE)
+    except ValueError:
+        per_page = _PRODUCT_LIST_DEFAULT_PER_PAGE
+    allowed = (10, 25, 50, 100, 200)
+    if per_page not in allowed:
+        per_page = 200 if per_page > 100 else min(allowed, key=lambda value: abs(value - per_page))
+    return page, per_page
 
 
 def _multi_account_product_list_response(request, account, organization_id: str):
+    fetch_mode = _product_list_fetch_mode(request)
+    page_num, per_page = _parse_product_list_page_params(request)
+    paginated = fetch_mode == "paginated"
+    cache_key = _product_list_cache_key(
+        account.pk,
+        organization_id,
+        request,
+        fetch_mode=fetch_mode,
+        page_num=page_num,
+        per_page=per_page,
+    )
+    cached_payload = _get_cached_product_list_payload(cache_key)
+    if cached_payload is not None:
+        return Response(cached_payload)
+
     service = ZohoCommerceService(account)
     category_id = (request.GET.get("category_id") or "").strip() or None
     include_descendants = _as_bool(request.GET.get("include_descendants"), default=True)
+    limit_applied = _parse_product_list_limit(request) if not paginated else None
+    store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
+    page_context: dict = {}
 
-    products = _zoho_product_rows_for_org(
-        service,
-        organization_id,
-        category_id=category_id,
-        include_descendants=include_descendants,
-    )
+    if paginated:
+        data = service.list_products(
+            organization_id,
+            page=page_num,
+            per_page=per_page,
+            category_id=category_id,
+        )
+        products = service._rows_from_products_payload(data)
+        page_context = data.get("page_context") if isinstance(data.get("page_context"), dict) else {}
+    else:
+        products = _zoho_product_rows_for_org(
+            service,
+            organization_id,
+            category_id=category_id,
+            include_descendants=include_descendants,
+            max_rows=limit_applied,
+        )
 
     exclude_pid = (
         (request.GET.get("exclude_product_id") or request.GET.get("exclude_zoho_product_id") or "")
@@ -1050,20 +1244,16 @@ def _multi_account_product_list_response(request, account, organization_id: str)
             if str(p.get("product_id") or p.get("item_id") or p.get("id") or "").strip() != exclude_pid
         ]
 
-    limit_raw = (request.GET.get("limit") or "").strip()
-    limit_applied = None
-    if limit_raw:
-        try:
-            lim = int(limit_raw)
-        except ValueError:
-            lim = 0
-        if lim > 0:
-            limit_applied = min(lim, 200)
-            products = products[:limit_applied]
+    if limit_applied is not None:
+        products = products[:limit_applied]
 
-    _enrich_zoho_list_product_rows_from_detail(service, organization_id, products)
+    _enrich_zoho_list_product_rows_from_detail(
+        service,
+        organization_id,
+        products,
+        store=store,
+    )
 
-    store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
     store_domain = (getattr(store, "zoho_store_domain", "") or "").strip() if store else ""
     product_summaries = [_product_summary(p, store_domain=store_domain) for p in products]
     if store:
@@ -1098,14 +1288,34 @@ def _multi_account_product_list_response(request, account, organization_id: str)
         "count": len(product_summaries),
         "products": product_summaries,
     }
+    if paginated:
+        payload["page"] = page_context.get("page", page_num)
+        payload["per_page"] = page_context.get("per_page", per_page)
+        payload["has_more_page"] = bool(page_context.get("has_more_page"))
+    else:
+        payload["all"] = True
     if exclude_pid:
         payload["exclude_product_id"] = exclude_pid
     if limit_applied is not None:
         payload["limit"] = limit_applied
+    _set_cached_product_list_payload(cache_key, payload)
     return Response(payload)
 
 
 class MultiAccountZohoProductListAPIView(APIView):
+    """
+    List Zoho Commerce products for one account + organization.
+
+    Default: page 1, 50 per page (one Zoho API call). Use ?page=2 for next page.
+
+    Query params:
+      - page (optional, default 1)
+      - per_page (optional, default 50; allowed: 10, 25, 50, 100, 200)
+      - all=true — fetch entire catalog (slow; for sync/backup)
+      - limit — with all mode, cap rows after full fetch (legacy)
+      - category_id, include_descendants, exclude_product_id
+    """
+
     def get(self, request, account_id, organization_id):
         try:
             account = ZohoCommerceAccount.objects.get(id=account_id, is_active=True)

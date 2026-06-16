@@ -58,6 +58,11 @@ from .reports import (
     AdminReportExcelExportAPIView,
     AdminReportPdfExportAPIView,
 )
+from .roles import (
+    AdminPermissionListAPIView,
+    AdminRoleDetailAPIView,
+    AdminRoleListCreateAPIView,
+)
 from .super_coins import (
     AdminSuperCoinsCustomerAPIView,
     AdminSuperCoinsSettingsAPIView,
@@ -126,6 +131,9 @@ urlpatterns = [
     path('users/<int:pk>/', AdminUserDetailUpdateAPIView.as_view(), name='admin-users-detail'),
     path('users/deactivate/', AdminUserDeactivateAPIView.as_view(), name='admin-users-deactivate'),
     path('users/reactivate/', AdminUserReactivateAPIView.as_view(), name='admin-users-reactivate'),
+    path('roles/', AdminRoleListCreateAPIView.as_view(), name='admin-roles-list-create'),
+    path('roles/detail/', AdminRoleDetailAPIView.as_view(), name='admin-roles-detail'),
+    path('roles/permissions/', AdminPermissionListAPIView.as_view(), name='admin-roles-permissions'),
     path('reports/cart-abandonment/', AdminCartAbandonmentReportAPIView.as_view(), name='admin-reports-cart-abandonment'),
     path('reports/refunds/', AdminRefundsReportAPIView.as_view(), name='admin-reports-refunds'),
     path('reports/export/excel/', AdminReportExcelExportAPIView.as_view(), name='admin-reports-export-excel'),

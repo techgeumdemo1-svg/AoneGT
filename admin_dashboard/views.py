@@ -19,6 +19,7 @@ from accounts.models import PasswordResetOTP
 from shop.models import Order, OrderReturn
 from .auth_login import admin_login_requires_mfa, send_admin_login_otp
 from .models import AdminLoginOTP
+from .rbac import get_user_role, infer_permission_code, user_has_permission_code
 from .serializers import (
     AdminForgotPasswordSerializer,
     AdminLoginSerializer,
@@ -37,11 +38,34 @@ User = get_user_model()
 class IsStaffUser(BasePermission):
     def has_permission(self, request, view):
         user = request.user
-        return bool(
+        ok = bool(
             user
             and user.is_authenticated
             and (user.is_staff or user.is_superuser)
         )
+        if not ok:
+            return False
+        if user.is_superuser:
+            return True
+
+        required_codes = getattr(view, "required_permission_codes", None)
+        if required_codes is None:
+            inferred = infer_permission_code(request)
+            required_codes = [inferred] if inferred else []
+
+        if not required_codes:
+            return True
+
+        role = get_user_role(user)
+        if role is None:
+            self.message = "No admin role assigned. Contact Super Admin."
+            return False
+
+        for code in required_codes:
+            if code and not user_has_permission_code(user, code):
+                self.message = f"Access denied. Missing permission: {code}"
+                return False
+        return True
 
 
 class AdminLoginAPIView(APIView):
