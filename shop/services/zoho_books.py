@@ -363,6 +363,29 @@ def books_void_sales_order(salesorder_id: str, *, store=None) -> dict[str, Any]:
     return salesorder if isinstance(salesorder, dict) else payload
 
 
+def books_add_sales_order_comment(
+    salesorder_id: str,
+    description: str,
+    *,
+    store=None,
+) -> dict[str, Any]:
+    """Add an internal comment/history note to a Zoho Books sales order."""
+    salesorder_id = (salesorder_id or '').strip()
+    text = (description or '').strip()
+    if not salesorder_id:
+        raise ZohoBooksError('salesorder_id is required to add sales order comment.')
+    if not text:
+        raise ZohoBooksError('description is required to add sales order comment.')
+    payload = _books_request(
+        'POST',
+        f'salesorders/{salesorder_id}/comments',
+        store=store,
+        json_data={'description': text[:2000]},
+    )
+    comment = payload.get('comment')
+    return comment if isinstance(comment, dict) else payload
+
+
 def invoice_belongs_to_sales_order(invoice: dict[str, Any], salesorder_id: str) -> bool:
     """True when the invoice was created from the given Zoho Books sales order."""
     salesorder_id = (salesorder_id or '').strip()

@@ -13,7 +13,7 @@ class UserAdmin(BaseUserAdmin):
         ('Personal info', {'fields': ('first_name', 'last_name', 'phone')}),
         ('Loyalty & Wallet', {'fields': ('points_balance', 'credit_balance_aed')}),
         ('Zoho Books', {'fields': ('zoho_books_contact_id',)}),
-        ('Permissions', {'fields': ('is_active', 'is_staff', 'is_superuser', 'groups', 'user_permissions')}),
+        ('Permissions', {'fields': ('is_active', 'is_staff', 'is_superuser', 'admin_mfa_enabled', 'groups', 'user_permissions')}),
         ('Important dates', {'fields': ('last_login',)}),
     )
     add_fieldsets = (

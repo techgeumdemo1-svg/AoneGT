@@ -17,6 +17,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from accounts.models import PasswordResetOTP
 from shop.models import Order, OrderReturn
+from .auth_login import admin_login_requires_mfa, send_admin_login_otp
 from .models import AdminLoginOTP
 from .serializers import (
     AdminForgotPasswordSerializer,
@@ -44,7 +45,12 @@ class IsStaffUser(BasePermission):
 
 
 class AdminLoginAPIView(APIView):
-    """Step 1: email + password → send login OTP to email."""
+    """
+    Step 1: email + password.
+
+    If MFA is disabled for the user → JWT tokens immediately.
+    If MFA is enabled → email OTP sent; complete login at verify-otp.
+    """
 
     throttle_classes = [AdminLoginOTPThrottle]
 
@@ -53,39 +59,20 @@ class AdminLoginAPIView(APIView):
         serializer.is_valid(raise_exception=True)
         user = serializer.validated_data["user"]
 
-        if getattr(settings, "ADMIN_LOGIN_SKIP_OTP", False):
+        if not admin_login_requires_mfa(user):
             return Response(build_admin_login_response(user), status=status.HTTP_200_OK)
 
+        ok, err = send_admin_login_otp(user)
+        if not ok:
+            return err
+
         to_email = (user.email or "").strip().lower()
-        if not to_email or "@" not in to_email:
-            return Response(
-                {"detail": "Account email is invalid."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        AdminLoginOTP.objects.filter(user=user, is_used=False).update(is_used=True)
-        otp = AdminLoginOTP.objects.create(user=user)
-        subject = "AoneGt Admin Login Verification"
-        message = (
-            f"Your admin login verification code is: {otp.otp_code}\n"
-            "This code expires in 10 minutes.\n\n"
-            "If you did not attempt to log in, ignore this email."
-        )
-        try:
-            send_mail(subject, message, settings.DEFAULT_FROM_EMAIL, [to_email], fail_silently=False)
-        except Exception as exc:
-            otp.delete()
-            logger.exception("admin-login: SMTP failed (%s)", exc)
-            return Response(
-                {"detail": "Could not send verification email. Try again later."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-
         return Response(
             {
+                "mfa_required": True,
+                "requires_otp": True,
                 "message": "A login verification code was sent to your email.",
                 "email": to_email,
-                "requires_otp": True,
             },
             status=status.HTTP_200_OK,
         )

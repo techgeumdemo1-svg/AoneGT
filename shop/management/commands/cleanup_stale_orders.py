@@ -10,6 +10,7 @@ Business logic is unchanged — calls the same
 reconcile_or_cancel_stale_order() function.
 """
 
+import logging
 from datetime import timedelta
 
 from django.core.management.base import BaseCommand
@@ -17,6 +18,8 @@ from django.utils import timezone
 
 from shop.models import Order
 from shop.services.geidea import reconcile_or_cancel_stale_order
+
+logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
@@ -48,6 +51,7 @@ class Command(BaseCommand):
 
         count = stale_orders.count()
         self.stdout.write(f'Stale order cleanup — found {count} stale order(s) (PENDING > 2 hours).')
+        logger.info('Stale order cleanup — found %d stale orders.', count)
 
         if count == 0:
             self.stdout.write(self.style.SUCCESS('No stale orders to process.'))
@@ -69,8 +73,9 @@ class Command(BaseCommand):
             try:
                 reconcile_or_cancel_stale_order(order)
                 ok += 1
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 failed += 1
+                logger.exception('Failed to reconcile/cancel order %s', order.pk)
                 self.stdout.write(
                     self.style.ERROR(f'  order={order.pk} failed: {exc}')
                 )

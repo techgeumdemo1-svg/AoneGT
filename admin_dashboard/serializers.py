@@ -12,6 +12,7 @@ User = get_user_model()
 def build_admin_login_response(user):
     refresh = RefreshToken.for_user(user)
     return {
+        "mfa_required": False,
         "user": {
             "id": user.id,
             "first_name": user.first_name,
@@ -19,6 +20,7 @@ def build_admin_login_response(user):
             "email": user.email,
             "is_staff": user.is_staff,
             "is_superuser": user.is_superuser,
+            "admin_mfa_enabled": bool(getattr(user, "admin_mfa_enabled", False)),
         },
         "tokens": {
             "refresh": str(refresh),
@@ -144,6 +146,7 @@ class AdminMeSerializer(serializers.ModelSerializer):
             "is_staff",
             "is_superuser",
             "is_active",
+            "admin_mfa_enabled",
             "created_at",
         ]
         read_only_fields = fields
