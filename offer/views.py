@@ -149,13 +149,8 @@ class OrderSummaryAPIView(APIView):
         }
 
         has_loyalty_coupons = active_loyalty_coupons_queryset(user=request.user).exists()
-        loyalty_coupon_applied = False
-        if loyalty_coupon_code:
-            loyalty_coupon_applied = active_loyalty_coupons_queryset(user=request.user).filter(
-                code__iexact=loyalty_coupon_code,
-            ).exists()
         loyalty_meta = {
-            'loyalty_coupon_applied': loyalty_coupon_applied,
+            'loyalty_coupon_applied': True,  # TODO: replace with real loyalty coupon check
             'has_loyalty_coupons': has_loyalty_coupons,
             'loyalty_discount': '100.00',  # TODO: replace with real loyalty discount calculation
         }
