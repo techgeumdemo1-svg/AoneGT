@@ -19,6 +19,10 @@ def _zoho_product_detail_cache_key(organization_id, product_id) -> str:
     return f"pdetail:{organization_id}:{product_id}"
 
 
+def _zoho_category_detail_cache_key(organization_id, category_id) -> str:
+    return f"cdetail:{organization_id}:{category_id}"
+
+
 class ZohoIntegrationError(Exception):
     pass
 
@@ -312,6 +316,13 @@ class ZohoCommerceService:
         return _get_json_or_raise_error(response, label="categories request")
 
     def get_category_detail(self, organization_id, category_id):
+        cache_ttl = max(0, int(getattr(settings, "ZOHO_CATEGORY_LIST_CACHE_SECONDS", 300) or 0))
+        cache_key = _zoho_category_detail_cache_key(organization_id, category_id)
+        if cache_ttl > 0:
+            cached = _zoho_api_cache().get(cache_key)
+            if isinstance(cached, dict):
+                return cached
+
         url = f"{self.commerce_base_url}/store/api/v1/categories/{category_id}"
         params = {
             "organization_id": organization_id,
@@ -323,4 +334,7 @@ class ZohoCommerceService:
             timeout=30,
             label="category detail request",
         )
-        return _get_json_or_raise_error(response, label="category detail request")
+        data = _get_json_or_raise_error(response, label="category detail request")
+        if cache_ttl > 0:
+            _zoho_api_cache().set(cache_key, data, timeout=cache_ttl)
+        return data

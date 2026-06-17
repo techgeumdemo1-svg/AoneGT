@@ -892,52 +892,78 @@ def zoho_debug_sites(request):
     return JsonResponse(debug, status=400)
 
 
+def _parse_zoho_store_rows(account, data: dict) -> list[dict]:
+    stores = []
+    if isinstance(data, dict):
+        gs = data.get("get_sites") or {}
+        if isinstance(gs, dict):
+            my_sites = gs.get("my_sites")
+            if isinstance(my_sites, list):
+                stores = [s for s in my_sites if isinstance(s, dict)]
+        if not stores:
+            raw = data.get("sites") or data.get("stores") or []
+            stores = [s for s in raw if isinstance(s, dict)]
+    rows = []
+    for store in stores:
+        rows.append({
+            "account_id": account.id,
+            "account_name": account.name,
+            "account_email": account.email,
+            "store_id": store.get("zsite_id") or store.get("store_id"),
+            "site_name": store.get("site_title") or store.get("site_name"),
+            "primary_domain": store.get("primary_domain") or store.get("domain"),
+            "organization_id": store.get("zohofinance_orgid") or store.get("organization_id"),
+        })
+    return rows
+
+
+def _fetch_stores_for_account(account) -> tuple[list[dict], Optional[dict]]:
+    service = ZohoCommerceService(account)
+    try:
+        data = service.list_stores()
+        return _parse_zoho_store_rows(account, data), None
+    except Exception as e:
+        return [], {
+            "account_name": account.name,
+            "account_email": account.email,
+            "error": str(e),
+        }
+
+
+def _multi_account_store_list_payload() -> dict:
+    accounts = list(ZohoCommerceAccount.objects.filter(is_active=True))
+    result: list[dict] = []
+    errors: list[dict] = []
+    if not accounts:
+        return {"status": "success", "count": 0, "stores": [], "errors": []}
+
+    workers = min(5, max(1, len(accounts)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for rows, err in pool.map(_fetch_stores_for_account, accounts):
+            result.extend(rows)
+            if err:
+                errors.append(err)
+    return {
+        "status": "success",
+        "count": len(result),
+        "stores": result,
+        "errors": errors,
+    }
+
+
 class MultiAccountZohoStoreListAPIView(APIView):
     def get(self, request):
-        accounts = ZohoCommerceAccount.objects.filter(is_active=True)
+        ttl = max(0, int(getattr(settings, "ZOHO_STORE_LIST_CACHE_SECONDS", 300) or 0))
+        cache_key = f"zoho:store_list:{request.get_host()}"
+        if ttl > 0:
+            cached = caches["zoho"].get(cache_key)
+            if isinstance(cached, dict):
+                return Response(cached, status=status.HTTP_200_OK)
 
-        result = []
-        errors = []
-
-        for account in accounts:
-            service = ZohoCommerceService(account)
-            try:
-                data = service.list_stores()
-
-                # Zoho returns sites under get_sites.my_sites (see zs-site index API).
-                stores = []
-                if isinstance(data, dict):
-                    gs = data.get("get_sites") or {}
-                    if isinstance(gs, dict):
-                        my_sites = gs.get("my_sites")
-                        if isinstance(my_sites, list):
-                            stores = [s for s in my_sites if isinstance(s, dict)]
-                    if not stores:
-                        raw = data.get("sites") or data.get("stores") or []
-                        stores = [s for s in raw if isinstance(s, dict)]
-                for store in stores:
-                    result.append({
-                        "account_id": account.id,
-                        "account_name": account.name,
-                        "account_email": account.email,
-                        "store_id": store.get("zsite_id") or store.get("store_id"),
-                        "site_name": store.get("site_title") or store.get("site_name"),
-                        "primary_domain": store.get("primary_domain") or store.get("domain"),
-                        "organization_id": store.get("zohofinance_orgid") or store.get("organization_id"),
-                    })
-            except Exception as e:
-                errors.append({
-                    "account_name": account.name,
-                    "account_email": account.email,
-                    "error": str(e),
-                })
-
-        return Response({
-            "status": "success",
-            "count": len(result),
-            "stores": result,
-            "errors": errors,
-        }, status=status.HTTP_200_OK)
+        payload = _multi_account_store_list_payload()
+        if ttl > 0:
+            caches["zoho"].set(cache_key, payload, timeout=ttl)
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 def _zoho_product_rows_for_org(
@@ -2302,6 +2328,21 @@ _CATEGORY_DETAIL_IMAGE_MERGE_KEYS = (
 )
 
 
+def _category_list_cache_key(account_id: int, organization_id: str, request) -> str:
+    return "|".join(
+        [
+            "zoho:cat_list",
+            str(account_id),
+            str(organization_id),
+            (request.GET.get("category_id") or "").strip(),
+            str(_as_bool(request.GET.get("include_descendants"), default=True)),
+            str(_as_bool(request.GET.get("strict_category_images"), default=False)),
+            (request.GET.get("category_detail_limit") or "").strip(),
+            request.get_host(),
+        ]
+    )
+
+
 def _multi_account_category_list_response(
     request,
     account,
@@ -2309,6 +2350,13 @@ def _multi_account_category_list_response(
     *,
     skip_product_image_fallback: bool = False,
 ):
+    cache_ttl = max(0, int(getattr(settings, "ZOHO_CATEGORY_LIST_CACHE_SECONDS", 300) or 0))
+    cache_key = _category_list_cache_key(account.pk, organization_id, request)
+    if cache_ttl > 0:
+        cached = caches["zoho"].get(cache_key)
+        if isinstance(cached, dict):
+            return Response(cached, status=status.HTTP_200_OK)
+
     service = ZohoCommerceService(account)
     data = service.list_categories(organization_id=organization_id)
     categories = data.get("categories", []) or data.get("category", [])
@@ -2410,7 +2458,7 @@ def _multi_account_category_list_response(
     # One Zoho detail call per category without a list-time image — sequential calls
     # exceed gateway timeouts (e.g. Render). Fetch details in parallel (bounded).
     pending_ids = [cid for cid, row in ordered_pairs if not _extract_image_url(row)]
-    detail_cap = int(getattr(settings, "ZOHO_MAX_CATEGORY_DETAIL_FETCH", 24) or 24)
+    detail_cap = int(getattr(settings, "ZOHO_MAX_CATEGORY_DETAIL_FETCH", 12) or 12)
     raw_lim = (request.GET.get("category_detail_limit") or "").strip()
     if raw_lim:
         try:
@@ -2463,8 +2511,12 @@ def _multi_account_category_list_response(
             # Final fallback: use first product image inside this category,
             # so image_url remains a real Zoho CDN URL (cdn1.zohoecommerce.com/product-images/…).
             # Omit with ?strict_category_images=1 or the legacy strict-only grocery view flag.
+            product_fb_max = max(
+                0,
+                int(getattr(settings, "ZOHO_CATEGORY_PRODUCT_FALLBACK_MAX", 2) or 0),
+            )
             try:
-                search_category_ids = _descendant_category_ids(cid)
+                search_category_ids = _descendant_category_ids(cid)[:product_fb_max]
                 for search_cid in search_category_ids:
                     product_data = service.list_products(
                         organization_id=str(organization_id),
@@ -2498,7 +2550,7 @@ def _multi_account_category_list_response(
         for c in enriched_categories
     ]
 
-    return Response({
+    payload = {
         "status": "success",
         "account_id": account.id,
         "account_name": account.name,
@@ -2511,7 +2563,10 @@ def _multi_account_category_list_response(
         "category_detail_cap": detail_cap,
         "count": len(main_categories),
         "categories": main_categories,
-    })
+    }
+    if cache_ttl > 0:
+        caches["zoho"].set(cache_key, payload, timeout=cache_ttl)
+    return Response(payload)
 
 
 class MultiAccountZohoCategoryListAPIView(APIView):

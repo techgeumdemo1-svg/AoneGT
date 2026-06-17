@@ -333,6 +333,11 @@ ZOHO_COLLECTION_PROBE_IDS = os.getenv('ZOHO_COLLECTION_PROBE_IDS', '').strip()
 # In-memory cache TTL (seconds) for GET /zoho/multi/accounts/.../products/.../ full-list responses.
 ZOHO_PRODUCT_LIST_CACHE_SECONDS = int(os.getenv('ZOHO_PRODUCT_LIST_CACHE_SECONDS', '300') or '300')
 ZOHO_PRODUCT_DETAIL_CACHE_SECONDS = int(os.getenv('ZOHO_PRODUCT_DETAIL_CACHE_SECONDS', '600') or '600')
+ZOHO_STORE_LIST_CACHE_SECONDS = int(os.getenv('ZOHO_STORE_LIST_CACHE_SECONDS', '300') or '300')
+ZOHO_CATEGORY_LIST_CACHE_SECONDS = int(os.getenv('ZOHO_CATEGORY_LIST_CACHE_SECONDS', '300') or '300')
+ZOHO_MAX_CATEGORY_DETAIL_FETCH = int(os.getenv('ZOHO_MAX_CATEGORY_DETAIL_FETCH', '12') or '12')
+# Max list_products calls per category when resolving a tile image from products.
+ZOHO_CATEGORY_PRODUCT_FALLBACK_MAX = int(os.getenv('ZOHO_CATEGORY_PRODUCT_FALLBACK_MAX', '2') or '2')
 # GET /zoho/multi/best-deals/ source: admin | category | collection
 # Set SOURCE=collection + COLLECTION_ID to drive best deals from a Zoho storefront collection.
 ZOHO_BEST_DEALS_COLLECTION_ID = os.getenv('ZOHO_BEST_DEALS_COLLECTION_ID', '').strip()
