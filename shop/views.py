@@ -3271,6 +3271,109 @@ class GeideaStatusView(APIView):
         return Response(self._status_payload(order, request=request))
 
 
+class GeideaPollView(APIView):
+    """
+    GET /api/shop/geidea/poll/?order_id=<pk>&store_id=<pk>
+
+    Polling endpoint called repeatedly by the frontend while the user is on
+    the Geidea HPP. Designed to be called frequently (every ~3 s) during the
+    20 s polling window.
+
+    Logic:
+      1. Check DB payment_status — if PAID, return immediately.
+      2. If order is CANCELLED in DB, return cancelled.
+      3. If payment_status is PENDING, call Geidea directly via
+         fetch_geidea_orders_by_merchant_ref to get the live status and
+         update the DB accordingly:
+           - Success / Paid  → mark PAID (reconcile), return { "status": "paid" }
+           - Failed          → return { "status": "failed" } (order stays PENDING in DB,
+                               Geidea may still retry / user may retry payment)
+           - Cancelled       → return { "status": "cancelled" }
+           - No entry yet    → return { "status": "pending" }
+
+    Works for both payment_gateway and pay_by_link orders.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        order_id = request.query_params.get('order_id')
+        if not order_id:
+            return Response(
+                {'error': 'order_id is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            order = Order.objects.get(pk=order_id, user=request.user)
+        except Order.DoesNotExist:
+            return Response(
+                {'error': 'Order not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Step 1: DB already shows PAID — no Geidea call needed.
+        if order.payment_status == Order.PaymentStatus.PAID:
+            return Response({'status': 'paid'})
+
+        # Step 2: Order is cancelled in DB.
+        if order.status == Order.Status.CANCELLED:
+            return Response({'status': 'cancelled'})
+
+        # Step 3: Payment is PENDING — check Geidea directly.
+        if order.payment_status == Order.PaymentStatus.PENDING:
+            if not order.geidea_merchant_ref:
+                # Initiate was never called — nothing to poll yet.
+                return Response({'status': 'pending'})
+
+            orders_list = fetch_geidea_orders_by_merchant_ref(order.geidea_merchant_ref)
+
+            if not orders_list:
+                return Response({'status': 'pending'})
+
+            # Look for a successful paid entry first.
+            paid_entry = next(
+                (
+                    entry for entry in orders_list
+                    if entry.get('status') == 'Success' and entry.get('detailedStatus') == 'Paid'
+                ),
+                None,
+            )
+            if paid_entry:
+                # Reconcile — same logic as reconcile_missed_geidea_callback but
+                # we call it here so the DB is updated immediately.
+                from shop.services.geidea_reconcile import reconcile_missed_geidea_callback
+                reconcile_status, _steps = reconcile_missed_geidea_callback(order)
+                if reconcile_status == 'paid':
+                    return Response({'status': 'paid'})
+                # reconcile returned pending (e.g. atomic block failed) — still pending.
+                return Response({'status': 'pending'})
+
+            # Check for a failed entry (status == "Failed").
+            failed_entry = next(
+                (entry for entry in orders_list if entry.get('status') == 'Failed'),
+                None,
+            )
+            if failed_entry:
+                return Response({'status': 'failed'})
+
+            # Check for a cancelled entry (detailedStatus contains "Cancel").
+            cancelled_entry = next(
+                (
+                    entry for entry in orders_list
+                    if 'cancel' in (entry.get('detailedStatus') or '').lower()
+                ),
+                None,
+            )
+            if cancelled_entry:
+                return Response({'status': 'cancelled'})
+
+            # No conclusive status yet — still in progress.
+            return Response({'status': 'pending'})
+
+        # Fallback for NOT_REQUIRED (COD orders — should never reach this endpoint).
+        return Response({'status': 'pending'})
+
+
 class PayByLinkInitiateView(APIView):
     """
     POST /api/shop/paybylink/initiate/
