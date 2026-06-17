@@ -15,6 +15,8 @@ from .models import Coupon
 from .serializers import OrderSummaryRequestSerializer, StoreIdQuerySerializer
 from .services import (
     _as_decimal,
+    _json_dict,
+    _json_list,
     calculate_coupon_discount,
     coupon_is_applicable,
     get_applicable_coupons_for_store,
@@ -149,11 +151,38 @@ class OrderSummaryAPIView(APIView):
         }
 
         has_loyalty_coupons = active_loyalty_coupons_queryset(user=request.user).exists()
+
+        # Resolve loyalty coupon if code provided
+        loyalty_coupon_obj = None
+        loyalty_discount = Decimal('0.00')
+        loyalty_coupon_applied = False
+        loyalty_caution = None
+        if loyalty_coupon_code:
+            loyalty_coupon_obj = (
+                active_loyalty_coupons_queryset(user=request.user)
+                .filter(code=loyalty_coupon_code)
+                .first()
+            )
+            if loyalty_coupon_obj is not None:
+                loyalty_discount = Decimal(str(loyalty_coupon_obj.amount_aed or '0')).quantize(Decimal('0.01'))
+                loyalty_coupon_applied = True
+                # Caution: if coupon value exceeds subtotal, warn the user
+                if loyalty_discount > subtotal:
+                    wasted = (loyalty_discount - subtotal).quantize(Decimal('0.01'))
+                    loyalty_caution = (
+                        f'Your loyalty coupon value ({loyalty_discount} AED) exceeds the '
+                        f'product subtotal ({subtotal} AED). '
+                        f'{wasted} AED of the coupon value will be unused. '
+                        f'You may still apply it if you wish.'
+                    )
+
         loyalty_meta = {
-            'loyalty_coupon_applied': True,  # TODO: replace with real loyalty coupon check
+            'loyalty_coupon_applied': loyalty_coupon_applied,
             'has_loyalty_coupons': has_loyalty_coupons,
-            'loyalty_discount': '100.00',  # TODO: replace with real loyalty discount calculation
+            'loyalty_discount': str(loyalty_discount),
         }
+        if loyalty_caution:
+            loyalty_meta['loyalty_caution'] = loyalty_caution
 
         coupon = None
         if not coupon_code:
@@ -173,18 +202,31 @@ class OrderSummaryAPIView(APIView):
                         coupon_qs = coupon_qs.filter(org_id=org_id)
                     coupon = coupon_qs.first()
             if coupon is None:
-                breakdown = base_breakdown + [{'label': 'Total', 'value': base_total}]
+                if loyalty_coupon_applied and loyalty_discount > Decimal('0'):
+                    loy_taxable = max(subtotal - loyalty_discount, Decimal('0')).quantize(Decimal('0.01'))
+                    loy_vat = (loy_taxable * vat_percent / Decimal('100')).quantize(Decimal('0.01'))
+                    loy_total = (loy_taxable + loy_vat + shipping_amount).quantize(Decimal('0.01'))
+                    loy_vat_amount = loy_vat
+                else:
+                    loy_total = base_total
+                    loy_vat_amount = vat_amount
+                breakdown = (
+                    [{'label': 'Subtotal', 'value': subtotal}]
+                    + ([{'label': f'Loyalty Coupon ({loyalty_coupon_code})', 'value': -loyalty_discount}] if loyalty_coupon_applied else [])
+                    + shipping_lines
+                    + [{'label': f'VAT ({vat_percent}%)', 'value': loy_vat_amount}, {'label': 'Total', 'value': loy_total}]
+                )
                 return Response(
                     {
                         'coupon_applied': False,
                         'valid': True,
                         'subtotal': subtotal,
                         'vat_percent': str(vat_percent),
-                        'vat_amount': vat_amount,
+                        'vat_amount': loy_vat_amount,
                         **shipping_meta,
                         **loyalty_meta,
                         'coupon_discount': Decimal('0.00'),
-                        'total': base_total,
+                        'total': loy_total,
                         'breakdown': breakdown,
                         'product_details': product_details,
                     },
@@ -194,7 +236,20 @@ class OrderSummaryAPIView(APIView):
         if coupon is None:
             coupon = get_coupon_for_checkout(store, coupon_code)
         if coupon_code and coupon is None:
-            breakdown = base_breakdown + [{'label': 'Total', 'value': base_total}]
+            if loyalty_coupon_applied and loyalty_discount > Decimal('0'):
+                loy_taxable = max(subtotal - loyalty_discount, Decimal('0')).quantize(Decimal('0.01'))
+                loy_vat = (loy_taxable * vat_percent / Decimal('100')).quantize(Decimal('0.01'))
+                loy_total = (loy_taxable + loy_vat + shipping_amount).quantize(Decimal('0.01'))
+                loy_vat_amount = loy_vat
+            else:
+                loy_total = base_total
+                loy_vat_amount = vat_amount
+            breakdown = (
+                [{'label': 'Subtotal', 'value': subtotal}]
+                + ([{'label': f'Loyalty Coupon ({loyalty_coupon_code})', 'value': -loyalty_discount}] if loyalty_coupon_applied else [])
+                + shipping_lines
+                + [{'label': f'VAT ({vat_percent}%)', 'value': loy_vat_amount}, {'label': 'Total', 'value': loy_total}]
+            )
             return Response(
                 {
                     'coupon_applied': False,
@@ -202,11 +257,11 @@ class OrderSummaryAPIView(APIView):
                     'error': 'Coupon not found',
                     'subtotal': subtotal,
                     'vat_percent': str(vat_percent),
-                    'vat_amount': vat_amount,
+                    'vat_amount': loy_vat_amount,
                     **shipping_meta,
                     **loyalty_meta,
                     'coupon_discount': Decimal('0.00'),
-                    'total': base_total,
+                    'total': loy_total,
                     'breakdown': breakdown,
                     'product_details': product_details,
                 },
@@ -215,7 +270,20 @@ class OrderSummaryAPIView(APIView):
 
         allowed, reason = coupon_is_applicable(coupon, request.user, cart_items, subtotal)
         if not allowed:
-            breakdown = base_breakdown + [{'label': 'Total', 'value': base_total}]
+            if loyalty_coupon_applied and loyalty_discount > Decimal('0'):
+                loy_taxable = max(subtotal - loyalty_discount, Decimal('0')).quantize(Decimal('0.01'))
+                loy_vat = (loy_taxable * vat_percent / Decimal('100')).quantize(Decimal('0.01'))
+                loy_total = (loy_taxable + loy_vat + shipping_amount).quantize(Decimal('0.01'))
+                loy_vat_amount = loy_vat
+            else:
+                loy_total = base_total
+                loy_vat_amount = vat_amount
+            breakdown = (
+                [{'label': 'Subtotal', 'value': subtotal}]
+                + ([{'label': f'Loyalty Coupon ({loyalty_coupon_code})', 'value': -loyalty_discount}] if loyalty_coupon_applied else [])
+                + shipping_lines
+                + [{'label': f'VAT ({vat_percent}%)', 'value': loy_vat_amount}, {'label': 'Total', 'value': loy_total}]
+            )
             return Response(
                 {
                     'coupon_applied': False,
@@ -223,11 +291,11 @@ class OrderSummaryAPIView(APIView):
                     'error': reason,
                     'subtotal': subtotal,
                     'vat_percent': str(vat_percent),
-                    'vat_amount': vat_amount,
+                    'vat_amount': loy_vat_amount,
                     **shipping_meta,
                     **loyalty_meta,
                     'coupon_discount': Decimal('0.00'),
-                    'total': base_total,
+                    'total': loy_total,
                     'breakdown': breakdown,
                     'product_details': product_details,
                 },
@@ -274,60 +342,115 @@ class OrderSummaryAPIView(APIView):
         is_bxgy_coupon = (coupon.coupon_type or '').lower() == 'buyxgety'  # FIXED: identify bxgy
 
         if is_free_shipping_coupon:
-            # FIXED: For free_shipping the effective shipping charge is 0.
-            # VAT applies to the full product subtotal (no product discount exists).
-            # grand_total = subtotal + vat_on_subtotal + 0 (shipping is free).
-            effective_shipping = Decimal('0.00')  # FIXED: shipping waived
-            vat_amount = (subtotal * vat_percent / Decimal('100')).quantize(Decimal('0.01'))  # FIXED: VAT on full subtotal
-            final_total = (subtotal + vat_amount + effective_shipping).quantize(Decimal('0.01'))  # FIXED: no shipping cost
+            # Free shipping waives delivery_fee only — COD surcharge is a payment fee, not a shipping charge.
+            effective_shipping = cod_surcharge  # delivery_fee zeroed, cod_surcharge still applies
+            taxable_amount = max(subtotal - loyalty_discount, Decimal('0')).quantize(Decimal('0.01'))
+            vat_amount = (taxable_amount * vat_percent / Decimal('100')).quantize(Decimal('0.01'))
+            final_total = (taxable_amount + vat_amount + effective_shipping).quantize(Decimal('0.01'))
             if final_total < Decimal('0'):
                 final_total = Decimal('0.00')
-            # FIXED: coupon_discount shown to user = original shipping amount (what was waived)
-            shipping_discount_display = discount  # the waived shipping amount
+            # Discount shown = only the delivery_fee that was waived (not cod_surcharge)
+            shipping_discount_display = delivery_fee
         elif is_bxgy_coupon:
-            # FIXED: For buyxgety, the discount ONLY applies to the get-item (Y).
-            # The buy-item (X) in the cart still pays full price + full VAT.
-            # Do NOT subtract the get-item discount from the cart subtotal when computing VAT.
-            # subtotal here = buy-item(s) only (cart items). VAT must be on the full cart subtotal.
-            # The get-item's net price is already 0 (or reduced) — its VAT contribution is 0.
-            # grand_total = (subtotal + vat_on_subtotal) + (get_item_net = 0) + shipping
+            # For buyxgety: discount only on get-item (Y). Loyalty splits across cart items only (not get-item).
+            # VAT applies to: (cart subtotal - loyalty_discount) + bxgy_net (get-item net price)
             effective_shipping = shipping_amount
-            vat_amount = (subtotal * vat_percent / Decimal('100')).quantize(Decimal('0.01'))  # FIXED: VAT on full cart subtotal
-            # get-item net cost = get_line_total - discount (e.g. 50 - 50 = 0 for 100% off)
             bxgy_net = Decimal('0.00')
             if bxgy_get_item is not None:
                 bxgy_gross = _as_decimal(bxgy_get_item.get('line_total') or '0')
                 bxgy_disc = _as_decimal(bxgy_get_item.get('discount') or '0')
-                bxgy_net = max(bxgy_gross - bxgy_disc, Decimal('0')).quantize(Decimal('0.01'))  # FIXED: net cost of get-item
-            final_total = (subtotal + vat_amount + bxgy_net + effective_shipping).quantize(Decimal('0.01'))  # FIXED
+                bxgy_net = max(bxgy_gross - bxgy_disc, Decimal('0')).quantize(Decimal('0.01'))
+            cart_taxable = max(subtotal - loyalty_discount, Decimal('0')).quantize(Decimal('0.01'))
+            taxable_amount = (cart_taxable + bxgy_net).quantize(Decimal('0.01'))
+            vat_amount = (taxable_amount * vat_percent / Decimal('100')).quantize(Decimal('0.01'))
+            final_total = (taxable_amount + vat_amount + effective_shipping).quantize(Decimal('0.01'))
             if final_total < Decimal('0'):
                 final_total = Decimal('0.00')
-            shipping_discount_display = discount  # the get-item discount amount shown to user
+            shipping_discount_display = discount
         elif discount > Decimal('0.00'):
-            # FIXED: transaction / item — VAT on subtotal after product discount
             effective_shipping = shipping_amount
-            taxable_amount = max(subtotal - discount, Decimal('0')).quantize(Decimal('0.01'))  # FIXED: guard against negative
+            is_item_coupon = (coupon.coupon_type or '').lower() == 'item'
+            if is_item_coupon and loyalty_coupon_applied and loyalty_discount > Decimal('0') and cart_items:
+                # Item coupon + loyalty: compute per-product to correctly floor at 0.
+                # Loyalty splits equally across all cart products (by product count, not quantity).
+                num_products = len(cart_items)
+                loyalty_per_product = (loyalty_discount / Decimal(str(num_products))).quantize(Decimal('0.01'))
+                # Identify eligible product ids for the item coupon
+                eligible_products_cfg = _json_dict(coupon.eligible_products) if hasattr(coupon, 'eligible_products') else {}
+                eligible_ids = {
+                    str((x.get('product_id') or x.get('id') or x) if isinstance(x, dict) else x).strip()
+                    for x in (_json_list(eligible_products_cfg.get('products')) or [])
+                    if str((x.get('product_id') or x.get('id') or x) if isinstance(x, dict) else x).strip()
+                }
+                eligible_cats = {
+                    str((x.get('category_id') or x.get('id') or x) if isinstance(x, dict) else x).strip()
+                    for x in (_json_list(eligible_products_cfg.get('categories')) or [])
+                    if str((x.get('category_id') or x.get('id') or x) if isinstance(x, dict) else x).strip()
+                }
+                eligible_cols = {
+                    str((x.get('collection_id') or x.get('id') or x) if isinstance(x, dict) else x).strip()
+                    for x in (_json_list(eligible_products_cfg.get('collections')) or [])
+                    if str((x.get('collection_id') or x.get('id') or x) if isinstance(x, dict) else x).strip()
+                }
+                taxable_amount = Decimal('0.00')
+                for item in cart_items:
+                    item_line = _as_decimal(item.get('line_total', '0'))
+                    item_pid = str(item.get('product_id') or '').strip()
+                    item_cat = str(item.get('category_id') or '').strip()
+                    item_col = str(item.get('collection_id') or '').strip()
+                    is_eligible = (
+                        (eligible_ids and item_pid in eligible_ids)
+                        or (eligible_cats and item_cat in eligible_cats)
+                        or (eligible_cols and item_col in eligible_cols)
+                        or (not eligible_ids and not eligible_cats and not eligible_cols)
+                    )
+                    item_after_loyalty = max(item_line - loyalty_per_product, Decimal('0')).quantize(Decimal('0.01'))
+                    if is_eligible:
+                        item_after_all = max(item_after_loyalty - discount, Decimal('0')).quantize(Decimal('0.01'))
+                    else:
+                        item_after_all = item_after_loyalty
+                    taxable_amount += item_after_all
+                taxable_amount = taxable_amount.quantize(Decimal('0.01'))
+            else:
+                # transaction coupon (or item coupon without loyalty): flat subtraction
+                taxable_amount = max(subtotal - discount - loyalty_discount, Decimal('0')).quantize(Decimal('0.01'))
             vat_amount = (taxable_amount * vat_percent / Decimal('100')).quantize(Decimal('0.01'))
             final_total = (taxable_amount + vat_amount + effective_shipping).quantize(Decimal('0.01'))
             if final_total < Decimal('0'):
                 final_total = Decimal('0.00')
             shipping_discount_display = discount
         else:
+            # No offer coupon: loyalty discount reduces taxable base
             effective_shipping = shipping_amount
-            final_total = base_total  # FIXED: no discount, use pre-calculated base_total unchanged
+            if loyalty_discount > Decimal('0'):
+                taxable_amount = max(subtotal - loyalty_discount, Decimal('0')).quantize(Decimal('0.01'))
+                vat_amount = (taxable_amount * vat_percent / Decimal('100')).quantize(Decimal('0.01'))
+                final_total = (taxable_amount + vat_amount + effective_shipping).quantize(Decimal('0.01'))
+                if final_total < Decimal('0'):
+                    final_total = Decimal('0.00')
+            else:
+                final_total = base_total
             shipping_discount_display = Decimal('0.00')
 
-        # FIXED: rebuild shipping breakdown lines using effective_shipping so free-shipping
-        # coupon shows Delivery (Free) instead of the original charge.
+        # rebuild shipping breakdown lines for free-shipping coupon:
+        # delivery_fee is waived (shows as free), cod_surcharge still applies.
         if is_free_shipping_coupon:
-            effective_shipping_lines = [{'label': 'Delivery (Free)', 'value': Decimal('0.00')}]  # FIXED
+            effective_shipping_lines = [{'label': 'Delivery (Free)', 'value': Decimal('0.00')}]
+            if cod_surcharge > Decimal('0'):
+                effective_shipping_lines.append({'label': 'COD Surcharge', 'value': cod_surcharge})
         else:
             effective_shipping_lines = shipping_lines  # unchanged for other coupon types
+
+        loyalty_breakdown_line = (
+            [{'label': f'Loyalty Coupon ({loyalty_coupon_code})', 'value': -loyalty_discount}]
+            if loyalty_coupon_applied and loyalty_discount > Decimal('0') else []
+        )
 
         breakdown = (
             [{'label': 'Subtotal', 'value': subtotal}]
             + [{'label': f'Coupon Discount ({coupon.coupon_code})', 'value': -shipping_discount_display}]
             + effective_shipping_lines  # FIXED: use effective shipping lines
+            + loyalty_breakdown_line
             + [
                 {'label': f'VAT ({vat_percent}%)', 'value': vat_amount},
                 {'label': 'Total', 'value': final_total},
