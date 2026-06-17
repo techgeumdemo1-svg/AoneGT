@@ -2304,8 +2304,6 @@ class MultiAccountZohoProductDetailQueryAPIView(APIView):
             }, status=400)
 
 
-# Merged from Zoho category detail (and descendants) so _extract_image_url can read
-# ``<img src="https://cdn1.zohoecommerce.com/...">`` from description HTML.
 _CATEGORY_DETAIL_IMAGE_MERGE_KEYS = (
     "image_url",
     "image",
@@ -2328,19 +2326,48 @@ _CATEGORY_DETAIL_IMAGE_MERGE_KEYS = (
 )
 
 
+_CATEGORY_LIST_DEFAULT_PER_PAGE = 20
+
+
+def _category_list_fetch_mode(request) -> str:
+    """paginated (default) or all (full menu via ?all=true)."""
+    return "all" if _as_bool(request.GET.get("all"), default=False) else "paginated"
+
+
+def _parse_category_list_page_params(request) -> Tuple[int, int]:
+    page_raw = (request.GET.get("page") or "").strip()
+    per_page_raw = (request.GET.get("per_page") or "").strip()
+    try:
+        page = max(1, int(page_raw or 1))
+    except ValueError:
+        page = 1
+    try:
+        per_page = int(per_page_raw or _CATEGORY_LIST_DEFAULT_PER_PAGE)
+    except ValueError:
+        per_page = _CATEGORY_LIST_DEFAULT_PER_PAGE
+    allowed = (10, 20, 25, 50, 100)
+    if per_page not in allowed:
+        per_page = 100 if per_page > 100 else min(allowed, key=lambda value: abs(value - per_page))
+    return page, per_page
+
+
 def _category_list_cache_key(account_id: int, organization_id: str, request) -> str:
-    return "|".join(
-        [
-            "zoho:cat_list",
-            str(account_id),
-            str(organization_id),
-            (request.GET.get("category_id") or "").strip(),
-            str(_as_bool(request.GET.get("include_descendants"), default=True)),
-            str(_as_bool(request.GET.get("strict_category_images"), default=False)),
-            (request.GET.get("category_detail_limit") or "").strip(),
-            request.get_host(),
-        ]
-    )
+    fetch_mode = _category_list_fetch_mode(request)
+    page_num, per_page = _parse_category_list_page_params(request)
+    parts = [
+        "zoho:cat_list",
+        str(account_id),
+        str(organization_id),
+        (request.GET.get("category_id") or "").strip(),
+        str(_as_bool(request.GET.get("include_descendants"), default=True)),
+        str(_as_bool(request.GET.get("strict_category_images"), default=False)),
+        (request.GET.get("category_detail_limit") or "").strip(),
+        fetch_mode,
+    ]
+    if fetch_mode == "paginated":
+        parts.extend([str(page_num), str(per_page)])
+    parts.append(request.get_host())
+    return "|".join(parts)
 
 
 def _multi_account_category_list_response(
@@ -2398,6 +2425,18 @@ def _multi_account_category_list_response(
     else:
         # Default: return top-level menu categories (current behavior).
         main_categories = _menu_categories_for_response(categories)
+
+    fetch_mode = _category_list_fetch_mode(request)
+    page_num, per_page = _parse_category_list_page_params(request)
+    paginated = fetch_mode == "paginated"
+    total_category_count = len(main_categories)
+    if paginated:
+        start = (page_num - 1) * per_page
+        end = start + per_page
+        main_categories = main_categories[start:end]
+        has_more_page = end < total_category_count
+    else:
+        has_more_page = False
 
     store = Store.objects.filter(zoho_org_id=str(organization_id)).first()
     store_domain = (getattr(store, "zoho_store_domain", "") or "").strip() if store else ""
@@ -2564,6 +2603,14 @@ def _multi_account_category_list_response(
         "count": len(main_categories),
         "categories": main_categories,
     }
+    if paginated:
+        payload["page"] = page_num
+        payload["per_page"] = per_page
+        payload["total_count"] = total_category_count
+        payload["has_more_page"] = has_more_page
+    else:
+        payload["all"] = True
+        payload["total_count"] = total_category_count
     if cache_ttl > 0:
         caches["zoho"].set(cache_key, payload, timeout=cache_ttl)
     return Response(payload)
@@ -2730,7 +2777,13 @@ class MultiAccountZohoCollectionListQueryAPIView(APIView):
 
 
 class MultiAccountZohoCategoryListQueryAPIView(APIView):
-    """GET …/zoho/multi/categories/?account_id=&organization_id= — Zoho category menu + image enrichment."""
+    """
+    GET …/zoho/multi/categories/?account_id=&organization_id=
+
+    Default: page 1, 20 categories per page (image enrichment only for that page).
+    Use ?all=true for the full menu (slower). Use ?strict_category_images=1 to skip
+    product thumbnail fallback. Optional ?page= & ?per_page=.
+    """
 
     skip_product_image_fallback = False
 
