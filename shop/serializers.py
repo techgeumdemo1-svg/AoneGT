@@ -12,6 +12,7 @@ from shop.services.delivery_zones import get_shipping_fee
 from shop.services.order_tracking import (
     cancelled_at,
     ensure_pending_recorded,
+    get_tracking_history,
     tracking_stage_at,
 )
 from shop.services.zoho_commerce import ZohoCommerceError, ZohoCommerceService
@@ -633,9 +634,24 @@ def _tracking_stage_index(stage_key: str) -> int:
 def _effective_customer_tracking_stage(order: Order) -> str:
     stage = (getattr(order, 'customer_tracking_stage', '') or '').strip()
     if stage == 'confirmed':
-        return 'packed'
+        stage = 'packed'
+
+    pipeline_keys = [key for key, _ in ORDER_CUSTOMER_TRACKING_PIPELINE]
+    history = get_tracking_history(order)
+    inferred_key = None
+    inferred_idx = -1
+    for idx, key in enumerate(pipeline_keys):
+        if key in history:
+            inferred_idx = idx
+            inferred_key = key
+
+    field_idx = pipeline_keys.index(stage) if stage in pipeline_keys else -1
+    if inferred_idx > field_idx and inferred_key:
+        return inferred_key
     if stage and stage in ORDER_CUSTOMER_TRACKING_STAGE_LABELS:
         return stage
+    if inferred_key:
+        return inferred_key
     return 'pending'
 
 
@@ -669,6 +685,7 @@ class OrderSerializer(serializers.ModelSerializer):
     can_reorder = serializers.SerializerMethodField()
     can_return = serializers.SerializerMethodField()
     can_cancel = serializers.SerializerMethodField()
+    cancel_blocked_reason = serializers.SerializerMethodField()
     return_status = serializers.SerializerMethodField()
     order_date = serializers.SerializerMethodField()
     refunded_amount = serializers.SerializerMethodField()
@@ -687,7 +704,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'credit_refunded_remainder',
             'subtotal', 'vat_percent', 'vat_amount', 'shipping_amount', 'total',
             'order_code', 'display_status', 'tracking', 'items_count',
-            'can_reorder', 'can_return', 'can_cancel', 'return_status', 'order_date',
+            'can_reorder', 'can_return', 'can_cancel', 'cancel_blocked_reason', 'return_status', 'order_date',
             'return_eligible_lines', 'review_pending_lines', 'review_pending_count',
             'points_earned', 'payment_method_label',
             'shipping_name', 'shipping_phone', 'shipping_address', 'shipping_city',
@@ -719,7 +736,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'zoho_books_salesordered_at', 'zoho_books_salesorder_error',
             'zoho_books_payment_id', 'zoho_books_paid_at', 'zoho_books_payment_error',
             'order_code', 'display_status', 'tracking', 'items_count',
-            'can_reorder', 'can_return', 'can_cancel', 'return_status', 'order_date',
+            'can_reorder', 'can_return', 'can_cancel', 'cancel_blocked_reason', 'return_status', 'order_date',
             'return_eligible_lines', 'review_pending_lines', 'review_pending_count',
             'points_earned', 'payment_method_label',
             'returned_total', 'balance_remaining', 'refunded_amount', 'net_paid',
@@ -894,6 +911,11 @@ class OrderSerializer(serializers.ModelSerializer):
         from shop.services.order_cancel import order_cancellation_blocked_reason
 
         return order_cancellation_blocked_reason(obj, customer=True) is None
+
+    def get_cancel_blocked_reason(self, obj):
+        from shop.services.order_cancel import order_cancellation_blocked_reason
+
+        return order_cancellation_blocked_reason(obj, customer=True)
 
     def _order_return_status(self, obj):
         total = Decimal(str(obj.total or '0'))
@@ -1076,11 +1098,11 @@ class CheckoutSerializer(serializers.Serializer):
             .prefetch_related('items__product', 'items__store')
             .first()
         )
-        if not cart:
-            raise serializers.ValidationError({'cart': 'No cart found.'})
-        checkout_items = [i for i in cart.items.all() if i.store_id == store.pk]
+        checkout_items = []
+        if cart:
+            checkout_items = [i for i in cart.items.all() if i.store_id == store.pk]
         if not checkout_items:
-            raise serializers.ValidationError({'cart': 'Cart has no items for this store.'})
+            raise serializers.ValidationError({'cart': 'No items selected'})
         attrs['cart'] = cart
         attrs['checkout_items'] = checkout_items
 

@@ -107,3 +107,56 @@ class AdminActivityLog(models.Model):
 
     def __str__(self):
         return f"{self.category}:{self.action} ({self.created_at})"
+
+
+class AdminPermission(models.Model):
+    code = models.CharField(max_length=64, unique=True)
+    name = models.CharField(max_length=120)
+    module = models.CharField(max_length=64)
+    description = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["module", "code"]
+
+    def __str__(self):
+        return f"{self.code}"
+
+
+class AdminRole(models.Model):
+    name = models.CharField(max_length=64, unique=True)
+    is_system = models.BooleanField(default=False)
+    permissions = models.ManyToManyField(
+        AdminPermission,
+        related_name="roles",
+        blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+class AdminUserRole(models.Model):
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="admin_role_binding",
+    )
+    role = models.ForeignKey(
+        AdminRole,
+        on_delete=models.CASCADE,
+        related_name="user_bindings",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.user_id} -> {self.role_id}"

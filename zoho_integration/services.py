@@ -1,5 +1,26 @@
 import requests
 import time
+from typing import Optional
+
+from django.conf import settings
+from django.core.cache import caches
+
+
+def _zoho_api_cache():
+    return caches['zoho']
+
+
+def _zoho_product_list_rows_cache_key(organization_id, category_id, per_page: int) -> str:
+    cat = (category_id or "").strip() or "_all_"
+    return f"plist_rows:{organization_id}:{cat}:{per_page}"
+
+
+def _zoho_product_detail_cache_key(organization_id, product_id) -> str:
+    return f"pdetail:{organization_id}:{product_id}"
+
+
+def _zoho_category_detail_cache_key(organization_id, category_id) -> str:
+    return f"cdetail:{organization_id}:{category_id}"
 
 
 class ZohoIntegrationError(Exception):
@@ -203,6 +224,11 @@ class ZohoCommerceService:
         )
         return _get_json_or_raise_error(response, label="products request")
 
+    @staticmethod
+    def _rows_from_products_payload(data: dict) -> list[dict]:
+        rows = data.get("products", []) or data.get("items", [])
+        return [row for row in rows if isinstance(row, dict)]
+
     def list_products_all_pages(
         self,
         organization_id,
@@ -210,6 +236,7 @@ class ZohoCommerceService:
         *,
         per_page: int = 200,
         max_pages: int = 100,
+        max_rows: Optional[int] = None,
     ) -> list[dict]:
         """
         Concatenate /store/api/v1/products across pages until has_more_page is false
@@ -218,6 +245,14 @@ class ZohoCommerceService:
         allowed = (10, 25, 50, 100, 200)
         if per_page not in allowed:
             per_page = 200
+
+        cache_ttl = max(0, int(getattr(settings, "ZOHO_PRODUCT_LIST_CACHE_SECONDS", 300) or 0))
+        cache_key = _zoho_product_list_rows_cache_key(organization_id, category_id, per_page)
+        if cache_ttl > 0 and max_rows is None:
+            cached_rows = _zoho_api_cache().get(cache_key)
+            if isinstance(cached_rows, list):
+                return cached_rows
+
         combined: list[dict] = []
         for page in range(1, max_pages + 1):
             data = self.list_products(
@@ -226,16 +261,27 @@ class ZohoCommerceService:
                 per_page=per_page,
                 category_id=category_id,
             )
-            rows = data.get("products", []) or data.get("items", [])
-            for row in rows:
-                if isinstance(row, dict):
-                    combined.append(row)
+            for row in self._rows_from_products_payload(data):
+                combined.append(row)
+                if max_rows is not None and len(combined) >= max_rows:
+                    return combined[:max_rows]
             page_ctx = data.get("page_context") if isinstance(data.get("page_context"), dict) else {}
             if not page_ctx.get("has_more_page"):
                 break
+        if max_rows is not None:
+            return combined[:max_rows]
+        if cache_ttl > 0:
+            _zoho_api_cache().set(cache_key, combined, timeout=cache_ttl)
         return combined
 
     def get_product_detail(self, organization_id, product_id):
+        cache_ttl = max(0, int(getattr(settings, "ZOHO_PRODUCT_DETAIL_CACHE_SECONDS", 600) or 0))
+        cache_key = _zoho_product_detail_cache_key(organization_id, product_id)
+        if cache_ttl > 0:
+            cached = _zoho_api_cache().get(cache_key)
+            if isinstance(cached, dict):
+                return cached
+
         url = f"{self.commerce_base_url}/store/api/v1/products/{product_id}"
         params = {
             "organization_id": organization_id,
@@ -247,7 +293,10 @@ class ZohoCommerceService:
             timeout=30,
             label="product detail request",
         )
-        return _get_json_or_raise_error(response, label="product detail request")
+        data = _get_json_or_raise_error(response, label="product detail request")
+        if cache_ttl > 0:
+            _zoho_api_cache().set(cache_key, data, timeout=cache_ttl)
+        return data
 
     def list_categories(self, organization_id, page=1, per_page=100):
         # per_page=200 may return 400 on some orgs; 100 is a safe default.
@@ -267,6 +316,13 @@ class ZohoCommerceService:
         return _get_json_or_raise_error(response, label="categories request")
 
     def get_category_detail(self, organization_id, category_id):
+        cache_ttl = max(0, int(getattr(settings, "ZOHO_CATEGORY_LIST_CACHE_SECONDS", 300) or 0))
+        cache_key = _zoho_category_detail_cache_key(organization_id, category_id)
+        if cache_ttl > 0:
+            cached = _zoho_api_cache().get(cache_key)
+            if isinstance(cached, dict):
+                return cached
+
         url = f"{self.commerce_base_url}/store/api/v1/categories/{category_id}"
         params = {
             "organization_id": organization_id,
@@ -278,4 +334,7 @@ class ZohoCommerceService:
             timeout=30,
             label="category detail request",
         )
-        return _get_json_or_raise_error(response, label="category detail request")
+        data = _get_json_or_raise_error(response, label="category detail request")
+        if cache_ttl > 0:
+            _zoho_api_cache().set(cache_key, data, timeout=cache_ttl)
+        return data

@@ -2,6 +2,7 @@
 .geidea_cleanup_scheduler.lock
 
 __pycache__/
+.zoho_api_cache/
 *.pyc
 *.pyo
 *.pyd

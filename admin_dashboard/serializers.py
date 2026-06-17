@@ -4,12 +4,21 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import AdminLoginOTP
+from .models import AdminLoginOTP, AdminPermission
 
 User = get_user_model()
 
 
 def build_admin_login_response(user):
+    role_binding = getattr(user, "admin_role_binding", None)
+    role = role_binding.role if role_binding and role_binding.role_id else None
+    permissions = []
+    if user.is_superuser:
+        permissions = ["*"]
+    elif role is not None:
+        permissions = list(
+            AdminPermission.objects.filter(roles=role).order_by("code").values_list("code", flat=True)
+        )
     refresh = RefreshToken.for_user(user)
     return {
         "mfa_required": False,
@@ -21,6 +30,12 @@ def build_admin_login_response(user):
             "is_staff": user.is_staff,
             "is_superuser": user.is_superuser,
             "admin_mfa_enabled": bool(getattr(user, "admin_mfa_enabled", False)),
+            "role": (
+                {"id": role.id, "name": role.name}
+                if role is not None
+                else None
+            ),
+            "permissions": permissions,
         },
         "tokens": {
             "refresh": str(refresh),
@@ -136,6 +151,9 @@ class AdminResetPasswordSerializer(serializers.Serializer):
 
 
 class AdminMeSerializer(serializers.ModelSerializer):
+    role = serializers.SerializerMethodField()
+    permissions = serializers.SerializerMethodField()
+
     class Meta:
         model = User
         fields = [
@@ -147,6 +165,24 @@ class AdminMeSerializer(serializers.ModelSerializer):
             "is_superuser",
             "is_active",
             "admin_mfa_enabled",
+            "role",
+            "permissions",
             "created_at",
         ]
         read_only_fields = fields
+
+    def get_role(self, obj):
+        binding = getattr(obj, "admin_role_binding", None)
+        if not binding or not binding.role_id:
+            return None
+        return {"id": binding.role_id, "name": binding.role.name}
+
+    def get_permissions(self, obj):
+        if obj.is_superuser:
+            return ["*"]
+        binding = getattr(obj, "admin_role_binding", None)
+        if not binding or not binding.role_id:
+            return []
+        return list(
+            AdminPermission.objects.filter(roles=binding.role).order_by("code").values_list("code", flat=True)
+        )

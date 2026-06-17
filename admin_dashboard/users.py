@@ -9,15 +9,16 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .activity_log_utils import record_admin_activity
-from .models import AdminActivityLog
+from .models import AdminActivityLog, AdminRole
 from .orders import _paginate_queryset
+from .roles import assign_role_to_user
 from .views import IsStaffUser
 
 User = get_user_model()
 
 
 def _admin_users_queryset():
-    return User.objects.filter(Q(is_staff=True) | Q(is_superuser=True))
+    return User.objects.filter(Q(is_staff=True) | Q(is_superuser=True)).select_related("admin_role_binding__role")
 
 
 def _admin_user_display_name(user) -> str:
@@ -33,6 +34,7 @@ class AdminUserListSerializer(serializers.ModelSerializer):
     user_id = serializers.IntegerField(source="id", read_only=True)
     name = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
+    role = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -47,6 +49,7 @@ class AdminUserListSerializer(serializers.ModelSerializer):
             "is_superuser",
             "is_active",
             "admin_mfa_enabled",
+            "role",
             "status",
             "last_login",
             "created_at",
@@ -59,6 +62,12 @@ class AdminUserListSerializer(serializers.ModelSerializer):
     def get_status(self, obj):
         return _admin_user_status_label(obj)
 
+    def get_role(self, obj):
+        binding = getattr(obj, "admin_role_binding", None)
+        if not binding or not binding.role_id:
+            return None
+        return {"id": binding.role_id, "name": binding.role.name}
+
 
 class AdminUserCreateSerializer(serializers.Serializer):
     first_name = serializers.CharField(max_length=150)
@@ -68,6 +77,7 @@ class AdminUserCreateSerializer(serializers.Serializer):
     phone = serializers.CharField(max_length=32, required=False, allow_blank=True, default="")
     is_staff = serializers.BooleanField(required=False, default=True)
     admin_mfa_enabled = serializers.BooleanField(required=False, default=False)
+    role_id = serializers.IntegerField(required=False, allow_null=True)
 
     def validate_email(self, value):
         email = (value or "").strip().lower()
@@ -85,15 +95,26 @@ class AdminUserCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError(list(exc.messages))
         return password
 
+    def validate_role_id(self, value):
+        if value is None:
+            return None
+        if not AdminRole.objects.filter(pk=value).exists():
+            raise serializers.ValidationError("Role not found.")
+        return value
+
     def create(self, validated_data):
+        role_id = validated_data.pop("role_id", None)
         password = validated_data.pop("password")
         is_staff = validated_data.pop("is_staff", True)
-        return User.objects.create_user(
+        user = User.objects.create_user(
             password=password,
             is_staff=is_staff,
             is_active=True,
             **validated_data,
         )
+        role = AdminRole.objects.filter(pk=role_id).first() if role_id else None
+        assign_role_to_user(user=user, role=role)
+        return user
 
 
 class AdminUserUpdateSerializer(serializers.Serializer):
@@ -104,6 +125,7 @@ class AdminUserUpdateSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True, required=False)
     is_staff = serializers.BooleanField(required=False)
     admin_mfa_enabled = serializers.BooleanField(required=False)
+    role_id = serializers.IntegerField(required=False, allow_null=True)
 
     def validate_email(self, value):
         email = (value or "").strip().lower()
@@ -127,13 +149,24 @@ class AdminUserUpdateSerializer(serializers.Serializer):
             raise serializers.ValidationError(list(exc.messages))
         return password
 
+    def validate_role_id(self, value):
+        if value is None:
+            return None
+        if not AdminRole.objects.filter(pk=value).exists():
+            raise serializers.ValidationError("Role not found.")
+        return value
+
     def update(self, instance, validated_data):
+        role_id = validated_data.pop("role_id", None) if "role_id" in validated_data else ...
         password = validated_data.pop("password", None)
         for field, value in validated_data.items():
             setattr(instance, field, value)
         if password:
             instance.set_password(password)
         instance.save()
+        if role_id is not ...:
+            role = AdminRole.objects.filter(pk=role_id).first() if role_id else None
+            assign_role_to_user(user=instance, role=role)
         return instance
 
 
@@ -266,7 +299,7 @@ class AdminUserListCreateAPIView(APIView):
             return _admin_user_detail_response(user)
 
         qs = _apply_admin_user_list_filters(
-            _admin_users_queryset().order_by("-created_at"),
+            _admin_users_queryset().select_related("admin_role_binding__role").order_by("-created_at"),
             request,
         )
         page_qs, pagination = _paginate_queryset(qs, request)

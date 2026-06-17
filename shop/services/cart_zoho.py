@@ -233,15 +233,10 @@ def _fetch_zoho_product_from_account(
     zoho_product_id: str,
 ):
     service = ZohoAccountService(account)
-    data = service.list_products(organization_id=organization_id, page=1, per_page=200)
-    rows = data.get('products', []) or data.get('items', [])
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        pid = str(row.get('product_id') or row.get('id') or '').strip()
-        if pid == zoho_product_id:
-            return row
-    return None
+    return service.get_product_detail(
+        organization_id=organization_id,
+        product_id=zoho_product_id,
+    )
 
 
 def perform_cart_add_zoho_product(
