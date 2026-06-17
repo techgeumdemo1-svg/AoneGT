@@ -1328,7 +1328,7 @@ class CheckoutAPIView(APIView):
             if 'cart' in ser.errors:
                 return Response(
                     {'error': 'No items selected'},
-                    status=status.HTTP_400_BAD_REQUEST,
+                    status=status.HTTP_200_OK,
                 )
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         cart = ser.validated_data['cart']
