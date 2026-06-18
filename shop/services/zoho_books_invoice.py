@@ -199,10 +199,49 @@ def _build_invoice_payload(order: Order, customer_id: str) -> dict:
             'quantity': 1.0,
         })
 
-    # FIXED: Distribute product-level discounts (transaction / item / loyalty) equally.
-    # For item-level coupons, only eligible items get the discount — not all items equally.
-    # Bxgy handled per-item above. Shipping never gets product discounts.
-    if total_discount > Decimal('0') and not is_free_shipping_coupon and not is_bxgy_coupon:
+    # Distribute product-level discounts (transaction / item / loyalty) equally.
+    # For free_shipping coupons: coupon discount goes to shipping line only,
+    # but loyalty_discount still applies equally to product line items.
+    # For bxgy coupons: bxgy get-item discount already set per-item above;
+    # loyalty_discount splits equally across cart items only (not the get-item).
+    # For item-level coupons, only eligible items get the coupon discount.
+    # Shipping never gets product discounts.
+    if loyalty_discount > Decimal('0') and is_bxgy_coupon:
+        # Identify which product_line_items are cart items vs the bxgy get-item.
+        # The get-item already has a discount set (from stored line_total diff).
+        # Cart items have discount == 0 (or not set). Split loyalty only across cart items.
+        from shop.models import OrderItem as OI
+        oi_list = list(OI.objects.filter(order_id=order.pk))
+        cart_item_indices = []
+        for idx, oi in enumerate(oi_list):
+            if idx >= len(product_line_items):
+                break
+            gross = (Decimal(str(oi.unit_price)) * oi.quantity).quantize(Decimal('0.01'))
+            stored = Decimal(str(oi.line_total)).quantize(Decimal('0.01'))
+            is_get_item = (gross - stored) > Decimal('0')
+            if not is_get_item:
+                cart_item_indices.append(idx)
+        n_cart = len(cart_item_indices)
+        if n_cart > 0:
+            loyalty_per_cart_item = (loyalty_discount / Decimal(str(n_cart))).quantize(Decimal('0.01'))
+            loyalty_remainder = loyalty_discount - (loyalty_per_cart_item * n_cart)
+            for i, idx in enumerate(cart_item_indices):
+                loy = loyalty_per_cart_item + (loyalty_remainder if i == 0 else Decimal('0'))
+                existing = Decimal(str(product_line_items[idx].get('discount') or '0'))
+                product_line_items[idx]['discount'] = float(existing + loy)
+                product_line_items[idx]['discount_type'] = 'item_level'
+    elif loyalty_discount > Decimal('0') and is_free_shipping_coupon:
+        # Free shipping + loyalty: distribute only loyalty_discount across product items
+        n_product_items = len(product_line_items)
+        if n_product_items > 0:
+            per_item_discount = (loyalty_discount / Decimal(str(n_product_items))).quantize(Decimal('0.01'))
+            remainder = loyalty_discount - (per_item_discount * n_product_items)
+            for idx, row in enumerate(product_line_items):
+                item_discount = per_item_discount + (remainder if idx == 0 else Decimal('0'))
+                if item_discount > Decimal('0'):
+                    row['discount'] = float(item_discount)
+                    row['discount_type'] = 'item_level'
+    elif total_discount > Decimal('0') and not is_free_shipping_coupon and not is_bxgy_coupon:
         # FIXED: detect item-level coupon so we can target only eligible product items.
         is_item_coupon = False
         item_coupon_eligible_zoho_ids: set[str] = set()
@@ -231,9 +270,18 @@ def _build_invoice_payload(order: Order, customer_id: str) -> dict:
             pass
 
         if is_item_coupon and (item_coupon_eligible_zoho_ids or item_coupon_eligible_category_ids or item_coupon_eligible_collection_ids):
-            # FIXED: assign discount only to eligible product line items by matching zoho IDs.
+            # item coupon targets only eligible items; loyalty splits across ALL items.
+            # Compute them separately and combine per item.
             from shop.models import OrderItem as OI
             oi_list = list(OI.objects.filter(order_id=order.pk).select_related('product'))
+            n_all = len(oi_list)
+
+            loyalty_per_item = (
+                (loyalty_discount / Decimal(str(n_all))).quantize(Decimal('0.01'))
+                if n_all > 0 else Decimal('0')
+            )
+            loyalty_remainder = loyalty_discount - (loyalty_per_item * n_all)
+
             eligible_indices = []
             for idx, oi in enumerate(oi_list):
                 if idx >= len(product_line_items):
@@ -251,25 +299,24 @@ def _build_invoice_payload(order: Order, customer_id: str) -> dict:
                 )
                 if matched:
                     eligible_indices.append(idx)
-            if eligible_indices:
-                n_eligible = len(eligible_indices)
-                per_eligible_discount = (total_discount / Decimal(str(n_eligible))).quantize(Decimal('0.01'))
-                remainder = total_discount - (per_eligible_discount * n_eligible)
-                for i, idx in enumerate(eligible_indices):
-                    item_discount = per_eligible_discount + (remainder if i == 0 else Decimal('0'))
-                    if item_discount > Decimal('0'):
-                        product_line_items[idx]['discount'] = float(item_discount)
-                        product_line_items[idx]['discount_type'] = 'item_level'
-            else:
-                n_product_items = len(product_line_items)
-                if n_product_items > 0:
-                    per_item_discount = (total_discount / Decimal(str(n_product_items))).quantize(Decimal('0.01'))
-                    remainder = total_discount - (per_item_discount * n_product_items)
-                    for idx, row in enumerate(product_line_items):
-                        item_discount = per_item_discount + (remainder if idx == 0 else Decimal('0'))
-                        if item_discount > Decimal('0'):
-                            row['discount'] = float(item_discount)
-                            row['discount_type'] = 'item_level'
+
+            n_eligible = len(eligible_indices)
+            coupon_per_eligible = (
+                (coupon_discount / Decimal(str(n_eligible))).quantize(Decimal('0.01'))
+                if n_eligible > 0 else Decimal('0')
+            )
+            coupon_remainder = coupon_discount - (coupon_per_eligible * n_eligible)
+
+            for idx in range(len(product_line_items)):
+                loy = loyalty_per_item + (loyalty_remainder if idx == 0 else Decimal('0'))
+                coup = Decimal('0')
+                if idx in eligible_indices:
+                    ei = eligible_indices.index(idx)
+                    coup = coupon_per_eligible + (coupon_remainder if ei == 0 else Decimal('0'))
+                item_discount = loy + coup
+                if item_discount > Decimal('0'):
+                    product_line_items[idx]['discount'] = float(item_discount)
+                    product_line_items[idx]['discount_type'] = 'item_level'
         else:
             # transaction / loyalty: equal split across all product items.
             n_product_items = len(product_line_items)

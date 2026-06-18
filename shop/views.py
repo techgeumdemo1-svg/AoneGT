@@ -1298,13 +1298,16 @@ def _checkout_totals(
         vat_amount = ((taxable_subtotal * vat_percent) / Decimal('100')).quantize(Decimal('0.01'))
         total = (taxable_subtotal + vat_amount).quantize(Decimal('0.01'))  # FIXED: no shipping added
     elif is_bxgy_coupon:
-        # FIXED: buyxgety — the discount only applies to the get-item (Y), not to the cart subtotal.
-        # Cart buy-items pay full price + full VAT. Get-item net cost is passed in bxgy_get_item_net.
+        # buyxgety — the discount only applies to the get-item (Y), not to the cart subtotal.
+        # Cart buy-items pay full price + loyalty-reduced price + VAT.
+        # Get-item net cost is also taxable — include it in the VAT base.
         loyalty_only_discount = loyalty_discount.quantize(Decimal('0.01'))
         taxable_subtotal = max(subtotal - loyalty_only_discount, Decimal('0')).quantize(Decimal('0.01'))
-        vat_amount = ((taxable_subtotal * vat_percent) / Decimal('100')).quantize(Decimal('0.01'))
-        # FIXED: total = buy-items + their VAT + get-item net (0 if 100% off) + shipping
-        total = (taxable_subtotal + vat_amount + bxgy_get_item_net + shipping_amount).quantize(Decimal('0.01'))
+        # VAT base = cart items (after loyalty) + get-item net price
+        vat_base = (taxable_subtotal + bxgy_get_item_net).quantize(Decimal('0.01'))
+        vat_amount = ((vat_base * vat_percent) / Decimal('100')).quantize(Decimal('0.01'))
+        # total = vat_base + its VAT + shipping
+        total = (vat_base + vat_amount + shipping_amount).quantize(Decimal('0.01'))
     else:
         # Original logic for transaction / item / loyalty discounts.
         discount_total = (loyalty_discount + coupon_discount).quantize(Decimal('0.01'))
