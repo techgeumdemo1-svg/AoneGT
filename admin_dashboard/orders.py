@@ -180,6 +180,14 @@ def build_admin_order_detail_payload(order: Order) -> dict:
     """Admin order detail: list fields + delivery address, items, tracking."""
     data = AdminOrderListSerializer(order).data
     currency = ((order.currency or '') or 'AED').strip() or 'AED'
+
+    def money(value) -> str:
+        return str(Decimal(str(value or 0)).quantize(Decimal('0.01')))
+
+    data['delivery_charge'] = money(order.shipping_amount)
+    data['shipping_amount'] = money(order.shipping_amount)
+    data['tax_percent'] = money(order.vat_percent)
+    data['tax_amount'] = money(order.vat_amount)
     data['delivery_address'] = {
         'name': order.shipping_name or '',
         'phone': order.shipping_phone or '',

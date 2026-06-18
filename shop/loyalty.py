@@ -4,31 +4,45 @@ from datetime import timedelta
 from decimal import Decimal, ROUND_DOWN
 from typing import Optional
 
-from django.conf import settings
 from django.utils import timezone
+
+from shop.loyalty_config import load_loyalty_config
+
+_config_cache = None
+
+
+def clear_loyalty_config_cache() -> None:
+    global _config_cache
+    _config_cache = None
+
+
+def _loyalty_config() -> dict:
+    global _config_cache
+    if _config_cache is None:
+        _config_cache = load_loyalty_config()
+    return _config_cache
 
 
 def aed_per_point_earned() -> int:
-    v = int(getattr(settings, 'LOYALTY_AED_PER_POINT_EARNED', 100))
-    return max(1, v)
+    return _loyalty_config()['aed_per_point_earned']
 
 
 def point_value_aed() -> Decimal:
-    return Decimal(str(getattr(settings, 'LOYALTY_POINT_VALUE_AED', '1')))
+    return _loyalty_config()['point_value_aed']
 
 
 def min_points_to_redeem() -> int:
-    return max(0, int(getattr(settings, 'LOYALTY_MIN_POINTS_TO_REDEEM', 100)))
+    return _loyalty_config()['min_points_to_redeem']
 
 
 def coupon_points_block() -> int:
     """Points required per coupon block (default 100)."""
-    return max(1, int(getattr(settings, 'LOYALTY_COUPON_POINTS_BLOCK', 100)))
+    return _loyalty_config()['coupon_points_block']
 
 
 def coupon_credit_aed() -> Decimal:
     """Store credit (AED) per coupon block (default 100 AED per 100 points)."""
-    return Decimal(str(getattr(settings, 'LOYALTY_COUPON_CREDIT_AED', '100')))
+    return _loyalty_config()['coupon_credit_aed']
 
 
 def coupon_aed_for_points(points: int) -> Decimal:
@@ -55,7 +69,7 @@ def validate_points_for_coupon(points: int) -> Optional[str]:
 
 
 def coupon_expiry_days() -> int:
-    return max(1, int(getattr(settings, 'LOYALTY_COUPON_EXPIRY_DAYS', 90)))
+    return _loyalty_config()['coupon_expiry_days']
 
 
 def points_earned_for_purchase(final_total: Decimal, currency: str) -> int:

@@ -729,3 +729,30 @@ class SupportChatMessage(models.Model):
 
     def __str__(self):
         return f'{self.ticket_id} {self.sender_role} @ {self.created_at}'
+
+
+class LoyaltyProgramSettings(models.Model):
+    """Singleton (pk=1) Super Coins / loyalty rules editable via admin API."""
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    aed_per_point_earned = models.PositiveIntegerField(default=100)
+    point_value_aed = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('1'))
+    min_points_to_redeem = models.PositiveIntegerField(default=100)
+    coupon_points_block = models.PositiveIntegerField(default=100)
+    coupon_credit_aed = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('100'))
+    coupon_expiry_days = models.PositiveIntegerField(default=90)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='loyalty_program_settings_updates',
+    )
+
+    class Meta:
+        verbose_name = 'Loyalty program settings'
+        verbose_name_plural = 'Loyalty program settings'
+
+    def __str__(self):
+        return 'Super Coins settings'

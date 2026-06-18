@@ -16,6 +16,7 @@ ALLOWED_HOSTS = [
 ]
 
 INSTALLED_APPS = [
+    'daphne',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -26,6 +27,7 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
+    'channels',
     'accounts',
     'catalog',
     'shop',
@@ -68,6 +70,23 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'aonegt.wsgi.application'
 ASGI_APPLICATION = 'aonegt.asgi.application'
+
+REDIS_URL = os.getenv('REDIS_URL', '').strip()
+if REDIS_URL:
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels_redis.core.RedisChannelLayer',
+            'CONFIG': {
+                'hosts': [REDIS_URL],
+            },
+        },
+    }
+else:
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels.layers.InMemoryChannelLayer',
+        },
+    }
 
 # DATABASES = {
 #     'default': {

@@ -5,19 +5,21 @@ from django.contrib.auth import get_user_model
 from django.db.models import Sum
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from rest_framework import status
+from rest_framework import serializers, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from shop.loyalty import (
     aed_per_point_earned,
+    clear_loyalty_config_cache,
     coupon_credit_aed,
     coupon_expiry_days,
     coupon_points_block,
     min_points_to_redeem,
     point_value_aed,
 )
+from shop.loyalty_config import get_loyalty_program_settings, update_loyalty_program_settings
 from shop.models import LoyaltyIssuedCoupon, PurchasePointsLedger
 from shop.serializers import order_code_for_order
 
@@ -47,7 +49,8 @@ def _loyalty_settings_payload() -> dict:
     expiry_days = coupon_expiry_days()
     block = coupon_points_block()
     block_credit = coupon_credit_aed()
-    return {
+    row = get_loyalty_program_settings()
+    payload = {
         "aed_per_point_earned": earn_step,
         "point_value_aed": _quantize_decimal(point_value),
         "min_points_to_redeem": min_redeem,
@@ -62,7 +65,28 @@ def _loyalty_settings_payload() -> dict:
             f"{_quantize_decimal(block_credit)} AED store credit each."
         ),
         "coupon_expiry_rule": f"Issued coupons expire after {expiry_days} days.",
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
+    return payload
+
+
+class AdminSuperCoinsSettingsUpdateSerializer(serializers.Serializer):
+    aed_per_point_earned = serializers.IntegerField(min_value=1, required=False)
+    point_value_aed = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        min_value=Decimal("0.01"),
+        required=False,
+    )
+    min_points_to_redeem = serializers.IntegerField(min_value=0, required=False)
+    coupon_points_block = serializers.IntegerField(min_value=1, required=False)
+    coupon_credit_aed_per_block = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        min_value=Decimal("0.01"),
+        required=False,
+    )
+    coupon_expiry_days = serializers.IntegerField(min_value=1, required=False)
 
 
 def build_customer_super_coins_payload(user, *, history_limit: int = 50) -> dict:
@@ -234,3 +258,21 @@ class AdminSuperCoinsSettingsAPIView(APIView):
 
     def get(self, request):
         return Response(_loyalty_settings_payload(), status=status.HTTP_200_OK)
+
+    def patch(self, request):
+        serializer = AdminSuperCoinsSettingsUpdateSerializer(data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        if not serializer.validated_data:
+            return Response(
+                {"detail": "At least one setting field is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        update_loyalty_program_settings(serializer.validated_data, user=request.user)
+        clear_loyalty_config_cache()
+        return Response(
+            {
+                "message": "Super Coins settings updated.",
+                **_loyalty_settings_payload(),
+            },
+            status=status.HTTP_200_OK,
+        )

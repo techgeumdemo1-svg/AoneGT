@@ -1,6 +1,9 @@
 # Full pinned lock file — requires Python 3.10+
 anyio==4.13.0
 asgiref==3.11.1
+channels==4.2.2
+channels-redis==4.2.1
+daphne==4.1.2
 CacheControl==0.14.4
 certifi==2026.2.25
 cffi==2.0.0

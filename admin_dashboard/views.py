@@ -221,10 +221,20 @@ class AdminDashboardSummaryAPIView(APIView):
         start_current = today - timedelta(days=6)
         start_previous = start_current - timedelta(days=7)
 
-        def growth_pct(current_value, previous_value):
-            if previous_value == 0:
-                return 100.0 if current_value > 0 else 0.0
-            return round(((current_value - previous_value) / previous_value) * 100, 1)
+        def growth_comparison(current_value, previous_value):
+            change = current_value - previous_value
+            if change > 0:
+                trend = "up"
+            elif change < 0:
+                trend = "down"
+            else:
+                trend = "stable"
+            return {
+                "current": current_value,
+                "previous": previous_value,
+                "change": change,
+                "trend": trend,
+            }
 
         total_orders_today = Order.objects.filter(
             created_at__date=today,
@@ -291,9 +301,16 @@ class AdminDashboardSummaryAPIView(APIView):
             "return_requests": return_requests,
             "orders_delivered": orders_delivered,
             "orders_cancelled": orders_cancelled,
-            "order_growth": growth_pct(current_orders, previous_orders),
-            "pending_growth": growth_pct(current_pending, previous_pending),
-            "customer_growth": growth_pct(
+            "comparison_period": {
+                "days": 7,
+                "current_start": start_current.isoformat(),
+                "current_end": today.isoformat(),
+                "previous_start": start_previous.isoformat(),
+                "previous_end": (start_current - timedelta(days=1)).isoformat(),
+            },
+            "order_growth": growth_comparison(current_orders, previous_orders),
+            "pending_growth": growth_comparison(current_pending, previous_pending),
+            "customer_growth": growth_comparison(
                 current_active_customers,
                 previous_active_customers,
             ),

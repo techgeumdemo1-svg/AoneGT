@@ -5,12 +5,18 @@ databases:
     plan: free
 
 services:
+  - type: redis
+    name: aonegt-redis
+    plan: free
+    maxmemoryPolicy: allkeys-lru
+    ipAllowList: []
+
   - type: web
     name: aonegt-api
     plan: free
     runtime: python
     buildCommand: ./build.sh
-    startCommand: gunicorn aonegt.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+    startCommand: daphne aonegt.asgi:application -b 0.0.0.0 -p $PORT
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
@@ -20,6 +26,11 @@ services:
         generateValue: true
       - key: ALLOWED_HOSTS
         value: .onrender.com
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: aonegt-redis
+          property: connectionString
       - key: DATABASE_URL
         fromDatabase:
           name: aonegt-db
