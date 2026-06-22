@@ -44,6 +44,9 @@ def credit_user_for_prepaid_order(
         raise ValueError('Order payment method is not prepaid at checkout.')
 
     pay_amount = _quantize(amount if amount is not None else order.total)
+    order_total = _quantize(order.total)
+    if pay_amount != order_total:
+        raise ValueError(f'Payment amount must match order total ({order_total}).')
     if pay_amount <= 0:
         raise ValueError('Payment amount must be greater than zero.')
 

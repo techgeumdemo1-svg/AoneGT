@@ -102,18 +102,9 @@ def _returns_refund_total(order: Order) -> Decimal:
     """
     Sum refund value for submitted returns (pending sync counts for UX until rejected).
     """
-    total = Decimal('0')
-    active_statuses = (
-        OrderReturn.Status.PENDING_ZOHO,
-        OrderReturn.Status.SYNCED,
-        OrderReturn.Status.COMPLETED,
-    )
-    for ret in order.returns.filter(status__in=active_statuses).prefetch_related(
-        'lines__order_item',
-    ):
-        for line in ret.lines.all():
-            total += line.order_item.unit_price * line.quantity
-    return total.quantize(Decimal('0.01'))
+    from shop.services.return_refund import order_returns_refund_total
+
+    return order_returns_refund_total(order)
 
 
 class ProductMiniSerializer(serializers.ModelSerializer):
@@ -213,6 +204,17 @@ class ProductMiniSerializer(serializers.ModelSerializer):
 
     def get_image_url(self, obj):
         current = (getattr(obj, 'image_url', '') or '').strip()
+        if self.context.get('persisted_product_image_only'):
+            if (
+                self._is_usable_image_url(current)
+                and '/api/shop/zoho-products/' not in current
+            ):
+                return current
+            zoho_pid = (getattr(obj, 'zoho_product_id', '') or '').strip()
+            store_id = getattr(obj, 'store_id', None)
+            request = self.context.get('request')
+            path = f'/api/shop/zoho-products/{zoho_pid}/image/?store_id={store_id}'
+            return request.build_absolute_uri(path) if request else path
         # Keep existing direct URLs, but do not preserve our internal image proxy path.
         if (
             self._is_usable_image_url(current)
@@ -673,6 +675,103 @@ def order_return_ineligible_message(order: Order) -> str:
     )
 
 
+def order_return_status(order: Order) -> str:
+    """Return status bucket: none, partial, or full."""
+    total = Decimal(str(order.total or '0'))
+    refunded = _returns_refund_total(order)
+    if refunded <= Decimal('0'):
+        return 'none'
+    if refunded >= total and total > Decimal('0'):
+        return 'full'
+    return 'partial'
+
+
+def order_display_status(order: Order) -> str:
+    """Customer-facing order status label without running the full OrderSerializer."""
+    if order.status == Order.Status.CANCELLED:
+        return 'Cancelled'
+    if order.status in (Order.Status.PENDING_ZOHO_SYNC, Order.Status.SYNC_FAILED):
+        return 'Pending'
+    if order.status == Order.Status.SYNCED:
+        if order_return_status(order) == 'full':
+            return 'Returned'
+        stage = _effective_customer_tracking_stage(order)
+        label = ORDER_CUSTOMER_TRACKING_STAGE_LABELS.get(stage)
+        if label:
+            return label
+        return 'Delivered'
+    return 'Pending'
+
+
+class OrderListSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for paginated shop order history."""
+
+    order_id = serializers.IntegerField(source='id', read_only=True)
+    order_code = serializers.SerializerMethodField()
+    display_status = serializers.SerializerMethodField()
+    items_count = serializers.SerializerMethodField()
+    can_reorder = serializers.SerializerMethodField()
+    can_return = serializers.SerializerMethodField()
+    can_cancel = serializers.SerializerMethodField()
+    order_date = serializers.SerializerMethodField()
+    payment_method_label = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Order
+        fields = (
+            'order_id',
+            'store',
+            'status',
+            'currency',
+            'payment_method',
+            'payment_status',
+            'total',
+            'order_code',
+            'display_status',
+            'items_count',
+            'can_reorder',
+            'can_return',
+            'can_cancel',
+            'order_date',
+            'payment_method_label',
+            'customer_tracking_stage',
+            'created_at',
+            'updated_at',
+        )
+        read_only_fields = fields
+
+    def get_order_code(self, obj):
+        return order_code_for_order(obj)
+
+    def get_display_status(self, obj):
+        return order_display_status(obj)
+
+    def get_items_count(self, obj):
+        return int(sum((int(it.quantity or 0) for it in obj.items.all()), 0))
+
+    def get_can_reorder(self, obj):
+        return bool(obj.items.all())
+
+    def get_can_return(self, obj):
+        if not order_allows_returns(obj):
+            return False
+        return order_return_status(obj) != 'full'
+
+    def get_can_cancel(self, obj):
+        from shop.services.order_cancel import order_cancellation_blocked_reason
+
+        return order_cancellation_blocked_reason(obj, customer=True) is None
+
+    def get_order_date(self, obj):
+        return obj.created_at.strftime('%d %b %Y')
+
+    def get_payment_method_label(self, obj) -> str:
+        try:
+            return Order.PaymentMethod(obj.payment_method).label
+        except (ValueError, TypeError):
+            return str(obj.payment_method or '')
+
+
 class OrderSerializer(serializers.ModelSerializer):
     order_id = serializers.IntegerField(source='id', read_only=True)
     items = OrderItemSerializer(many=True, read_only=True)
@@ -765,18 +864,15 @@ class OrderSerializer(serializers.ModelSerializer):
             return []
         currency = ((obj.currency or '') or 'AED').strip() or 'AED'
         result = []
+        from shop.services.return_refund import return_line_refund_amount
+
         for oi in obj.items.all():
             remaining = oi.quantity - oi.quantity_in_active_returns()
             if remaining <= 0:
                 continue
             unit = Decimal(str(oi.unit_price)).quantize(Decimal('0.01'))
             lt = Decimal(str(oi.line_total)).quantize(Decimal('0.01'))
-            if oi.quantity > 0:
-                returnable = (lt / Decimal(oi.quantity) * Decimal(remaining)).quantize(
-                    Decimal('0.01'),
-                )
-            else:
-                returnable = (unit * Decimal(remaining)).quantize(Decimal('0.01'))
+            returnable = return_line_refund_amount(oi, remaining, obj)
             result.append({
                 'order_item_id': oi.pk,
                 'product_id': oi.product_id,
@@ -814,19 +910,7 @@ class OrderSerializer(serializers.ModelSerializer):
         return len(self._review_pending_lines_cached(obj))
 
     def get_display_status(self, obj):
-        if obj.status == Order.Status.CANCELLED:
-            return 'Cancelled'
-        if obj.status in (Order.Status.PENDING_ZOHO_SYNC, Order.Status.SYNC_FAILED):
-            return 'Pending'
-        if obj.status == Order.Status.SYNCED:
-            if self._order_return_status(obj) == 'full':
-                return 'Returned'
-            stage = _effective_customer_tracking_stage(obj)
-            label = ORDER_CUSTOMER_TRACKING_STAGE_LABELS.get(stage)
-            if label:
-                return label
-            return 'Delivered'
-        return 'Pending'
+        return order_display_status(obj)
 
     def get_tracking(self, obj):
         ensure_pending_recorded(obj)
@@ -918,13 +1002,7 @@ class OrderSerializer(serializers.ModelSerializer):
         return order_cancellation_blocked_reason(obj, customer=True)
 
     def _order_return_status(self, obj):
-        total = Decimal(str(obj.total or '0'))
-        refunded = _returns_refund_total(obj)
-        if refunded <= Decimal('0'):
-            return 'none'
-        if refunded >= total and total > Decimal('0'):
-            return 'full'
-        return 'partial'
+        return order_return_status(obj)
 
     def get_return_status(self, obj):
         return self._order_return_status(obj)
@@ -1192,35 +1270,27 @@ class CheckoutSerializer(serializers.Serializer):
             payment_success = raw_success.strip().lower() in ('true', '1', 'yes')
         else:
             payment_success = bool(raw_success)
-        attrs['payment_success'] = payment_success
 
         gateway_reference = (attrs.get('gateway_reference') or '').strip()
         attrs['gateway_reference'] = gateway_reference
 
-        require_prepaid_payment = getattr(
-            settings,
-            'CHECKOUT_REQUIRE_PREPAID_PAYMENT_SUCCESS',
-            True,
-        )
-
-        # payment_gateway: payment has NOT happened yet at checkout time.
-        # Payment is initiated after checkout via POST /api/shop/geidea/initiate/
-        # and confirmed via the Geidea server-to-server callback.
-        # Do NOT require payment_success here for payment_gateway.
-        #
-        # pay_by_link: same as payment_gateway — order is created first (PENDING),
-        # then payment link is generated via POST /api/shop/paybylink/initiate/
-        # and confirmed via the Geidea callback. payment_success is not required
-        # at checkout for pay_by_link.
-        if payment_success and not gateway_reference and payment_method in (
+        prepaid_geidea_methods = (
             Order.PaymentMethod.PAY_BY_LINK,
             Order.PaymentMethod.PAYMENT_GATEWAY,
-        ):
-            raise serializers.ValidationError({
-                'gateway_reference': (
-                    'Transaction reference is required when payment_success is true.'
-                ),
-            })
+        )
+        if payment_method in prepaid_geidea_methods:
+            if payment_success or gateway_reference:
+                raise serializers.ValidationError({
+                    'payment_success': (
+                        'Payment for gateway and pay-by-link orders is confirmed only '
+                        'via Geidea callback after checkout.'
+                    ),
+                })
+            attrs['payment_success'] = False
+            attrs['gateway_reference'] = ''
+            attrs.pop('payment_amount', None)
+        else:
+            attrs['payment_success'] = payment_success
 
         payment_amount = attrs.get('payment_amount')
         if payment_amount is not None:
@@ -1359,14 +1429,26 @@ class OrderReturnLineReadSerializer(serializers.ModelSerializer):
         )
 
     def get_line_subtotal(self, obj):
-        total = Decimal(str(obj.order_item.unit_price)) * int(obj.quantity)
-        return str(total.quantize(Decimal('0.01')))
+        from shop.services.return_refund import return_line_refund_amount
+
+        order = obj.order_item.order
+        total = return_line_refund_amount(
+            obj.order_item,
+            int(obj.quantity),
+            order,
+        )
+        return str(total)
 
     def get_line_subtotal_display(self, obj):
         order = obj.order_item.order
         cur = ((order.currency or '') or 'AED').strip() or 'AED'
-        total = Decimal(str(obj.order_item.unit_price)) * int(obj.quantity)
-        amt = total.quantize(Decimal('0.01'))
+        from shop.services.return_refund import return_line_refund_amount
+
+        amt = return_line_refund_amount(
+            obj.order_item,
+            int(obj.quantity),
+            order,
+        )
         return f'{cur} {amt}'
 
 
@@ -1402,10 +1484,9 @@ class OrderReturnReadSerializer(serializers.ModelSerializer):
         return obj.order.currency or 'AED'
 
     def get_refund_amount(self, obj):
-        total = Decimal('0')
-        for line in obj.lines.all():
-            total += line.order_item.unit_price * line.quantity
-        return str(total.quantize(Decimal('0.01')))
+        from shop.services.return_refund import return_refund_amount
+
+        return str(return_refund_amount(obj))
 
     def get_return_reason_label(self, obj):
         raw = (obj.return_reason or '').strip()

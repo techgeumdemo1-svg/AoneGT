@@ -14,6 +14,7 @@ from django.utils import timezone
 from django.shortcuts import get_object_or_404, redirect
 from django.utils.text import slugify
 from catalog.models import Store, Product
+from catalog.services.product_images import product_display_image_url
 from catalog.services.zoho_product_ids import (
     extract_zoho_category_id_from_detail,
     extract_zoho_collection_id_from_detail,
@@ -80,6 +81,7 @@ from .serializers import (
     LoyaltyIssueCouponSerializer,
     LoyaltyIssuedCouponSerializer,
     OrderSerializer,
+    OrderListSerializer,
     OrderEditSerializer,
     FCMDeviceTokenSerializer,
     PushSettingsSerializer,
@@ -235,7 +237,13 @@ def _zoho_price_from_payload(source: dict, first_variant: dict) -> Decimal:
     return Decimal('0')
 
 
-def _upsert_local_product_from_zoho(store: Store, zoho_product_id: str, payload: dict) -> Product:
+def _upsert_local_product_from_zoho(
+    store: Store,
+    zoho_product_id: str,
+    payload: dict,
+    *,
+    skip_collection_probe: bool = False,
+) -> Product:
     product_blob = payload.get('product') if isinstance(payload, dict) else None
     source = product_blob if isinstance(product_blob, dict) else payload
     if not isinstance(source, dict):
@@ -344,7 +352,7 @@ def _upsert_local_product_from_zoho(store: Store, zoho_product_id: str, payload:
 
     z_cat = (extract_zoho_category_id_from_detail(payload) or '').strip()[:120]
     z_col = (extract_zoho_collection_id_from_detail(payload) or '').strip()[:120]
-    if not z_col:
+    if not z_col and not skip_collection_probe:
         z_col = (resolve_zoho_collection_id_via_storefront(store, zoho_product_id) or '').strip()[:120]
     resolved_zoho_category_id = (
         z_cat if z_cat else ((product.zoho_category_id or '')[:120] if product.pk else '')
@@ -654,6 +662,7 @@ def _perform_cart_add_zoho_product(
     *,
     account: Optional[ZohoCommerceAccount] = None,
     organization_id: Optional[str] = None,
+    request=None,
 ):
     """Returns (response_data|None, error_detail|None, http_status)."""
     def _product_is_valid_for_cart(p: Product, pid: str) -> bool:
@@ -671,10 +680,12 @@ def _perform_cart_add_zoho_product(
         zoho_product_id=zoho_product_id,
     ).first()
 
+    # Only fetch Zoho when the local row is missing or incomplete (name/price).
+    # Do not re-fetch on every add just because image is a proxy URL — that caused
+    # 3–4 sequential Zoho calls per request (~10s).
     needs_zoho_sync = (
         product is None
         or not _product_is_valid_for_cart(product, zoho_product_id)
-        or not _product_has_resolved_image(product)
     )
 
     zoho_payload = None
@@ -688,18 +699,22 @@ def _perform_cart_add_zoho_product(
                 )
             except Exception:
                 zoho_payload = None
-        if zoho_payload is None:
+        if zoho_payload is None and product is None:
             try:
                 zoho_payload = ZohoCommerceService.get_product_detail_storefront(
                     zoho_product_id,
                     store=store,
                 )
             except (ZohoCommerceError, Exception) as e:
-                if product is None:
-                    return None, str(e), status.HTTP_502_BAD_GATEWAY
+                return None, str(e), status.HTTP_502_BAD_GATEWAY
 
         if zoho_payload is not None:
-            product = _upsert_local_product_from_zoho(store, zoho_product_id, zoho_payload)
+            product = _upsert_local_product_from_zoho(
+                store,
+                zoho_product_id,
+                zoho_payload,
+                skip_collection_probe=True,
+            )
             product = _apply_zoho_image_to_product(product, store, zoho_payload)
     elif product is not None and not (product.sku or '').strip():
         product.sku = zoho_product_id[:120]
@@ -727,9 +742,6 @@ def _perform_cart_add_zoho_product(
             status.HTTP_502_BAD_GATEWAY,
         )
 
-    if not (getattr(product, 'zoho_collection_id', '') or '').strip():
-        backfill_product_collection_id_if_empty(store, product, zoho_product_id)
-
     with transaction.atomic():
         cart, _ = Cart.objects.select_for_update().get_or_create(user=user)
         item, created = CartItem.objects.select_for_update().get_or_create(
@@ -743,7 +755,16 @@ def _perform_cart_add_zoho_product(
             item.save(update_fields=['quantity', 'store'])
 
     item = CartItem.objects.select_related('product', 'store').get(pk=item.pk)
-    return CartItemSerializer(item).data, None, status.HTTP_200_OK
+    serializer_context = {
+        'persisted_product_image_only': True,
+    }
+    if request is not None:
+        serializer_context['request'] = request
+    return (
+        CartItemSerializer(item, context=serializer_context).data,
+        None,
+        status.HTTP_200_OK,
+    )
 
 
 class CartDetailAPIView(APIView):
@@ -780,7 +801,6 @@ class CartDetailAPIView(APIView):
             payload['subtotal'] = str(subtotal.quantize(Decimal('0.01')))
         store_cache = {}
         product_cache = {}
-        cdn_cache = {}
 
         def _get_store(store_id):
             key = int(store_id) if store_id is not None else None
@@ -799,15 +819,9 @@ class CartDetailAPIView(APIView):
             return product_cache[key]
 
         def _resolve_for_product(store_obj, product_obj):
-            if store_obj is None or product_obj is None:
+            if product_obj is None:
                 return ''
-            zoho_pid = str(getattr(product_obj, 'zoho_product_id', '') or '').strip()
-            if not zoho_pid:
-                return ''
-            cache_key = (store_obj.pk, zoho_pid)
-            if cache_key not in cdn_cache:
-                cdn_cache[cache_key] = _resolve_cdn_image_for_store_product(store_obj, zoho_pid)
-            return cdn_cache[cache_key]
+            return product_display_image_url(product_obj, allow_zoho_fetch=False)
 
         item_rows = payload.get('items') if isinstance(payload, dict) else []
         if isinstance(item_rows, list):
@@ -1062,6 +1076,7 @@ class CartAddItemAPIView(APIView):
             quantity,
             account=account,
             organization_id=organization_id,
+            request=request,
         )
         if err:
             return Response({'detail': err}, status=st)
@@ -1074,18 +1089,12 @@ class CartAddItemAPIView(APIView):
             current_image = (product_info.get('image_url') or '').strip()
             if (
                 not current_image
-                or current_image.startswith('/api/shop/zoho-products/')
                 or '/api/shop/zoho-products/' in current_image
             ):
-                resolved_cdn = _resolve_cdn_image_for_store_product(store, str(zoho_product_id))
-                if resolved_cdn:
-                    product_info['image_url'] = resolved_cdn
-                    Product.objects.filter(pk=product_info.get('id')).update(image_url=resolved_cdn[:500])
-                else:
-                    proxy_url = request.build_absolute_uri(
-                        f"/api/shop/zoho-products/{zoho_product_id}/image/?store_id={store.pk}"
-                    )
-                    product_info['image_url'] = proxy_url
+                proxy_url = request.build_absolute_uri(
+                    f"/api/shop/zoho-products/{zoho_product_id}/image/?store_id={store.pk}"
+                )
+                product_info['image_url'] = proxy_url
                 result['product'] = product_info
             result['product_name'] = product_info.get('name', '')
             result['sku'] = product_info.get('sku', '')
@@ -1665,35 +1674,25 @@ class CheckoutAPIView(APIView):
                 order.gateway_reference = gateway_reference[:255]
                 order.save(update_fields=['gateway_reference', 'updated_at'])
 
-            # payment_gateway: DO NOT credit user at checkout.
-            # Credit is applied in the Geidea callback view when Geidea confirms
-            # payment (Phase 3). payment_success is always False here for
-            # payment_gateway so this block would never execute anyway, but
-            # the explicit check makes the intent unambiguous and safe.
-            #
-            # pay_by_link: unchanged — credit user immediately when
-            # payment_success=True is sent at checkout.
-            if order.payment_method == Order.PaymentMethod.PAY_BY_LINK:
-                if ser.validated_data.get('payment_success'):
-                    pay_amount = ser.validated_data.get('payment_amount')
-                    if pay_amount is not None and pay_amount != final_total:
-                        raise ValidationError({
-                            'payment_amount': f'Must match order total ({final_total}).',
-                        })
-                    credit_user_for_prepaid_order(
-                        order,
-                        amount=pay_amount if pay_amount is not None else final_total,
-                        gateway_reference=gateway_reference,
-                    )
-                    order.refresh_from_db()
+            # Prepaid Geidea methods (payment_gateway, pay_by_link) are marked paid
+            # only via Geidea callback/reconcile — never from checkout payload.
 
         from shop.services.checkout_async import (
+            checkout_async_zoho_enabled,
+            schedule_checkout_zoho_sales_order,
             schedule_confirmation_email,
             sync_checkout_zoho_sales_order,
         )
 
         books_manual = getattr(settings, 'ZOHO_BOOKS_MANUAL_WORKFLOW', False)
-        sync_checkout_zoho_sales_order(order.pk, books_manual_workflow=books_manual)
+        if checkout_async_zoho_enabled():
+            zoho_sync_pending = schedule_checkout_zoho_sales_order(
+                order.pk,
+                books_manual_workflow=books_manual,
+            )
+        else:
+            sync_checkout_zoho_sales_order(order.pk, books_manual_workflow=books_manual)
+            zoho_sync_pending = False
         email_deferred = schedule_confirmation_email(order.pk, request.user.pk)
 
         order = Order.objects.select_related('points_ledger_entry').prefetch_related(
@@ -1777,6 +1776,7 @@ class CheckoutAPIView(APIView):
         response_payload = {
             'order': order_data,
             'credit_balance_aed': str(get_user_credit_balance(request.user)),
+            'zoho_sync_pending': zoho_sync_pending,
             'checkout_view': {
                 'delivery_address': {
                     'name': order.shipping_name,
@@ -1981,9 +1981,16 @@ class LoyaltyIssueCouponAPIView(APIView):
         )
 
 
+class OrderPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 50
+
+
 class OrderListAPIView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
-    serializer_class = OrderSerializer
+    serializer_class = OrderListSerializer
+    pagination_class = OrderPagination
 
     def get_queryset(self):
         raw = (self.request.query_params.get('store_id') or '').strip()
@@ -2000,6 +2007,7 @@ class OrderListAPIView(generics.ListAPIView):
             Order.objects.filter(user=self.request.user, store=store)
             .select_related('store')
             .prefetch_related('items', 'returns__lines__order_item')
+            .order_by('-created_at')
         )
 
 
@@ -2066,6 +2074,15 @@ class OrderDetailAPIView(APIView):
         data = ser.validated_data
         if not data:
             return Response({'detail': 'No fields to update.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        is_staff = request.user.is_staff or request.user.is_superuser
+        if not is_staff:
+            for blocked_field in ('payment_method', 'shipping_amount'):
+                if blocked_field in data:
+                    return Response(
+                        {'detail': f'{blocked_field} cannot be changed on a customer order edit.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
 
         update_fields: list[str] = ['updated_at']
         simple_fields = (
@@ -2430,18 +2447,18 @@ class OrderZohoBooksPaymentAPIView(APIView):
 
 class OrderPaymentSuccessAPIView(APIView):
     """
-    Record successful gateway / pay-by-link payment and credit user account.
+    Staff-only: record successful gateway / pay-by-link payment and credit user account.
 
     POST /api/shop/orders/<pk>/payment-success/?store_id=<store_id>
     Body (optional): ``amount``, ``gateway_reference``
 
-    Callable by the order owner or staff (simulates gateway webhook until integrated).
+    Customers must not call this endpoint — payment is confirmed via Geidea callback.
     """
 
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk=None):
-        _, order, err = _order_for_owner_or_staff_action(request, pk)
+        _, order, err = _staff_order_for_books_action(request, pk)
         if err:
             return err
 
@@ -2720,7 +2737,7 @@ class ZohoProductListAPIView(APIView):
     ``page``, ``per_page``, ``product_type`` (optional).
     When ``store_id`` is omitted, uses ZOHO_STORE_DOMAIN / ZOHO_ORG_ID from settings.
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         store, err = _optional_store_for_zoho(request)
@@ -2770,7 +2787,7 @@ class ZohoProductDetailAPIView(APIView):
     Query: ``store_id`` (optional) — same as list endpoint.
     """
 
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     @staticmethod
     def _with_plain_description(data):
@@ -2815,7 +2832,7 @@ class ZohoProductImageProxyAPIView(APIView):
     Query: ``store_id`` (optional) — same as list/detail endpoints.
     """
 
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     @staticmethod
     def _is_usable_image_url(value: str) -> bool:
@@ -3154,10 +3171,19 @@ class GeideaInitiateView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Guard: Zoho Sales Order must exist.
-        # zoho_books_salesorder_id is the merchantReferenceId sent to Geidea.
-        # If it is null, the Zoho sync from Phase 1 failed and the frontend
-        # should offer a retry button that calls this endpoint again.
+        # Guard: Zoho Sales Order must exist before Geidea payment.
+        if not order.zoho_books_salesorder_id:
+            from shop.services.checkout_async import sync_checkout_zoho_sales_order
+
+            books_manual = getattr(settings, 'ZOHO_BOOKS_MANUAL_WORKFLOW', False)
+            try:
+                sync_checkout_zoho_sales_order(order.pk, books_manual_workflow=books_manual)
+            except Exception:
+                logger.exception(
+                    'geidea-initiate: Zoho sync failed order=%s',
+                    order.pk,
+                )
+            order.refresh_from_db(fields=['zoho_books_salesorder_id', 'updated_at'])
         if not order.zoho_books_salesorder_id:
             return Response(
                 {'error': 'Order saved, payment cannot start — Zoho sync pending.'},

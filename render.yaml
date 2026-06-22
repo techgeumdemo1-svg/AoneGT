@@ -35,3 +35,10 @@ services:
         fromDatabase:
           name: aonegt-db
           property: connectionString
+      # Comma-separated frontend origins (e.g. https://app.example.com,https://admin.example.com)
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: JWT_ACCESS_TOKEN_LIFETIME_MINUTES
+        value: "60"
+      - key: JWT_REFRESH_TOKEN_LIFETIME_DAYS
+        value: "7"

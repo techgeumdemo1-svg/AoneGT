@@ -44,6 +44,90 @@ class GeideaRefundAlreadyProcessedError(GeideaRefundError):
     """
 
 
+_REFUND_PROCESSING_PREFIX = 'processing:'
+
+
+def _is_geidea_refund_processing(refund_id: str) -> bool:
+    return (refund_id or '').strip().startswith(_REFUND_PROCESSING_PREFIX)
+
+
+def claim_order_geidea_refund(order) -> str:
+    """Reserve refund under row lock. Returns claim token."""
+    current = (order.geidea_refund_id or '').strip()
+    if current and not _is_geidea_refund_processing(current):
+        raise GeideaRefundAlreadyProcessedError(
+            f'Refund already processed for order #{order.pk}. geidea_refund_id={current}'
+        )
+    if _is_geidea_refund_processing(current):
+        raise GeideaRefundError('Refund already in progress for this order.')
+    token = f'{_REFUND_PROCESSING_PREFIX}{uuid_module.uuid4().hex}'[:255]
+    order.geidea_refund_id = token
+    order.save(update_fields=['geidea_refund_id', 'updated_at'])
+    return token
+
+
+def finalize_order_geidea_refund(order_id: int, claim_token: str, refund_id: str) -> None:
+    from django.db import transaction
+    from shop.models import Order
+
+    with transaction.atomic():
+        order = Order.objects.select_for_update().get(pk=order_id)
+        if order.geidea_refund_id != claim_token:
+            raise GeideaRefundError('Refund claim lost — concurrent update on order.')
+        order.geidea_refund_id = refund_id[:255]
+        order.save(update_fields=['geidea_refund_id', 'updated_at'])
+
+
+def release_order_geidea_refund_claim(order_id: int, claim_token: str) -> None:
+    from django.db import transaction
+    from shop.models import Order
+
+    with transaction.atomic():
+        order = Order.objects.select_for_update().get(pk=order_id)
+        if order.geidea_refund_id == claim_token:
+            order.geidea_refund_id = ''
+            order.save(update_fields=['geidea_refund_id', 'updated_at'])
+
+
+def claim_return_geidea_refund(order_return) -> str:
+    """Reserve return refund under row lock. Returns claim token."""
+    current = (order_return.geidea_refund_id or '').strip()
+    if current and not _is_geidea_refund_processing(current):
+        raise GeideaRefundAlreadyProcessedError(
+            f'Refund already processed for return #{order_return.pk}. '
+            f'geidea_refund_id={current}'
+        )
+    if _is_geidea_refund_processing(current):
+        raise GeideaRefundError('Refund already in progress for this return.')
+    token = f'{_REFUND_PROCESSING_PREFIX}{uuid_module.uuid4().hex}'[:255]
+    order_return.geidea_refund_id = token
+    order_return.save(update_fields=['geidea_refund_id', 'updated_at'])
+    return token
+
+
+def finalize_return_geidea_refund(return_id: int, claim_token: str, refund_id: str) -> None:
+    from django.db import transaction
+    from shop.models import OrderReturn
+
+    with transaction.atomic():
+        order_return = OrderReturn.objects.select_for_update().get(pk=return_id)
+        if order_return.geidea_refund_id != claim_token:
+            raise GeideaRefundError('Refund claim lost — concurrent update on return.')
+        order_return.geidea_refund_id = refund_id[:255]
+        order_return.save(update_fields=['geidea_refund_id', 'updated_at'])
+
+
+def release_return_geidea_refund_claim(return_id: int, claim_token: str) -> None:
+    from django.db import transaction
+    from shop.models import OrderReturn
+
+    with transaction.atomic():
+        order_return = OrderReturn.objects.select_for_update().get(pk=return_id)
+        if order_return.geidea_refund_id == claim_token:
+            order_return.geidea_refund_id = ''
+            order_return.save(update_fields=['geidea_refund_id', 'updated_at'])
+
+
 # ---------------------------------------------------------------------------
 # Internal signature helpers (used only for refund — not for eInvoice creation)
 # ---------------------------------------------------------------------------
@@ -316,30 +400,47 @@ def cancel_geidea_payment_link(order) -> None:
 # Public API: Card refund
 # ---------------------------------------------------------------------------
 
-def refund_geidea_payment(order_return, amount: Decimal) -> str:
+def _extract_refund_transaction_id(data: dict, *, fallback_label: str) -> str:
+    refund_transaction_id = ''
+    order_data = data.get('order') or {}
+    transactions = order_data.get('transactions') or []
+    for txn in transactions:
+        if isinstance(txn, dict) and txn.get('type') == 'Refund':
+            refund_transaction_id = str(txn.get('transactionId') or '').strip()
+            if refund_transaction_id:
+                break
+
+    if not refund_transaction_id:
+        refund_transaction_id = str(
+            order_data.get('orderId') or data.get('orderId') or ''
+        ).strip()
+
+    if not refund_transaction_id:
+        logger.warning(
+            'geidea-refund: no refund transaction ID in response fallback=%s',
+            fallback_label,
+        )
+        refund_transaction_id = fallback_label
+
+    return refund_transaction_id[:255]
+
+
+def issue_geidea_card_refund(order, amount: Decimal) -> str:
     """
-    Issue a card refund via Geidea Refund API.
+    Call Geidea Refund API for an order. Does not persist refund IDs.
 
     Returns:
         str: The Geidea refund transaction ID.
 
     Raises:
-        GeideaRefundAlreadyProcessedError: If geidea_refund_id already set.
         GeideaRefundError: On configuration, validation, network, or API errors.
     """
-    if (order_return.geidea_refund_id or '').strip():
-        raise GeideaRefundAlreadyProcessedError(
-            f'Refund already processed for return #{order_return.pk}. '
-            f'geidea_refund_id={order_return.geidea_refund_id}'
-        )
-
     refund_url = (getattr(settings, 'GEIDEA_REFUND_URL', '') or '').strip()
     if not refund_url:
         raise GeideaRefundError(
             'GEIDEA_REFUND_URL is not configured. Set it in environment variables.'
         )
 
-    order = order_return.order
     gateway_reference = (order.gateway_reference or '').strip()
     if not gateway_reference:
         raise GeideaRefundError(
@@ -355,7 +456,11 @@ def refund_geidea_payment(order_return, amount: Decimal) -> str:
     api_password = settings.GEIDEA_API_PASSWORD
     # Timestamp format per Geidea refund docs: "3/18/2024 5:16:48 AM" (no leading zeros)
     now = datetime.utcnow()
-    timestamp = f"{now.month}/{now.day}/{now.year} {now.strftime('%I').lstrip('0') or '12'}:{now.strftime('%M')}:{now.strftime('%S')} {now.strftime('%p')}"
+    timestamp = (
+        f"{now.month}/{now.day}/{now.year} "
+        f"{now.strftime('%I').lstrip('0') or '12'}:"
+        f"{now.strftime('%M')}:{now.strftime('%S')} {now.strftime('%p')}"
+    )
     amount_str = f"{float(amount):.2f}"
 
     signature = _build_refund_signature(
@@ -377,8 +482,8 @@ def refund_geidea_payment(order_return, amount: Decimal) -> str:
     }
 
     logger.info(
-        'geidea-refund: initiating refund return=%s order=%s amount=%s order_id=%s',
-        order_return.pk, order.pk, amount_str, gateway_reference,
+        'geidea-refund: initiating refund order=%s amount=%s gateway_ref=%s',
+        order.pk, amount_str, gateway_reference,
     )
 
     try:
@@ -390,21 +495,18 @@ def refund_geidea_payment(order_return, amount: Decimal) -> str:
         )
         response.raise_for_status()
     except requests.exceptions.Timeout:
-        logger.error('geidea-refund: timeout return=%s order=%s', order_return.pk, order.pk)
+        logger.error('geidea-refund: timeout order=%s', order.pk)
         raise GeideaRefundError('Refund API timed out. Please retry.')
     except requests.exceptions.RequestException as exc:
-        logger.error(
-            'geidea-refund: request failed return=%s order=%s error=%s',
-            order_return.pk, order.pk, exc,
-        )
+        logger.error('geidea-refund: request failed order=%s error=%s', order.pk, exc)
         raise GeideaRefundError('Refund API request failed. Please retry.')
 
     try:
         data = response.json()
     except ValueError:
         logger.error(
-            'geidea-refund: invalid JSON response return=%s order=%s status=%s body=%s',
-            order_return.pk, order.pk, response.status_code, response.text,
+            'geidea-refund: invalid JSON response order=%s status=%s body=%s',
+            order.pk, response.status_code, response.text,
         )
         raise GeideaRefundError('Refund API returned an invalid response.')
 
@@ -412,42 +514,52 @@ def refund_geidea_payment(order_return, amount: Decimal) -> str:
     detailed_code = data.get('detailedResponseCode', '')
     if response_code != '000' or detailed_code != '000':
         logger.error(
-            'geidea-refund: non-success response return=%s order=%s '
-            'responseCode=%s detailedResponseCode=%s',
-            order_return.pk, order.pk, response_code, detailed_code,
+            'geidea-refund: non-success response order=%s responseCode=%s '
+            'detailedResponseCode=%s',
+            order.pk, response_code, detailed_code,
         )
         raise GeideaRefundError(
             f'Geidea refund error: {response_code}/{detailed_code} — '
             f'{data.get("responseMessage", "")}'
         )
 
-    # Extract refund transaction ID from response transactions list
-    refund_transaction_id = ''
-    order_data = data.get('order') or {}
-    transactions = order_data.get('transactions') or []
-    for txn in transactions:
-        if isinstance(txn, dict) and txn.get('type') == 'Refund':
-            refund_transaction_id = str(txn.get('transactionId') or '').strip()
-            if refund_transaction_id:
-                break
-
-    if not refund_transaction_id:
-        refund_transaction_id = str(
-            order_data.get('orderId') or data.get('orderId') or ''
-        ).strip()
-
-    if not refund_transaction_id:
-        logger.warning(
-            'geidea-refund: no refund transaction ID in response return=%s order=%s',
-            order_return.pk, order.pk,
-        )
-        refund_transaction_id = f'geidea-refund-{order_return.pk}'
-
-    order_return.geidea_refund_id = refund_transaction_id[:255]
-    order_return.save(update_fields=['geidea_refund_id', 'updated_at'])
-
-    logger.info(
-        'geidea-refund: success return=%s order=%s amount=%s refund_id=%s',
-        order_return.pk, order.pk, amount_str, refund_transaction_id,
+    refund_transaction_id = _extract_refund_transaction_id(
+        data,
+        fallback_label=f'geidea-refund-order-{order.pk}',
     )
+    logger.info(
+        'geidea-refund: success order=%s amount=%s refund_id=%s',
+        order.pk, amount_str, refund_transaction_id,
+    )
+    return refund_transaction_id
+
+
+def refund_geidea_payment(order_return, amount: Decimal) -> str:
+    """
+    Issue a card refund via Geidea Refund API for a return.
+
+    Returns:
+        str: The Geidea refund transaction ID.
+
+    Raises:
+        GeideaRefundAlreadyProcessedError: If geidea_refund_id already set.
+        GeideaRefundError: On configuration, validation, network, or API errors.
+    """
+    from django.db import transaction
+    from shop.models import OrderReturn
+
+    with transaction.atomic():
+        locked = OrderReturn.objects.select_for_update().select_related('order').get(
+            pk=order_return.pk,
+        )
+        claim_token = claim_return_geidea_refund(locked)
+        order = locked.order
+
+    try:
+        refund_transaction_id = issue_geidea_card_refund(order, amount)
+        finalize_return_geidea_refund(order_return.pk, claim_token, refund_transaction_id)
+    except Exception:
+        release_return_geidea_refund_claim(order_return.pk, claim_token)
+        raise
+
     return refund_transaction_id

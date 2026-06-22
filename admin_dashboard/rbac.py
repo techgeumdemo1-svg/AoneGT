@@ -18,7 +18,7 @@ MODULE_REQUIRED_ACTION = {
     "transactions": {"GET": "view"},
     "super-coins": {"GET": "view", "POST": "manage", "PATCH": "manage"},
     "activity-logs": {"GET": "view"},
-    "users": {"GET": "view", "POST": "manage", "PATCH": "manage"},
+    "users": {"GET": "view", "POST": "manage", "PATCH": "manage", "DELETE": "manage"},
     "dashboard": {"GET": "view"},
 }
 

@@ -15,8 +15,10 @@ from shop.serializers import (
     OrderSerializer,
     _effective_customer_tracking_stage,
     order_code_for_order,
+    order_display_status,
 )
 from shop.services.account_credit import get_user_credit_balance, record_prepaid_payment_success
+from shop.services.order_cancel import cancel_order
 from shop.services.order_tracking import (
     cancelled_at,
     record_tracking_stage,
@@ -85,7 +87,7 @@ def _normalize_admin_status(raw: str) -> Optional[str]:
 
 
 def _display_status_for_order(order: Order) -> str:
-    return OrderSerializer(order).data.get("display_status", "Pending")
+    return order_display_status(order)
 
 
 def _status_history_label(stage_key: str) -> str:
@@ -645,7 +647,14 @@ class AdminOrderStatusUpdateAPIView(APIView):
                     },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-        order = _apply_status_update(order, new_status)
+        if new_status == "cancelled":
+            if order.status != Order.Status.CANCELLED:
+                ok, message = cancel_order(order.pk, customer=False, notify=True)
+                if not ok:
+                    return Response({"detail": message}, status=status.HTTP_400_BAD_REQUEST)
+            order = _reload_admin_order(order.pk)
+        else:
+            order = _apply_status_update(order, new_status)
 
         record_admin_activity(
             request,

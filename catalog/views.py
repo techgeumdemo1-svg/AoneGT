@@ -130,7 +130,7 @@ class StoreProductListAPIView(generics.ListAPIView):
 
     def get_queryset(self):
         store = get_object_or_404(Store, pk=self.kwargs['store_id'], is_active=True)
-        qs = Product.objects.filter(store=store, is_active=True).order_by('name')
+        qs = Product.objects.filter(store=store, is_active=True).select_related('store').order_by('name')
         q = (self.request.query_params.get('search') or '').strip()
         if q:
             qs = qs.filter(Q(name__icontains=q) | Q(sku__icontains=q))
@@ -145,6 +145,8 @@ class ZohoCommerceShopListAPIView(APIView):
     - account_id=<zoho account pk> (optional): fetch shops for one configured
       ZohoCommerceAccount; omitted means all active accounts.
     """
+
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         raw_account_id = (request.query_params.get('account_id') or '').strip()
@@ -183,6 +185,8 @@ class ZohoCommerceShopProductListAPIView(APIView):
     GET — list products for a selected Zoho shop id.
     """
 
+    permission_classes = [IsAuthenticated]
+
     def get(self, request, shop_id: str):
         account = (request.query_params.get('account') or 'primary').strip().lower()
         page = request.query_params.get('page', 1)
@@ -217,6 +221,8 @@ class ZohoCommerceProductsProxyAPIView(APIView):
     filter_by, sort_column, sort_order, page_start_from, per_page
     """
 
+    permission_classes = [IsAuthenticated]
+
     def get(self, request):
         store, err = _optional_store_for_zoho_proxy(request)
         if err:
@@ -237,6 +243,8 @@ class ZohoCommerceProductDetailProxyAPIView(APIView):
 
     Query (optional): ``store_id`` — same as list proxy.
     """
+
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, product_id: str):
         store, err = _optional_store_for_zoho_proxy(request)

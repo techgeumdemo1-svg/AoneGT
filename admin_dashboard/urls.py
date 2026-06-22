@@ -74,6 +74,7 @@ from .transactions import (
 )
 from .users import (
     AdminUserDeactivateAPIView,
+    AdminUserDeleteAPIView,
     AdminUserDetailUpdateAPIView,
     AdminUserListCreateAPIView,
     AdminUserReactivateAPIView,
@@ -129,6 +130,7 @@ urlpatterns = [
     path('cms/pages/', AdminCMSPageListAPIView.as_view(), name='admin-cms-pages-list'),
     path('users/', AdminUserListCreateAPIView.as_view(), name='admin-users-list-create'),
     path('users/<int:pk>/', AdminUserDetailUpdateAPIView.as_view(), name='admin-users-detail'),
+    path('users/delete/', AdminUserDeleteAPIView.as_view(), name='admin-users-delete'),
     path('users/deactivate/', AdminUserDeactivateAPIView.as_view(), name='admin-users-deactivate'),
     path('users/reactivate/', AdminUserReactivateAPIView.as_view(), name='admin-users-reactivate'),
     path('roles/', AdminRoleListCreateAPIView.as_view(), name='admin-roles-list-create'),

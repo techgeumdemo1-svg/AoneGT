@@ -407,28 +407,30 @@ def _resolve_customer_id(order: Order) -> str:
     if not name:
         name = email or f'Customer {user.pk}'
 
-    # Branch 1 — stored contact id: validate it still exists in Zoho Books
+    # Branch 1 — stored contact id: use immediately on checkout (fast path).
     stored = (getattr(user, 'zoho_books_contact_id', '') or '').strip()
-    if stored and books_get_contact(stored, store=store):
-        books_update_contact_name(stored, name, store=store)
-        return stored
     if stored:
-        from accounts.models import User as UserModel
-        UserModel.objects.filter(pk=user.pk).update(zoho_books_contact_id='')
-        user.zoho_books_contact_id = ''
+        from shop.services.checkout_async import schedule_books_contact_name_update
+
+        schedule_books_contact_name_update(stored, name, store)
+        return stored
 
     # Branch 2 — search by email (most reliable, exact match)
     existing = books_find_contact_id_by_email(email, store=store) if email else None
     if existing:
         _persist_user_books_contact_id(user, existing)
-        books_update_contact_name(existing, name, store=store)
+        from shop.services.checkout_async import schedule_books_contact_name_update
+
+        schedule_books_contact_name_update(existing, name, store)
         return existing
 
     # Branch 3 — search by name + email composite (both must match)
     existing_by_name = books_find_contact_id_by_name(name, store=store, email=email)
     if existing_by_name:
         _persist_user_books_contact_id(user, existing_by_name)
-        books_update_contact_name(existing_by_name, name, store=store)
+        from shop.services.checkout_async import schedule_books_contact_name_update
+
+        schedule_books_contact_name_update(existing_by_name, name, store)
         return existing_by_name
 
     # Branch 4 — create new contact

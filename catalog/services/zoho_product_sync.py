@@ -14,6 +14,7 @@ from django.db import transaction
 from django.utils.text import slugify
 
 from catalog.models import Product, Store
+from catalog.services.product_images import extract_image_url_from_zoho_raw, is_usable_image_url
 from catalog.services.zoho_product_ids import (
     extract_zoho_category_id_from_detail,
     extract_zoho_collection_id_from_detail,
@@ -178,10 +179,13 @@ def _resolve_unique_slug(store: Store, base: str, zoho_id: str, product: Product
     return f'{root}-{zpart}-s{store.pk}-z{zoho_id}'[:255]
 
 
-def _upsert_product(store: Store, row: dict[str, Any]) -> tuple[str, Product]:
+def _upsert_product(store: Store, row: dict[str, Any], *, zoho_raw: dict[str, Any] | None = None) -> tuple[str, Product]:
     zid = row['zoho_product_id']
     product = Product.objects.filter(store=store, zoho_product_id=zid).first()
     slug = _resolve_unique_slug(store, row['slug_hint'], zid, product)
+    image_url = ''
+    if zoho_raw:
+        image_url = extract_image_url_from_zoho_raw(zoho_raw, store)
     defaults = {
         'name': row['name'][:255],
         'slug': slug,
@@ -194,6 +198,8 @@ def _upsert_product(store: Store, row: dict[str, Any]) -> tuple[str, Product]:
         'zoho_collection_id': (row.get('zoho_collection_id') or '')[:120],
         'is_active': row['is_active'],
     }
+    if image_url and is_usable_image_url(image_url):
+        defaults['image_url'] = image_url[:500]
     if product is None:
         product = Product(store=store, zoho_product_id=zid)
         for k, v in defaults.items():
@@ -307,7 +313,23 @@ def sync_store_from_zoho(
             with transaction.atomic():
                 for row in batch_rows:
                     try:
-                        action, _p = _upsert_product(store, row)
+                        raw_match = next(
+                            (
+                                raw
+                                for raw in products
+                                if isinstance(raw, dict)
+                                and (
+                                    str(raw.get('product_id') or '').strip() == row.get('zoho_product_id')
+                                    or any(
+                                        str(v.get('variant_id') or '').strip() == row.get('zoho_product_id')
+                                        for v in (raw.get('variants') or [])
+                                        if isinstance(v, dict)
+                                    )
+                                )
+                            ),
+                            None,
+                        )
+                        action, _p = _upsert_product(store, row, zoho_raw=raw_match)
                         stats[action] += 1
                     except Exception as e:
                         stats['errors'].append(f'upsert {row.get("zoho_product_id")}: {e}')

@@ -1,10 +1,7 @@
-from urllib.parse import quote
-
 from rest_framework import serializers
 
-from zoho_integration.models import ZohoCommerceAccount
-from zoho_integration.services import ZohoCommerceService as ZohoAccountService
 from .models import Store, Product, Banner, ProductReview
+from .services.product_images import product_display_image_url
 from .services.product_reviews import user_can_review_product, user_has_delivered_purchase
 from .text_utils import html_to_plain_text
 
@@ -20,65 +17,8 @@ class StoreListSerializer(serializers.ModelSerializer):
 class ProductListSerializer(serializers.ModelSerializer):
     image_url = serializers.SerializerMethodField()
 
-    @staticmethod
-    def _is_cdn_url(value: str) -> bool:
-        raw = (value or '').strip().lower()
-        return raw.startswith('https://cdn1.zohoecommerce.com/')
-
-    @staticmethod
-    def _build_zoho_cdn_product_document_url(store_domain: str, payload: dict) -> str:
-        domain = (store_domain or '').strip().replace('https://', '').replace('http://', '')
-        if not domain or not isinstance(payload, dict):
-            return ''
-        source = payload.get('product') if isinstance(payload.get('product'), dict) else payload
-        if not isinstance(source, dict):
-            return ''
-        rows = source.get('documents') or source.get('attachments') or source.get('images') or []
-        if isinstance(rows, list):
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                row_document_id = str(
-                    row.get('document_id')
-                    or row.get('image_document_id')
-                    or row.get('image_id')
-                    or row.get('id')
-                    or ''
-                ).strip()
-                if row_document_id:
-                    return (
-                        f'https://cdn1.zohoecommerce.com/category-images/{quote(row_document_id)}/800x800'
-                        f'?storefront_domain={domain}'
-                    )
-        return ''
-
     def get_image_url(self, obj):
-        current = (getattr(obj, 'image_url', '') or '').strip()
-        if self._is_cdn_url(current):
-            return current
-
-        zoho_pid = (getattr(obj, 'zoho_product_id', '') or '').strip()
-        store = getattr(obj, 'store', None)
-        if not store or not zoho_pid:
-            return ''
-
-        org_id = (getattr(store, 'zoho_org_id', '') or '').strip()
-        store_domain = (getattr(store, 'zoho_store_domain', '') or '').strip()
-        if not (org_id and store_domain):
-            return ''
-
-        account = ZohoCommerceAccount.objects.filter(is_active=True, organization_id=org_id).first()
-        if account is None:
-            return ''
-        try:
-            detail = ZohoAccountService(account).get_product_detail(
-                organization_id=org_id,
-                product_id=zoho_pid,
-            )
-            cdn = self._build_zoho_cdn_product_document_url(store_domain, detail)
-            return cdn or ''
-        except Exception:
-            return ''
+        return product_display_image_url(obj, allow_zoho_fetch=False)
 
     class Meta:
         model = Product
@@ -91,6 +31,7 @@ class ProductListSerializer(serializers.ModelSerializer):
 class ProductDetailSerializer(serializers.ModelSerializer):
     store = StoreListSerializer(read_only=True)
     description = serializers.SerializerMethodField()
+    image_url = serializers.SerializerMethodField()
     review_count = serializers.SerializerMethodField()
     average_rating = serializers.SerializerMethodField()
 
@@ -105,6 +46,9 @@ class ProductDetailSerializer(serializers.ModelSerializer):
 
     def get_description(self, obj):
         return html_to_plain_text(obj.description)
+
+    def get_image_url(self, obj):
+        return product_display_image_url(obj, allow_zoho_fetch=True)
 
     def get_review_count(self, obj):
         return obj.reviews.count()

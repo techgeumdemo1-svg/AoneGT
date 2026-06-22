@@ -13,10 +13,12 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from shop.models import Cart, Order, UserAddress, WishlistItem
 from .throttles import (
     ChangePasswordOTPThrottle,
+    CheckEmailRateThrottle,
     DeactivateAccountOTPThrottle,
     DeleteAccountOTPThrottle,
-    ForgotPasswordRateThrottle,
+    LoginRateThrottle,
     ReactivateAccountOTPThrottle,
+    RegisterRateThrottle,
 )
 
 from .models import (
@@ -59,6 +61,8 @@ logger = logging.getLogger(__name__)
 
 
 class RegisterAPIView(APIView):
+    throttle_classes = [RegisterRateThrottle]
+
     def post(self, request):
         serializer = RegisterSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -80,6 +84,8 @@ _NOT_EXISTS_MESSAGE = 'account not exists'
 
 
 class CheckEmailAPIView(APIView):
+    throttle_classes = [CheckEmailRateThrottle]
+
     def post(self, request):
         serializer = EmailCheckSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -209,6 +215,8 @@ class RequestRegistrationOTPAPIView(APIView):
 
 
 class LoginAPIView(APIView):
+    throttle_classes = [LoginRateThrottle]
+
     def post(self, request):
         serializer = LoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -241,8 +249,6 @@ class LogoutAPIView(APIView):
 
 
 class ForgotPasswordAPIView(APIView):
-    throttle_classes = [ForgotPasswordRateThrottle]
-
     def post(self, request):
         serializer = ForgotPasswordRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)

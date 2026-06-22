@@ -439,7 +439,9 @@ def create_zoho_books_sales_order_for_order(order: Order) -> bool:
         salesorder_id,
         salesorder_number,
     )
-    _maybe_add_sales_order_hover_comment(order, salesorder_id)
+    from shop.services.checkout_async import schedule_sales_order_hover_comment
+
+    schedule_sales_order_hover_comment(order.pk, salesorder_id)
     return True
 
 

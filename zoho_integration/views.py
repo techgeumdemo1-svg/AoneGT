@@ -11,6 +11,13 @@ from urllib.parse import quote, urlencode
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+
+
+class ZohoProxyAPIView(APIView):
+    """Zoho server-credential proxy endpoints require an authenticated user."""
+
+    permission_classes = [IsAuthenticated]
 
 from .models import ZohoCommerceAccount
 from .services import ZohoCommerceService
@@ -715,19 +722,7 @@ def zoho_callback(request):
         if not response.ok or "error" in token_data:
             return JsonResponse({
                 "status": "error",
-                "message": "Zoho token exchange failed",
-                "http_status": response.status_code,
-                "token_url": token_url,
-                "request_payload_preview": {
-                    "grant_type": payload["grant_type"],
-                    "client_id": f"{client_id[:8]}..." if client_id else "",
-                    "redirect_uri": payload["redirect_uri"],
-                    "code_preview": code[:10] + "...",
-                },
-                "response_data": token_data,
-                "account_id": account.id if account else None,
-                "location": location,
-                "accounts_server": accounts_server,
+                "message": "Zoho token exchange failed.",
             }, status=400)
 
         if account is not None and token_data.get("refresh_token"):
@@ -736,23 +731,14 @@ def zoho_callback(request):
 
         return JsonResponse({
             "status": "success",
-            "message": "Zoho token generated successfully",
-            "access_token": token_data.get("access_token"),
-            "refresh_token": token_data.get("refresh_token"),
-            "expires_in": token_data.get("expires_in"),
-            "scope": token_data.get("scope"),
-            "api_domain": token_data.get("api_domain"),
-            "token_type": token_data.get("token_type"),
+            "message": "Zoho authorization completed. Tokens were stored server-side.",
             "account_id": account.id if account else None,
-            "location": location,
-            "accounts_server": accounts_server,
         })
 
-    except requests.RequestException as e:
+    except requests.RequestException:
         return JsonResponse({
             "status": "error",
-            "message": "Request to Zoho failed",
-            "details": str(e),
+            "message": "Request to Zoho failed.",
         }, status=500)
 
         
@@ -951,7 +937,7 @@ def _multi_account_store_list_payload() -> dict:
     }
 
 
-class MultiAccountZohoStoreListAPIView(APIView):
+class MultiAccountZohoStoreListAPIView(ZohoProxyAPIView):
     def get(self, request):
         ttl = max(0, int(getattr(settings, "ZOHO_STORE_LIST_CACHE_SECONDS", 300) or 0))
         cache_key = f"zoho:store_list:{request.get_host()}"
@@ -1328,7 +1314,7 @@ def _multi_account_product_list_response(request, account, organization_id: str)
     return Response(payload)
 
 
-class MultiAccountZohoProductListAPIView(APIView):
+class MultiAccountZohoProductListAPIView(ZohoProxyAPIView):
     """
     List Zoho Commerce products for one account + organization.
 
@@ -1364,7 +1350,7 @@ class MultiAccountZohoProductListAPIView(APIView):
             }, status=400)
 
 
-class MultiAccountZohoProductListQueryAPIView(APIView):
+class MultiAccountZohoProductListQueryAPIView(ZohoProxyAPIView):
     def get(self, request):
         account_id_raw = (request.GET.get("account_id") or "").strip()
         organization_id = (request.GET.get("organization_id") or "").strip()
@@ -1461,7 +1447,7 @@ def _product_row_search_haystack(row: dict) -> str:
     return " ".join(parts).lower()
 
 
-class MultiAccountZohoProductSearchAPIView(APIView):
+class MultiAccountZohoProductSearchAPIView(ZohoProxyAPIView):
     """
     Same style as GET /zoho/multi/categories/search/ — text match on the product pool.
 
@@ -1700,7 +1686,7 @@ def _resolve_best_deals_category_id(
     return "", ""
 
 
-class MultiAccountZohoBestDealsAPIView(APIView):
+class MultiAccountZohoBestDealsAPIView(ZohoProxyAPIView):
     """
     Best deals for the mobile app.
 
@@ -2185,7 +2171,7 @@ class MultiAccountZohoBestDealsAPIView(APIView):
         )
 
 
-class MultiAccountZohoProductDetailQueryAPIView(APIView):
+class MultiAccountZohoProductDetailQueryAPIView(ZohoProxyAPIView):
     def get(self, request):
         account_id_raw = (request.GET.get("account_id") or "").strip()
         organization_id = (request.GET.get("organization_id") or "").strip()
@@ -2616,7 +2602,7 @@ def _multi_account_category_list_response(
     return Response(payload)
 
 
-class MultiAccountZohoCategoryListAPIView(APIView):
+class MultiAccountZohoCategoryListAPIView(ZohoProxyAPIView):
     def get(self, request, account_id, organization_id):
         try:
             account = ZohoCommerceAccount.objects.get(id=account_id, is_active=True)
@@ -2634,7 +2620,7 @@ class MultiAccountZohoCategoryListAPIView(APIView):
             }, status=400)
 
 
-class MultiAccountZohoCollectionListQueryAPIView(APIView):
+class MultiAccountZohoCollectionListQueryAPIView(ZohoProxyAPIView):
     """
     GET /zoho/multi/collections/?account_id=&organization_id=
     Lists Zoho Commerce collections via admin API (zohoapis.com/commerce/v1/collections).
@@ -2776,7 +2762,7 @@ class MultiAccountZohoCollectionListQueryAPIView(APIView):
         return Response(payload, status=200)
 
 
-class MultiAccountZohoCategoryListQueryAPIView(APIView):
+class MultiAccountZohoCategoryListQueryAPIView(ZohoProxyAPIView):
     """
     GET …/zoho/multi/categories/?account_id=&organization_id=
 
@@ -2838,7 +2824,7 @@ class MultiAccountZohoCategoryListAonegtGroceryQueryAPIView(MultiAccountZohoCate
     """
 
 
-class MultiAccountZohoSubCategoryListQueryAPIView(APIView):
+class MultiAccountZohoSubCategoryListQueryAPIView(ZohoProxyAPIView):
     """
     Query params:
       - account_id (required)
@@ -2952,7 +2938,7 @@ class MultiAccountZohoSubCategoryListQueryAPIView(APIView):
             )
 
 
-class MultiAccountZohoCategorySearchAPIView(APIView):
+class MultiAccountZohoCategorySearchAPIView(ZohoProxyAPIView):
     """
     Query params:
       - account_id (required)
@@ -3171,12 +3157,12 @@ def _category_image_proxy_redirect(request, account_id, organization_id, categor
         return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
-class MultiAccountZohoCategoryImageProxyAPIView(APIView):
+class MultiAccountZohoCategoryImageProxyAPIView(ZohoProxyAPIView):
     def get(self, request, account_id, organization_id, category_id):
         return _category_image_proxy_redirect(request, account_id, organization_id, category_id)
 
 
-class MultiAccountZohoCategoryImageQueryAPIView(APIView):
+class MultiAccountZohoCategoryImageQueryAPIView(ZohoProxyAPIView):
     """
     Same as path-based category image proxy, but IDs are query params:
     ?account_id=&organization_id=&category_id=
@@ -3251,7 +3237,7 @@ def _product_image_proxy_redirect(request, account_id, organization_id, product_
         return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
-class MultiAccountZohoProductImageProxyAPIView(APIView):
+class MultiAccountZohoProductImageProxyAPIView(ZohoProxyAPIView):
     """
     Redirects product image by account/org/product identifiers.
     """

@@ -44,6 +44,14 @@ def verify_callback_signature(payload):
         order_data       = payload["order"]
         received_sig     = payload["signature"]
         merchant_pub_key = order_data["merchantPublicKey"]
+        configured_key = (getattr(settings, 'GEIDEA_PUBLIC_KEY', '') or '').strip()
+        if configured_key and merchant_pub_key != configured_key:
+            logger.error(
+                'Geidea callback — merchantPublicKey mismatch. expected=%s received=%s',
+                configured_key,
+                merchant_pub_key,
+            )
+            return False
         amount_str       = f"{float(order_data['totalAmount']):.2f}"
         currency         = order_data["currency"]
         geidea_order_id  = order_data["orderId"]
@@ -90,7 +98,12 @@ def process_geidea_callback(payload):
 
     # ── Step A: Signature verification ────────────────────────────────────
     # Log full payload first so we can debug the timestamp issue if needed
-    logger.info("Geidea callback received. payload=%s", payload)
+    # Log order id only — full payload may contain cardholder data.
+    logger.info(
+        "Geidea callback received. orderId=%s merchant_ref=%s",
+        payload.get('order', {}).get('orderId'),
+        payload.get('order', {}).get('merchantReferenceId'),
+    )
 
     if not verify_callback_signature(payload):
         logger.error(

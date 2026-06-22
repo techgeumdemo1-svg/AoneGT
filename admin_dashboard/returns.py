@@ -23,6 +23,7 @@ from shop.services.notifications import create_user_notification
 from shop.services.order_email import send_refund_email
 from shop.services.order_tracking import record_tracking_stage
 from shop.services.order_status_notifications import notify_order_tracking_status_change
+from shop.services.return_refund import return_refund_amount
 from shop.services.zoho_returns import enqueue_push_return_to_zoho, maybe_push_return_to_zoho
 
 from .activity_log_utils import record_admin_activity
@@ -119,10 +120,7 @@ def _normalize_return_status(raw: str) -> Optional[str]:
 
 
 def _return_refund_amount(ret: OrderReturn) -> Decimal:
-    total = Decimal("0")
-    for line in ret.lines.all():
-        total += Decimal(str(line.order_item.unit_price)) * int(line.quantity)
-    return total.quantize(Decimal("0.01"))
+    return return_refund_amount(ret)
 
 
 def _customer_display_name(user) -> str:
@@ -827,9 +825,10 @@ class AdminReturnRefundAPIView(AdminReturnDetailAPIViewMixin, APIView):
                 ret = get_object_or_404(
                     _admin_returns_queryset().select_for_update(), pk=pk,
                 )
-                # Re-check idempotency inside the lock — prevents race condition
-                # where two concurrent requests both called Geidea before this block
-                if (ret.geidea_refund_id or '').strip():
+                from shop.services.geidea_paybylink import _is_geidea_refund_processing
+
+                existing_refund_id = (ret.geidea_refund_id or '').strip()
+                if existing_refund_id and not _is_geidea_refund_processing(existing_refund_id):
                     return Response(
                         {
                             'message': 'Refund already processed.',
@@ -845,9 +844,8 @@ class AdminReturnRefundAPIView(AdminReturnDetailAPIViewMixin, APIView):
                         if ret.note
                         else f'[Refunded] {staff_note}'
                     )
-                ret.geidea_refund_id = geidea_refund_id
                 ret.status = OrderReturn.Status.COMPLETED
-                ret.save(update_fields=['geidea_refund_id', 'status', 'note', 'updated_at'])
+                ret.save(update_fields=['status', 'note', 'updated_at'])
 
             create_user_notification(
                 ret.user,

@@ -2,16 +2,19 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Q
+from django.db.models.deletion import ProtectedError
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from shop.models import Order
+
 from .activity_log_utils import record_admin_activity
 from .models import AdminActivityLog, AdminRole
 from .orders import _paginate_queryset
-from .roles import assign_role_to_user
+from .roles import IsSuperAdmin, assign_role_to_user
 from .views import IsStaffUser
 
 User = get_user_model()
@@ -280,15 +283,81 @@ def _update_admin_user(request, user_id: int):
     )
 
 
+def _delete_admin_user(request, user_id: int):
+    user = get_object_or_404(_admin_users_queryset(), pk=user_id)
+    if user.pk == request.user.pk:
+        return Response(
+            {'detail': 'You cannot delete your own account.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if user.is_superuser and not User.objects.filter(
+        is_superuser=True,
+        is_active=True,
+    ).exclude(pk=user.pk).exists():
+        return Response(
+            {'detail': 'Cannot delete the last active superuser.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if Order.objects.filter(user=user).exists():
+        return Response(
+            {
+                'detail': (
+                    'Cannot delete this user because they have orders. '
+                    'Deactivate the account instead.'
+                ),
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    deleted_id = user.pk
+    deleted_email = user.email
+    try:
+        user.delete()
+    except ProtectedError:
+        return Response(
+            {
+                'detail': (
+                    'Cannot delete this user because related records exist '
+                    '(e.g. orders). Deactivate the account instead.'
+                ),
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    record_admin_activity(
+        request,
+        category=AdminActivityLog.Category.USERS,
+        action='user.deleted',
+        message=f'Deleted admin user #{deleted_id} ({deleted_email}).',
+        target_type='user',
+        target_id=deleted_id,
+        metadata={'email': deleted_email},
+    )
+    return Response(
+        {
+            'message': 'Admin user deleted.',
+            'user_id': deleted_id,
+            'email': deleted_email,
+        },
+        status=status.HTTP_200_OK,
+    )
+
+
 class AdminUserListCreateAPIView(APIView):
     """
-    GET   /api/admin/users/          — list
-    GET   /api/admin/users/?id=<id>  — single admin user detail
-    POST  /api/admin/users/          — create
-    PATCH /api/admin/users/?id=<id>  — update (query param)
+    GET    /api/admin/users/          — list
+    GET    /api/admin/users/?id=<id>  — single admin user detail
+    POST   /api/admin/users/          — create
+    PATCH  /api/admin/users/?id=<id>  — update (query param)
+    DELETE /api/admin/users/?id=<id>  — delete (superuser only)
     """
 
     permission_classes = [IsAuthenticated, IsStaffUser]
+
+    def get_permissions(self):
+        if self.request.method == 'DELETE':
+            return [IsAuthenticated(), IsSuperAdmin()]
+        return [IsAuthenticated(), IsStaffUser()]
 
     def get(self, request):
         if (request.query_params.get('id') or request.query_params.get('user_id') or '').strip():
@@ -337,14 +406,26 @@ class AdminUserListCreateAPIView(APIView):
             return err
         return _update_admin_user(request, user_id)
 
+    def delete(self, request):
+        user_id, err = _parse_user_id_query_param(request)
+        if err:
+            return err
+        return _delete_admin_user(request, user_id)
+
 
 class AdminUserDetailUpdateAPIView(APIView):
     """
-    GET   /api/admin/users/<id>/ — admin user detail
-    PATCH /api/admin/users/<id>/ — update admin user
+    GET    /api/admin/users/<id>/ — admin user detail
+    PATCH  /api/admin/users/<id>/ — update admin user
+    DELETE /api/admin/users/<id>/ — delete admin user (superuser only)
     """
 
     permission_classes = [IsAuthenticated, IsStaffUser]
+
+    def get_permissions(self):
+        if self.request.method == 'DELETE':
+            return [IsAuthenticated(), IsSuperAdmin()]
+        return [IsAuthenticated(), IsStaffUser()]
 
     def get(self, request, pk):
         user = get_object_or_404(_admin_users_queryset(), pk=pk)
@@ -352,6 +433,23 @@ class AdminUserDetailUpdateAPIView(APIView):
 
     def patch(self, request, pk):
         return _update_admin_user(request, pk)
+
+    def delete(self, request, pk):
+        return _delete_admin_user(request, pk)
+
+
+class AdminUserDeleteAPIView(APIView):
+    """
+    DELETE /api/admin/users/delete/?id=<id> — alias for DELETE /api/admin/users/?id=<id>
+    """
+
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+
+    def delete(self, request):
+        user_id, err = _parse_user_id_query_param(request)
+        if err:
+            return err
+        return _delete_admin_user(request, user_id)
 
 
 class AdminUserDeactivateAPIView(APIView):

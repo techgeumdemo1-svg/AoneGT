@@ -159,6 +159,12 @@ class Order(models.Model):
         default='',
         help_text='Full Geidea hosted payment URL returned by eInvoice API.',
     )
+    geidea_refund_id = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        help_text='Geidea refund transaction ID on cancellation. Non-empty = card refund issued.',
+    )
     prepaid_credited_amount = models.DecimalField(
         max_digits=12,
         decimal_places=2,

@@ -156,12 +156,16 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.AllowAny',
     ),
     'DEFAULT_THROTTLE_RATES': {
+        'login': os.getenv('LOGIN_THROTTLE_RATE', '10/minute'),
+        'register': os.getenv('REGISTER_THROTTLE_RATE', '5/hour'),
+        'check_email': os.getenv('CHECK_EMAIL_THROTTLE_RATE', '20/hour'),
         'forgot_password': os.getenv('FORGOT_PASSWORD_THROTTLE_RATE', '5/hour'),
         'deactivate_account_otp': os.getenv('DEACTIVATE_ACCOUNT_OTP_THROTTLE_RATE', '5/hour'),
         'delete_account_otp': os.getenv('DELETE_ACCOUNT_OTP_THROTTLE_RATE', '5/hour'),
         'reactivate_account_otp': os.getenv('REACTIVATE_ACCOUNT_OTP_THROTTLE_RATE', '5/hour'),
         'change_password_otp': os.getenv('CHANGE_PASSWORD_OTP_THROTTLE_RATE', '5/hour'),
         'admin_login_otp': os.getenv('ADMIN_LOGIN_OTP_THROTTLE_RATE', '10/hour'),
+        'admin_forgot_password': os.getenv('ADMIN_FORGOT_PASSWORD_THROTTLE_RATE', '5/hour'),
     },
 }
 
@@ -251,14 +255,18 @@ LOYALTY_COUPON_EXPIRY_DAYS = int(os.getenv('LOYALTY_COUPON_EXPIRY_DAYS', '90'))
 CHECKOUT_TRUST_CLIENT_SHIPPING = os.getenv(
     'CHECKOUT_TRUST_CLIENT_SHIPPING', 'False',
 ).strip().lower() in ('true', '1', 'yes')
-# When True, prepaid checkout requires payment_success + gateway_reference (production).
+# When True, prepaid checkout must not accept client payment_success (enforced in CheckoutSerializer).
 CHECKOUT_REQUIRE_PREPAID_PAYMENT_SUCCESS = os.getenv(
     'CHECKOUT_REQUIRE_PREPAID_PAYMENT_SUCCESS', 'True',
 ).strip().lower() in ('true', '1', 'yes')
 # When true (default), confirmation email is sent in a background thread after checkout.
-# Zoho sales-order sync always runs before the checkout response so SO ids are included.
 CHECKOUT_ASYNC_EMAIL = os.getenv(
     'CHECKOUT_ASYNC_EMAIL', 'True',
+).strip().lower() in ('true', '1', 'yes')
+# When true (default), Zoho sales-order sync runs in a background thread after checkout.
+# Geidea initiate retries sync synchronously if the SO id is not ready yet.
+CHECKOUT_ASYNC_ZOHO_SYNC = os.getenv(
+    'CHECKOUT_ASYNC_ZOHO_SYNC', 'True',
 ).strip().lower() in ('true', '1', 'yes')
 try:
     DEFAULT_SHIPPING_AMOUNT = Decimal(os.getenv('DEFAULT_SHIPPING_AMOUNT', '0'))
@@ -400,9 +408,18 @@ except (ValueError, TypeError):
     GEIDEA_PAYLINK_EXPIRY_DAYS = 7
 # ─────────────────────────────────────────────────────────────────────────
 
+try:
+    _jwt_access_minutes = int(os.getenv('JWT_ACCESS_TOKEN_LIFETIME_MINUTES', '60') or '60')
+except (TypeError, ValueError):
+    _jwt_access_minutes = 60
+try:
+    _jwt_refresh_days = int(os.getenv('JWT_REFRESH_TOKEN_LIFETIME_DAYS', '7') or '7')
+except (TypeError, ValueError):
+    _jwt_refresh_days = 7
+
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=5),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=5),
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=_jwt_access_minutes),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=_jwt_refresh_days),
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
