@@ -5,10 +5,11 @@ from django.conf import settings
 from django.core.mail import send_mail
 from django.db import transaction
 from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
 from shop.models import Cart, Order, UserAddress, WishlistItem
 from .throttles import (
@@ -221,6 +222,22 @@ class LoginAPIView(APIView):
         serializer = LoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class RefreshTokenAPIView(APIView):
+    """
+    Exchange a valid refresh token for a new access token.
+
+    POST /api/auth/refresh-token/
+    Body: {"refresh": "<refresh_token>"}
+    """
+
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = TokenRefreshSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        return Response(serializer.validated_data, status=status.HTTP_200_OK)
 
 
 class LogoutAPIView(APIView):

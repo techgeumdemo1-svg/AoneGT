@@ -727,75 +727,6 @@ def order_display_status(order: Order) -> str:
     return 'Pending'
 
 
-class OrderListSerializer(serializers.ModelSerializer):
-    """Lightweight serializer for paginated shop order history."""
-
-    order_id = serializers.IntegerField(source='id', read_only=True)
-    order_code = serializers.SerializerMethodField()
-    display_status = serializers.SerializerMethodField()
-    items_count = serializers.SerializerMethodField()
-    can_reorder = serializers.SerializerMethodField()
-    can_return = serializers.SerializerMethodField()
-    can_cancel = serializers.SerializerMethodField()
-    order_date = serializers.SerializerMethodField()
-    payment_method_label = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Order
-        fields = (
-            'order_id',
-            'store',
-            'status',
-            'currency',
-            'payment_method',
-            'payment_status',
-            'total',
-            'order_code',
-            'display_status',
-            'items_count',
-            'can_reorder',
-            'can_return',
-            'can_cancel',
-            'order_date',
-            'payment_method_label',
-            'customer_tracking_stage',
-            'created_at',
-            'updated_at',
-        )
-        read_only_fields = fields
-
-    def get_order_code(self, obj):
-        return order_code_for_order(obj)
-
-    def get_display_status(self, obj):
-        return order_display_status(obj)
-
-    def get_items_count(self, obj):
-        return int(sum((int(it.quantity or 0) for it in obj.items.all()), 0))
-
-    def get_can_reorder(self, obj):
-        return bool(obj.items.all())
-
-    def get_can_return(self, obj):
-        if not order_allows_returns(obj):
-            return False
-        return order_return_status(obj) != 'full'
-
-    def get_can_cancel(self, obj):
-        from shop.services.order_cancel import order_cancellation_blocked_reason
-
-        return order_cancellation_blocked_reason(obj, customer=True) is None
-
-    def get_order_date(self, obj):
-        return obj.created_at.strftime('%d %b %Y')
-
-    def get_payment_method_label(self, obj) -> str:
-        try:
-            return Order.PaymentMethod(obj.payment_method).label
-        except (ValueError, TypeError):
-            return str(obj.payment_method or '')
-
-
 class OrderSerializer(serializers.ModelSerializer):
     order_id = serializers.IntegerField(source='id', read_only=True)
     items = OrderItemSerializer(many=True, read_only=True)
@@ -1048,6 +979,43 @@ class OrderSerializer(serializers.ModelSerializer):
 
     def get_net_paid(self, obj):
         return self.get_balance_remaining(obj)
+
+
+_ORDER_LIST_EXCLUDED_FIELDS = frozenset({
+    'billing_name',
+    'billing_phone',
+    'billing_address',
+    'billing_city',
+    'billing_state',
+    'billing_postal_code',
+    'billing_country',
+    'zoho_checkout_id',
+    'zoho_salesorder_id',
+    'zoho_sync_error',
+    'zoho_synced_at',
+    'zoho_books_invoice_id',
+    'zoho_books_invoice_number',
+    'zoho_books_invoiced_at',
+    'zoho_books_invoice_error',
+    'zoho_books_salesorder_id',
+    'zoho_books_salesorder_number',
+    'zoho_books_salesordered_at',
+    'zoho_books_salesorder_error',
+    'zoho_books_payment_id',
+    'zoho_books_paid_at',
+    'zoho_books_payment_error',
+    'tracking',
+})
+
+
+class OrderListSerializer(OrderSerializer):
+    """Paginated order list: full order payload minus billing, Zoho sync, and tracking fields."""
+
+    class Meta(OrderSerializer.Meta):
+        fields = tuple(f for f in OrderSerializer.Meta.fields if f not in _ORDER_LIST_EXCLUDED_FIELDS)
+        read_only_fields = tuple(
+            f for f in OrderSerializer.Meta.read_only_fields if f not in _ORDER_LIST_EXCLUDED_FIELDS
+        )
 
 
 class LoyaltyIssueCouponSerializer(serializers.Serializer):

@@ -145,7 +145,7 @@ class ProductReview(models.Model):
     )
     rating = models.PositiveSmallIntegerField()
     title = models.CharField(max_length=200, blank=True)
-    body = models.TextField(blank=True)
+    body = models.CharField(max_length=500, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

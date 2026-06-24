@@ -81,6 +81,7 @@ from .serializers import (
     LoyaltyIssueCouponSerializer,
     LoyaltyIssuedCouponSerializer,
     OrderSerializer,
+    OrderListSerializer,
     OrderEditSerializer,
     FCMDeviceTokenSerializer,
     PushSettingsSerializer,
@@ -1988,7 +1989,7 @@ class OrderPagination(PageNumberPagination):
 
 class OrderListAPIView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
-    serializer_class = OrderSerializer
+    serializer_class = OrderListSerializer
     pagination_class = OrderPagination
 
     def get_queryset(self):

@@ -117,6 +117,8 @@ class UserReviewedProductSerializer(serializers.ModelSerializer):
 
 
 class ProductReviewCreateSerializer(serializers.ModelSerializer):
+    body = serializers.CharField(max_length=500, allow_blank=True, required=False)
+
     class Meta:
         model = ProductReview
         fields = ('rating', 'title', 'body')
