@@ -2,9 +2,20 @@ from decimal import Decimal
 from urllib.parse import quote
 
 from django.conf import settings
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers
+
+from accounts.validators import (
+    drf_validation_error,
+    validate_address_line,
+    validate_address_type,
+    validate_city_name,
+    validate_person_name,
+    validate_phone_number,
+    validate_state_name,
+)
 
 from catalog.models import Product, Store
 from offer.models import Coupon
@@ -525,7 +536,11 @@ class UserAddressSerializer(serializers.ModelSerializer):
         'flat': 'flat',
         'office': 'office',
         'apartments': 'apartments',
+        'work': 'office',
+        'offive': 'office',
+        'other': 'apartments',
     }
+    _allowed_address_types = {choice.value for choice in UserAddress.AddressType}
 
     class Meta:
         model = UserAddress
@@ -544,35 +559,44 @@ class UserAddressSerializer(serializers.ModelSerializer):
         read_only_fields = ('id', 'created_at', 'updated_at')
 
     def validate_full_name(self, value):
-        value = (value or '').strip()
-        if not value:
-            raise serializers.ValidationError('Full name is required.')
-        return value
+        try:
+            return validate_person_name(value, field_label='Full name', required=True)
+        except DjangoValidationError as exc:
+            raise drf_validation_error(exc)
 
     def validate_phone_number(self, value):
-        value = (value or '').strip()
-        if not value:
-            raise serializers.ValidationError('Phone number is required.')
-        return value
+        try:
+            return validate_phone_number(value)
+        except DjangoValidationError as exc:
+            raise drf_validation_error(exc)
 
     def validate_address(self, value):
-        value = (value or '').strip()
-        if not value:
-            raise serializers.ValidationError('Address is required.')
-        return value
+        try:
+            return validate_address_line(value, field_label='Address')
+        except DjangoValidationError as exc:
+            raise drf_validation_error(exc)
 
     def validate_city(self, value):
-        value = (value or '').strip()
-        if not value:
-            raise serializers.ValidationError('City is required.')
-        return value
+        try:
+            return validate_city_name(value)
+        except DjangoValidationError as exc:
+            raise drf_validation_error(exc)
 
     def validate_state(self, value):
-        return (value or '').strip()
+        try:
+            return validate_state_name(value)
+        except DjangoValidationError as exc:
+            raise drf_validation_error(exc)
 
     def validate_address_type(self, value):
-        normalized = (value or '').strip().lower()
-        return self._address_type_aliases.get(normalized, normalized)
+        try:
+            return validate_address_type(
+                value,
+                allowed_types=self._allowed_address_types,
+                aliases=self._address_type_aliases,
+            )
+        except DjangoValidationError as exc:
+            raise drf_validation_error(exc)
 
     def create(self, validated_data):
         user = self.context['request'].user

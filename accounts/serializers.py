@@ -11,6 +11,11 @@ from .services.zoho_registration_gate import (
     registration_email_exists_in_zoho,
     resolved_register_zoho_email_source,
 )
+from .validators import (
+    drf_validation_error,
+    validate_person_name,
+    validate_phone_number,
+)
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -32,10 +37,24 @@ class RegisterSerializer(serializers.ModelSerializer):
         read_only_fields = ['id']
 
     def validate_phone(self, value):
-        value = (value or '').strip()
-        if not value:
-            raise serializers.ValidationError('Phone number is required.')
-        return value
+        try:
+            return validate_phone_number(value)
+        except DjangoValidationError as exc:
+            raise drf_validation_error(exc)
+
+    def validate_first_name(self, value):
+        try:
+            return validate_person_name(value, field_label='First name', required=True)
+        except DjangoValidationError as exc:
+            raise drf_validation_error(exc)
+
+    def validate_last_name(self, value):
+        if value is None or str(value).strip() == '':
+            return ''
+        try:
+            return validate_person_name(value, field_label='Last name', required=False)
+        except DjangoValidationError as exc:
+            raise drf_validation_error(exc)
 
     def validate_email(self, value):
         normalized = value.strip().lower()
@@ -273,13 +292,26 @@ class UserProfileUpdateSerializer(serializers.ModelSerializer):
         return normalized
 
     def validate_first_name(self, value):
-        value = (value or '').strip()
-        if not value:
-            raise serializers.ValidationError('First name cannot be empty.')
-        return value
+        try:
+            return validate_person_name(value, field_label='First name', required=True)
+        except DjangoValidationError as exc:
+            raise drf_validation_error(exc)
+
+    def validate_last_name(self, value):
+        if value is None or str(value).strip() == '':
+            return ''
+        try:
+            return validate_person_name(value, field_label='Last name', required=False)
+        except DjangoValidationError as exc:
+            raise drf_validation_error(exc)
 
     def validate_phone(self, value):
-        return (value or '').strip()
+        if not (value or '').strip():
+            raise serializers.ValidationError('Phone number is required.')
+        try:
+            return validate_phone_number(value)
+        except DjangoValidationError as exc:
+            raise drf_validation_error(exc)
 
 
 class DeactivateAccountConfirmSerializer(serializers.Serializer):
