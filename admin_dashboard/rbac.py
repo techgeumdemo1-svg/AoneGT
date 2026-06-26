@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from rest_framework.permissions import BasePermission
+
 from .models import AdminPermission, AdminRole, AdminUserRole
 
 
@@ -69,3 +71,26 @@ def user_has_permission_code(user, permission_code: str) -> bool:
         code=permission_code,
         roles__user_bindings__user=user,
     ).exists()
+
+
+def user_has_any_permission_code(user, permission_codes: list[str]) -> bool:
+    return any(user_has_permission_code(user, code) for code in permission_codes if code)
+
+
+class HasCollectCodPermission(BasePermission):
+    """POST collect-cod: orders.collect_cod and/or orders.update_status (managers)."""
+
+    message = "Access denied. Missing permission: orders.collect_cod"
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not user or not user.is_authenticated or not (user.is_staff or user.is_superuser):
+            return False
+        if user.is_superuser:
+            return True
+        if get_user_role(user) is None:
+            self.message = "No admin role assigned. Contact Super Admin."
+            return False
+        if user_has_any_permission_code(user, ["orders.collect_cod", "orders.update_status"]):
+            return True
+        return False

@@ -52,6 +52,7 @@ from shop.services.zoho_books_payment import (
 
 from .activity_log_utils import record_admin_activity
 from .models import AdminActivityLog
+from .rbac import HasCollectCodPermission
 from .views import IsStaffUser
 
 # Admin-facing labels (request) → customer_tracking_stage key or "cancelled"
@@ -738,7 +739,7 @@ class AdminOrderCollectCodAPIView(APIView):
     POST /api/admin/orders/collect-cod/?id=<order_id>
     """
 
-    permission_classes = [IsAuthenticated, IsStaffUser]
+    permission_classes = [IsAuthenticated, HasCollectCodPermission]
 
     def post(self, request):
         order_id, err = _parse_order_id_query_param(request)

@@ -46,6 +46,16 @@ class AdminRoleSerializer(serializers.ModelSerializer):
         return codes
 
 
+def _parse_role_id_query_param(request):
+    role_id = (request.query_params.get("id") or request.data.get("id") or "").strip()
+    if not role_id.isdigit():
+        return None, Response(
+            {"detail": "Role id is required. Use ?id=<id>."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return int(role_id), None
+
+
 class AdminRoleListCreateAPIView(APIView):
     permission_classes = [IsAuthenticated, IsSuperAdmin]
 
@@ -79,10 +89,10 @@ class AdminRoleDetailAPIView(APIView):
     permission_classes = [IsAuthenticated, IsSuperAdmin]
 
     def patch(self, request):
-        role_id = (request.query_params.get("id") or request.data.get("id") or "").strip()
-        if not role_id.isdigit():
-            return Response({"detail": "Role id is required. Use ?id=<id>."}, status=status.HTTP_400_BAD_REQUEST)
-        role = get_object_or_404(AdminRole.objects.prefetch_related("permissions"), pk=int(role_id))
+        role_id, err = _parse_role_id_query_param(request)
+        if err:
+            return err
+        role = get_object_or_404(AdminRole.objects.prefetch_related("permissions"), pk=role_id)
 
         serializer = AdminRoleSerializer(role, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
@@ -107,6 +117,44 @@ class AdminRoleDetailAPIView(APIView):
             target_id=role.pk,
         )
         return Response({"message": "Role updated.", "role": AdminRoleSerializer(role).data}, status=status.HTTP_200_OK)
+
+    def delete(self, request):
+        role_id, err = _parse_role_id_query_param(request)
+        if err:
+            return err
+        role = get_object_or_404(AdminRole, pk=role_id)
+        if role.is_system:
+            return Response(
+                {"detail": "System roles cannot be deleted."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        assigned_count = AdminUserRole.objects.filter(role=role).count()
+        if assigned_count:
+            return Response(
+                {
+                    "detail": (
+                        f"Role is assigned to {assigned_count} user(s). "
+                        "Reassign or remove the role from those users before deleting."
+                    ),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        role_name = role.name
+        role_pk = role.pk
+        role.delete()
+        record_admin_activity(
+            request,
+            category=AdminActivityLog.Category.USERS,
+            action="role.deleted",
+            message=f"Deleted role #{role_pk} ({role_name}).",
+            target_type="role",
+            target_id=role_pk,
+            metadata={"name": role_name},
+        )
+        return Response(
+            {"message": "Role deleted.", "role_id": role_pk, "name": role_name},
+            status=status.HTTP_200_OK,
+        )
 
 
 class AdminPermissionListAPIView(APIView):
