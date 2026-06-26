@@ -21,6 +21,7 @@ from .finance import (
 from .orders import (
     AdminOrderCollectCardAPIView,
     AdminOrderCollectCodAPIView,
+    AdminCancelledOrderListAPIView,
     AdminOrderCreateInvoiceAPIView,
     AdminOrderDetailAPIView,
     AdminOrderGeideaCollectAPIView,
@@ -100,6 +101,7 @@ urlpatterns = [
     path('dashboard/summary/', AdminDashboardSummaryAPIView.as_view(), name='admin-dashboard-summary'),
     path('dashboard/charts/', AdminDashboardChartsAPIView.as_view(), name='admin-dashboard-charts'),
     path('orders/', AdminOrderListAPIView.as_view(), name='admin-orders-list'),
+    path('orders/cancelled/', AdminCancelledOrderListAPIView.as_view(), name='admin-orders-cancelled'),
     path('orders/detail/', AdminOrderDetailAPIView.as_view(), name='admin-orders-detail'),
     path('orders/status/', AdminOrderStatusUpdateAPIView.as_view(), name='admin-orders-status'),
     path('orders/collect-cod/', AdminOrderCollectCodAPIView.as_view(), name='admin-orders-collect-cod'),

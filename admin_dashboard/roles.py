@@ -83,11 +83,14 @@ class AdminRoleDetailAPIView(APIView):
         if not role_id.isdigit():
             return Response({"detail": "Role id is required. Use ?id=<id>."}, status=status.HTTP_400_BAD_REQUEST)
         role = get_object_or_404(AdminRole.objects.prefetch_related("permissions"), pk=int(role_id))
-        if role.is_system:
-            return Response({"detail": "System roles cannot be edited."}, status=status.HTTP_400_BAD_REQUEST)
 
         serializer = AdminRoleSerializer(role, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
+        if role.is_system and "name" in serializer.validated_data:
+            return Response(
+                {"detail": "System role names cannot be changed."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if "name" in serializer.validated_data:
             role.name = serializer.validated_data["name"]
             role.save(update_fields=["name", "updated_at"])

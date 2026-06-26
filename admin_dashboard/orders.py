@@ -190,15 +190,7 @@ def build_admin_order_detail_payload(order: Order) -> dict:
     data['shipping_amount'] = money(order.shipping_amount)
     data['tax_percent'] = money(order.vat_percent)
     data['tax_amount'] = money(order.vat_amount)
-    data['delivery_address'] = {
-        'name': order.shipping_name or '',
-        'phone': order.shipping_phone or '',
-        'address': order.shipping_address or '',
-        'city': order.shipping_city or '',
-        'state': order.shipping_state or '',
-        'postal_code': order.shipping_postal_code or '',
-        'country': order.shipping_country or '',
-    }
+    data['delivery_address'] = _order_delivery_address(order)
     items = []
     for it in order.items.all():
         unit = Decimal(str(it.unit_price or 0)).quantize(Decimal('0.01'))
@@ -239,12 +231,27 @@ def _optional_decimal(raw) -> Optional[Decimal]:
     return Decimal(str(raw)).quantize(Decimal("0.01"))
 
 
+def _order_delivery_address(order: Order) -> dict:
+    return {
+        'name': order.shipping_name or '',
+        'phone': order.shipping_phone or '',
+        'address': order.shipping_address or '',
+        'city': order.shipping_city or '',
+        'state': order.shipping_state or '',
+        'postal_code': order.shipping_postal_code or '',
+        'country': order.shipping_country or '',
+    }
+
+
 class AdminOrderListSerializer(serializers.ModelSerializer):
     order_id = serializers.IntegerField(source="id", read_only=True)
     order_code = serializers.SerializerMethodField()
     customer_id = serializers.IntegerField(source="user_id", read_only=True)
     customer_email = serializers.EmailField(source="user.email", read_only=True)
     customer_name = serializers.SerializerMethodField()
+    customer = serializers.SerializerMethodField()
+    cancelled_at = serializers.SerializerMethodField()
+    delivery_address = serializers.SerializerMethodField()
     store_id = serializers.IntegerField(read_only=True)
     store_name = serializers.CharField(source="store.name", read_only=True)
     display_status = serializers.SerializerMethodField()
@@ -258,6 +265,9 @@ class AdminOrderListSerializer(serializers.ModelSerializer):
             "customer_id",
             "customer_email",
             "customer_name",
+            "customer",
+            "cancelled_at",
+            "delivery_address",
             "store_id",
             "store_name",
             "status",
@@ -278,6 +288,24 @@ class AdminOrderListSerializer(serializers.ModelSerializer):
     def get_customer_name(self, obj):
         parts = [obj.user.first_name or "", obj.user.last_name or ""]
         return " ".join(p for p in parts if p).strip() or obj.user.email
+
+    def get_customer(self, obj):
+        user = obj.user
+        return {
+            'id': user.pk,
+            'email': user.email,
+            'first_name': user.first_name or '',
+            'last_name': user.last_name or '',
+            'phone': user.phone or '',
+        }
+
+    def get_cancelled_at(self, obj):
+        if obj.status != Order.Status.CANCELLED:
+            return None
+        return cancelled_at(obj)
+
+    def get_delivery_address(self, obj):
+        return _order_delivery_address(obj)
 
     def get_display_status(self, obj):
         return _display_status_for_order(obj)
@@ -431,10 +459,12 @@ def _apply_order_date_filter(queryset, request) -> Tuple[object, Optional[str], 
     )
 
 
-def _apply_order_list_filters(queryset, request):
-    status_filter = (request.query_params.get("status") or "").strip()
+def _apply_order_list_filters(queryset, request, *, forced_status: Optional[str] = None):
+    status_filter = (forced_status or request.query_params.get("status") or "").strip()
+    applied_status = None
     if status_filter:
         normalized = _normalize_admin_status(status_filter)
+        applied_status = normalized or status_filter
         if normalized == "cancelled":
             queryset = queryset.filter(status=Order.Status.CANCELLED)
         elif normalized:
@@ -457,7 +487,28 @@ def _apply_order_list_filters(queryset, request):
         queryset = queryset.filter(store_id=int(store_id))
 
     queryset, date_err, date_meta = _apply_order_date_filter(queryset, request)
-    return queryset, date_err, date_meta
+    return queryset, date_err, date_meta, applied_status
+
+
+def _admin_orders_list_response(request, *, forced_status: Optional[str] = None):
+    qs, date_err, date_filter, applied_status = _apply_order_list_filters(
+        _admin_orders_queryset().order_by("-created_at"),
+        request,
+        forced_status=forced_status,
+    )
+    if date_err:
+        return Response({"detail": date_err}, status=status.HTTP_400_BAD_REQUEST)
+
+    page_qs, pagination = _paginate_queryset(qs, request)
+    payload = {
+        **pagination,
+        "results": AdminOrderListSerializer(page_qs, many=True).data,
+    }
+    if date_filter:
+        payload["date_filter"] = date_filter
+    if applied_status:
+        payload["status_filter"] = applied_status
+    return Response(payload, status=status.HTTP_200_OK)
 
 
 def _apply_status_update(order: Order, new_status: str) -> Order:
@@ -566,8 +617,9 @@ def _build_order_timeline(order: Order) -> list:
 
 class AdminOrderListAPIView(APIView):
     """
-    GET /api/admin/orders/          — paginated list
-    GET /api/admin/orders/?id=<id> — order detail with delivery, items, tracking
+    GET /api/admin/orders/                    — paginated list
+    GET /api/admin/orders/?status=cancelled   — cancelled orders with customer details
+    GET /api/admin/orders/?id=<id>            — order detail with delivery, items, tracking
     """
 
     permission_classes = [IsAuthenticated, IsStaffUser]
@@ -580,21 +632,20 @@ class AdminOrderListAPIView(APIView):
             order = get_object_or_404(_admin_orders_queryset(), pk=order_id)
             return Response(build_admin_order_detail_payload(order), status=status.HTTP_200_OK)
 
-        qs, date_err, date_filter = _apply_order_list_filters(
-            _admin_orders_queryset().order_by("-created_at"),
-            request,
-        )
-        if date_err:
-            return Response({"detail": date_err}, status=status.HTTP_400_BAD_REQUEST)
+        return _admin_orders_list_response(request)
 
-        page_qs, pagination = _paginate_queryset(qs, request)
-        payload = {
-            **pagination,
-            "results": AdminOrderListSerializer(page_qs, many=True).data,
-        }
-        if date_filter:
-            payload["date_filter"] = date_filter
-        return Response(payload, status=status.HTTP_200_OK)
+
+class AdminCancelledOrderListAPIView(APIView):
+    """
+    GET /api/admin/orders/cancelled/ — paginated cancelled orders with customer details.
+
+    Alias for GET /api/admin/orders/?status=cancelled
+    """
+
+    permission_classes = [IsAuthenticated, IsStaffUser]
+
+    def get(self, request):
+        return _admin_orders_list_response(request, forced_status='cancelled')
 
 
 class AdminOrderDetailAPIView(APIView):
