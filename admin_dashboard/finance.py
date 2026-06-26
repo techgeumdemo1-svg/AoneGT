@@ -2,11 +2,18 @@
 Admin finance endpoints for Zoho Books store configuration and journal audit logs.
 
 Endpoints:
-  GET  /api/admin/finance/store-config/           — list all ZohoBooksStoreConfig records
-  GET  /api/admin/finance/store-config/<store_id>/ — get config for a store
-  PUT  /api/admin/finance/store-config/<store_id>/ — create or update config (partial update)
-  GET  /api/admin/finance/journals/               — paginated journal log list
-  POST /api/admin/finance/journals/<id>/retry/    — retry a failed journal
+  GET    /api/admin/zoho-books-config/              — list all ZohoBooksStoreConfig records
+  POST   /api/admin/zoho-books-config/              — create a config for a store
+  GET    /api/admin/zoho-books-config/?store_id=1   — get config for a store
+  PATCH  /api/admin/zoho-books-config/?store_id=1   — partial update config
+  PUT    /api/admin/zoho-books-config/?store_id=1   — full update / create-or-replace config
+  DELETE /api/admin/zoho-books-config/?store_id=1   — delete config for a store
+
+  GET  /api/admin/finance/store-config/            — list all ZohoBooksStoreConfig records (legacy)
+  GET  /api/admin/finance/store-config/<store_id>/ — get config for a store (legacy)
+  PUT  /api/admin/finance/store-config/<store_id>/ — create or update config (legacy)
+  GET  /api/admin/finance/journals/                — paginated journal log list
+  POST /api/admin/finance/journals/<id>/retry/     — retry a failed journal
 """
 from __future__ import annotations
 
@@ -22,6 +29,8 @@ from rest_framework.views import APIView
 from catalog.models import Store, ZohoBooksStoreConfig
 from shop.models import Order, ZohoBooksJournalLog
 
+from .activity_log_utils import record_admin_activity
+from .models import AdminActivityLog
 from .orders import _paginate_queryset, _parse_order_list_date
 from .views import IsStaffUser
 
@@ -139,7 +148,211 @@ class ZohoBooksJournalLogSerializer(serializers.ModelSerializer):
 
 
 # ---------------------------------------------------------------------------
-# Views — Store Config
+# Views — Store Config (dedicated CRUD with zoho-books-config permissions)
+# ---------------------------------------------------------------------------
+
+def _parse_zoho_config_store_id(request):
+    """Parse and validate store_id from query params. Returns (store_id, error_response)."""
+    raw = (request.query_params.get('store_id') or '').strip()
+    if not raw:
+        return None, Response(
+            {'detail': 'Query parameter store_id is required.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if not raw.isdigit():
+        return None, Response(
+            {'detail': 'Query parameter store_id must be a positive integer.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return int(raw), None
+
+
+class AdminZohoBooksConfigListCreateAPIView(APIView):
+    """
+    GET    /api/admin/zoho-books-config/             — list all configs
+    POST   /api/admin/zoho-books-config/             — create config (store_id in body)
+    GET    /api/admin/zoho-books-config/?store_id=1  — get config for a store
+    PATCH  /api/admin/zoho-books-config/?store_id=1  — partial update
+    PUT    /api/admin/zoho-books-config/?store_id=1  — upsert (create or replace)
+    DELETE /api/admin/zoho-books-config/?store_id=1  — delete config
+    """
+
+    permission_classes = [IsAuthenticated, IsStaffUser]
+
+    def get(self, request):
+        self.required_permission_codes = ['zoho-books-config.view']
+        store_id_raw = (request.query_params.get('store_id') or '').strip()
+
+        # If store_id provided — return single config
+        if store_id_raw:
+            if not store_id_raw.isdigit():
+                return Response(
+                    {'detail': 'Query parameter store_id must be a positive integer.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            store = get_object_or_404(Store, pk=int(store_id_raw))
+            try:
+                config = store.zoho_books_config
+            except ZohoBooksStoreConfig.DoesNotExist:
+                return Response(
+                    {
+                        'detail': 'No config found for this store.',
+                        'store_id': store.pk,
+                        'store_name': store.name,
+                    },
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            return Response(
+                ZohoBooksStoreConfigSerializer(config).data,
+                status=status.HTTP_200_OK,
+            )
+
+        # No store_id — return full list
+        configs = (
+            ZohoBooksStoreConfig.objects
+            .select_related('store')
+            .order_by('store__name')
+        )
+        return Response(
+            ZohoBooksStoreConfigSerializer(configs, many=True).data,
+            status=status.HTTP_200_OK,
+        )
+
+    def post(self, request):
+        self.required_permission_codes = ['zoho-books-config.manage']
+        raw_store_id = request.data.get('store_id')
+        if not raw_store_id:
+            return Response(
+                {'detail': 'store_id is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        store = get_object_or_404(Store, pk=raw_store_id)
+
+        if ZohoBooksStoreConfig.objects.filter(store=store).exists():
+            return Response(
+                {'detail': 'A config already exists for this store. Use PATCH or PUT to update.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ser = ZohoBooksStoreConfigWriteSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        config = ser.save(store=store)
+
+        record_admin_activity(
+            request,
+            category=AdminActivityLog.Category.STORES,
+            action='zoho_books_config_create',
+            message=f'Created Zoho Books config for store "{store.name}"',
+            target_type='ZohoBooksStoreConfig',
+            target_id=store.pk,
+        )
+
+        return Response(
+            ZohoBooksStoreConfigSerializer(config).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    def patch(self, request):
+        self.required_permission_codes = ['zoho-books-config.manage']
+        store_id, err = _parse_zoho_config_store_id(request)
+        if err:
+            return err
+        store = get_object_or_404(Store, pk=store_id)
+        try:
+            config = store.zoho_books_config
+        except ZohoBooksStoreConfig.DoesNotExist:
+            return Response(
+                {
+                    'detail': 'No config found for this store. Use POST to create one.',
+                    'store_id': store.pk,
+                    'store_name': store.name,
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        ser = ZohoBooksStoreConfigWriteSerializer(config, data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        config = ser.save()
+
+        record_admin_activity(
+            request,
+            category=AdminActivityLog.Category.STORES,
+            action='zoho_books_config_update',
+            message=f'Updated Zoho Books config for store "{store.name}"',
+            target_type='ZohoBooksStoreConfig',
+            target_id=store.pk,
+        )
+
+        return Response(
+            ZohoBooksStoreConfigSerializer(config).data,
+            status=status.HTTP_200_OK,
+        )
+
+    def put(self, request):
+        self.required_permission_codes = ['zoho-books-config.manage']
+        store_id, err = _parse_zoho_config_store_id(request)
+        if err:
+            return err
+        store = get_object_or_404(Store, pk=store_id)
+        try:
+            config = store.zoho_books_config
+            created = False
+        except ZohoBooksStoreConfig.DoesNotExist:
+            config = ZohoBooksStoreConfig(store=store)
+            created = True
+
+        ser = ZohoBooksStoreConfigWriteSerializer(config, data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        config = ser.save()
+
+        record_admin_activity(
+            request,
+            category=AdminActivityLog.Category.STORES,
+            action='zoho_books_config_create' if created else 'zoho_books_config_update',
+            message=f'{"Created" if created else "Updated"} Zoho Books config for store "{store.name}"',
+            target_type='ZohoBooksStoreConfig',
+            target_id=store.pk,
+        )
+
+        return Response(
+            ZohoBooksStoreConfigSerializer(config).data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+    def delete(self, request):
+        self.required_permission_codes = ['zoho-books-config.manage']
+        store_id, err = _parse_zoho_config_store_id(request)
+        if err:
+            return err
+        store = get_object_or_404(Store, pk=store_id)
+        try:
+            config = store.zoho_books_config
+        except ZohoBooksStoreConfig.DoesNotExist:
+            return Response(
+                {
+                    'detail': 'No config found for this store.',
+                    'store_id': store.pk,
+                    'store_name': store.name,
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        config.delete()
+
+        record_admin_activity(
+            request,
+            category=AdminActivityLog.Category.STORES,
+            action='zoho_books_config_delete',
+            message=f'Deleted Zoho Books config for store "{store.name}"',
+            target_type='ZohoBooksStoreConfig',
+            target_id=store.pk,
+        )
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------------------
+# Views — Store Config (legacy finance endpoints — kept for backward compat)
 # ---------------------------------------------------------------------------
 
 class AdminFinanceStoreConfigListAPIView(APIView):

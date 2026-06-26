@@ -150,6 +150,46 @@ class AdminStoreListAPIView(APIView):
         )
 
 
+class AdminStoreWithBooksConfigListAPIView(APIView):
+    """GET /api/admin/stores/with-books-config/ — only stores that have a ZohoBooksStoreConfig."""
+
+    permission_classes = [IsAuthenticated, IsStaffUser]
+
+    def get(self, request):
+        qs = _apply_store_list_filters(
+            _admin_stores_queryset().filter(zoho_books_config__isnull=False),
+            request,
+        )
+        page_qs, pagination = _paginate_queryset(qs, request)
+        return Response(
+            {
+                **pagination,
+                "results": AdminStoreListSerializer(page_qs, many=True).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminStoreWithoutBooksConfigListAPIView(APIView):
+    """GET /api/admin/stores/without-books-config/ — only stores that have no ZohoBooksStoreConfig."""
+
+    permission_classes = [IsAuthenticated, IsStaffUser]
+
+    def get(self, request):
+        qs = _apply_store_list_filters(
+            _admin_stores_queryset().filter(zoho_books_config__isnull=True),
+            request,
+        )
+        page_qs, pagination = _paginate_queryset(qs, request)
+        return Response(
+            {
+                **pagination,
+                "results": AdminStoreListSerializer(page_qs, many=True).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class AdminStoreVisibilityUpdateAPIView(APIView):
     """PATCH /api/admin/stores/visibility/?store_id=<store_id>"""
 

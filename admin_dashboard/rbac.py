@@ -17,6 +17,7 @@ MODULE_REQUIRED_ACTION = {
     "banners": {"GET": "view", "POST": "manage", "PATCH": "manage"},
     "cms": {"GET": "view", "POST": "manage", "PATCH": "manage"},
     "finance": {"GET": "view", "POST": "manage", "PATCH": "manage"},
+    "zoho-books-config": {"GET": "view", "POST": "manage", "PATCH": "manage", "PUT": "manage", "DELETE": "manage"},
     "transactions": {"GET": "view"},
     "super-coins": {"GET": "view", "POST": "manage", "PATCH": "manage"},
     "activity-logs": {"GET": "view"},

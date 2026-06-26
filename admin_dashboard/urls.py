@@ -17,6 +17,7 @@ from .finance import (
     AdminFinanceJournalRetryAPIView,
     AdminFinanceStoreConfigDetailAPIView,
     AdminFinanceStoreConfigListAPIView,
+    AdminZohoBooksConfigListCreateAPIView,
 )
 from .orders import (
     AdminOrderCollectCardAPIView,
@@ -52,6 +53,8 @@ from .stores import (
     AdminStoreListAPIView,
     AdminStoreReorderAPIView,
     AdminStoreVisibilityUpdateAPIView,
+    AdminStoreWithBooksConfigListAPIView,
+    AdminStoreWithoutBooksConfigListAPIView,
 )
 from .reports import (
     AdminCartAbandonmentReportAPIView,
@@ -126,6 +129,8 @@ urlpatterns = [
     path('stores/', AdminStoreListAPIView.as_view(), name='admin-stores-list'),
     path('stores/reorder/', AdminStoreReorderAPIView.as_view(), name='admin-stores-reorder'),
     path('stores/visibility/', AdminStoreVisibilityUpdateAPIView.as_view(), name='admin-stores-visibility'),
+    path('stores/with-books-config/', AdminStoreWithBooksConfigListAPIView.as_view(), name='admin-stores-with-books-config'),
+    path('stores/without-books-config/', AdminStoreWithoutBooksConfigListAPIView.as_view(), name='admin-stores-without-books-config'),
     path('banners/', AdminBannerListCreateAPIView.as_view(), name='admin-banners-list-create'),
     path('banners/reorder/', AdminBannerReorderAPIView.as_view(), name='admin-banners-reorder'),
     path('cms/faqs/', AdminFAQListCreateAPIView.as_view(), name='admin-cms-faqs-list-create'),
@@ -157,4 +162,7 @@ urlpatterns = [
     path('finance/store-config/<int:store_id>/', AdminFinanceStoreConfigDetailAPIView.as_view(), name='admin-finance-store-config-detail'),
     path('finance/journals/', AdminFinanceJournalListAPIView.as_view(), name='admin-finance-journals-list'),
     path('finance/journals/<int:pk>/retry/', AdminFinanceJournalRetryAPIView.as_view(), name='admin-finance-journals-retry'),
+
+    # Zoho Books Store Config — dedicated CRUD with zoho-books-config permissions
+    path('zoho-books-config/', AdminZohoBooksConfigListCreateAPIView.as_view(), name='admin-zoho-books-config'),
 ]
