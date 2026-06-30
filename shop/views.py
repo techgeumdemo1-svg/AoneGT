@@ -1679,13 +1679,17 @@ class CheckoutAPIView(APIView):
 
         from shop.services.checkout_async import (
             checkout_async_zoho_enabled,
+            checkout_zoho_sync_before_response,
             schedule_checkout_zoho_sales_order,
             schedule_confirmation_email,
             sync_checkout_zoho_sales_order,
         )
 
         books_manual = getattr(settings, 'ZOHO_BOOKS_MANUAL_WORKFLOW', False)
-        if checkout_async_zoho_enabled():
+        sync_before_response = checkout_zoho_sync_before_response(
+            books_manual_workflow=books_manual,
+        )
+        if checkout_async_zoho_enabled() and not sync_before_response:
             zoho_sync_pending = schedule_checkout_zoho_sales_order(
                 order.pk,
                 books_manual_workflow=books_manual,

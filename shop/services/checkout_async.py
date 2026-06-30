@@ -19,6 +19,20 @@ def checkout_async_zoho_enabled() -> bool:
     return getattr(settings, 'CHECKOUT_ASYNC_ZOHO_SYNC', True)
 
 
+def checkout_zoho_sync_before_response(*, books_manual_workflow: bool) -> bool:
+    """
+    When True, Zoho sales-order creation must finish before the checkout HTTP
+    response so the client receives zoho_books_salesorder_id (or Commerce id).
+    """
+    if books_manual_workflow:
+        from shop.services.zoho_books_sales_order import zoho_books_sales_order_enabled
+
+        return zoho_books_sales_order_enabled()
+    from shop.services.zoho_sales_order import zoho_commerce_sales_order_enabled
+
+    return zoho_commerce_sales_order_enabled()
+
+
 def sync_checkout_zoho_sales_order(order_id: int, *, books_manual_workflow: bool) -> None:
     """Create Zoho sales order for a placed order."""
     if books_manual_workflow:
