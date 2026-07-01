@@ -393,6 +393,24 @@ def _persist_user_books_contact_id(user, contact_id: str) -> None:
     user.zoho_books_contact_id = contact_id[:64]
 
 
+def _clear_user_books_contact_id(user) -> None:
+    if not (getattr(user, 'zoho_books_contact_id', '') or '').strip():
+        return
+    from accounts.models import User
+
+    User.objects.filter(pk=user.pk).update(zoho_books_contact_id='')
+    user.zoho_books_contact_id = ''
+
+
+def _books_contact_usable(contact_id: str, *, store) -> bool:
+    """True when contact exists and is active in this store's Zoho Books org."""
+    contact = books_get_contact(contact_id, store=store)
+    if not contact:
+        return False
+    status = str(contact.get('status') or '').strip().lower()
+    return status not in ('inactive', 'deleted')
+
+
 def _resolve_customer_id(order: Order) -> str:
     user = order.user
     store = order.store
@@ -407,13 +425,21 @@ def _resolve_customer_id(order: Order) -> str:
     if not name:
         name = email or f'Customer {user.pk}'
 
-    # Branch 1 — stored contact id: use immediately on checkout (fast path).
+    # Branch 1 — stored contact id (validate in this store's Books org first).
     stored = (getattr(user, 'zoho_books_contact_id', '') or '').strip()
     if stored:
-        from shop.services.checkout_async import schedule_books_contact_name_update
+        if _books_contact_usable(stored, store=store):
+            from shop.services.checkout_async import schedule_books_contact_name_update
 
-        schedule_books_contact_name_update(stored, name, store)
-        return stored
+            schedule_books_contact_name_update(stored, name, store)
+            return stored
+        logger.warning(
+            'zoho-books: stored contact not usable contact_id=%s user=%s store=%s — re-resolving',
+            stored,
+            user.pk,
+            getattr(store, 'pk', None),
+        )
+        _clear_user_books_contact_id(user)
 
     # Branch 2 — search by email (most reliable, exact match)
     existing = books_find_contact_id_by_email(email, store=store) if email else None
@@ -1016,6 +1042,8 @@ def _invoice_tax_summary_label(row: dict, order: Order | None = None) -> str:
         pct = _invoice_line_vat_percent(row, order)
     pct = pct.quantize(Decimal('0.01'))
     tax_name = (row.get('tax_name') or '').strip()
+    if tax_name.lower() in ('standard rate', 'standard'):
+        tax_name = 'VAT'
     if pct <= 0 and not tax_name:
         return 'Exempt'
     if tax_name:
@@ -1024,7 +1052,7 @@ def _invoice_tax_summary_label(row: dict, order: Order | None = None) -> str:
         if pct > 0:
             return f'{tax_name} ({pct}%)'
         return tax_name
-    return f'Standard Rate ({pct}%)'
+    return f'VAT ({pct}%)'
 
 
 def _invoice_build_tax_summary(line_items: list[dict], *, order: Order | None = None) -> list[dict]:
