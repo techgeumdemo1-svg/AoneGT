@@ -2,6 +2,8 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Optional, Tuple
 
+from django.db.models import Q, Value
+from django.db.models.functions import Coalesce, Concat
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import serializers, status
@@ -115,6 +117,56 @@ def _normalize_payment_method(raw: str) -> Optional[str]:
 def _invalid_payment_method_message() -> str:
     values = ", ".join(choice.value for choice in Order.PaymentMethod)
     return f"Invalid payment_method. Allowed values: {values}."
+
+
+_ORDER_CODE_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def _decode_order_code_to_pk(code: str) -> Optional[int]:
+    """Reverse the base-36 order code (see order_code_for_order) back to a pk."""
+    cleaned = (code or "").strip().upper().lstrip("0")
+    if not cleaned:
+        return None
+    num = 0
+    for ch in cleaned:
+        idx = _ORDER_CODE_ALPHABET.find(ch)
+        if idx < 0:
+            return None
+        num = num * 36 + idx
+    return num or None
+
+
+def _order_search_q(search: str) -> Optional[Q]:
+    """
+    Build a search filter for admin order lists.
+
+    Matches on order number (6-char code, raw id, or Zoho sales order id) and
+    customer name (first/last/full) or email. Requires the queryset to be
+    annotated with ``_customer_full_name`` (see _apply_order_list_filters).
+    """
+    search = (search or "").strip()
+    if not search:
+        return None
+
+    query = (
+        Q(user__email__icontains=search)
+        | Q(user__first_name__icontains=search)
+        | Q(user__last_name__icontains=search)
+        | Q(_customer_full_name__icontains=search)
+    )
+
+    if search.isdigit():
+        query |= Q(pk=int(search))
+
+    pk_from_code = _decode_order_code_to_pk(search)
+    if pk_from_code is not None:
+        query |= Q(pk=pk_from_code)
+
+    zoho_tail = "".join(ch for ch in search.upper() if ch.isalnum()).lstrip("0")
+    if zoho_tail:
+        query |= Q(zoho_salesorder_id__icontains=zoho_tail)
+
+    return query
 
 
 def _display_status_for_order(order: Order) -> str:
@@ -540,10 +592,16 @@ def _apply_order_list_filters(
 
     search = (request.query_params.get("search") or "").strip()
     if search:
-        if search.isdigit():
-            queryset = queryset.filter(pk=int(search))
-        else:
-            queryset = queryset.filter(user__email__icontains=search)
+        queryset = queryset.annotate(
+            _customer_full_name=Concat(
+                Coalesce("user__first_name", Value("")),
+                Value(" "),
+                Coalesce("user__last_name", Value("")),
+            ),
+        )
+        search_q = _order_search_q(search)
+        if search_q is not None:
+            queryset = queryset.filter(search_q)
 
     store_id = (request.query_params.get("store_id") or "").strip()
     if store_id.isdigit():
