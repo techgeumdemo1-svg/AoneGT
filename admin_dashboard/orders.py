@@ -87,6 +87,36 @@ def _normalize_admin_status(raw: str) -> Optional[str]:
     return _ADMIN_STATUS_ALIASES.get(key)
 
 
+_PAYMENT_METHOD_ALIASES = {
+    "cod": Order.PaymentMethod.CASH_ON_DELIVERY.value,
+    "cash": Order.PaymentMethod.CASH_ON_DELIVERY.value,
+    "cash_on_delivery": Order.PaymentMethod.CASH_ON_DELIVERY.value,
+    "card": Order.PaymentMethod.CARD_ON_DELIVERY.value,
+    "card_on_delivery": Order.PaymentMethod.CARD_ON_DELIVERY.value,
+    "gateway": Order.PaymentMethod.PAYMENT_GATEWAY.value,
+    "payment_gateway": Order.PaymentMethod.PAYMENT_GATEWAY.value,
+    "paylink": Order.PaymentMethod.PAY_BY_LINK.value,
+    "pay_by_link": Order.PaymentMethod.PAY_BY_LINK.value,
+}
+
+
+def _normalize_payment_method(raw: str) -> Optional[str]:
+    key = (raw or "").strip().lower()
+    if not key:
+        return None
+    if key in _PAYMENT_METHOD_ALIASES:
+        return _PAYMENT_METHOD_ALIASES[key]
+    for choice in Order.PaymentMethod:
+        if key == choice.value or key == choice.label.lower():
+            return choice.value
+    return None
+
+
+def _invalid_payment_method_message() -> str:
+    values = ", ".join(choice.value for choice in Order.PaymentMethod)
+    return f"Invalid payment_method. Allowed values: {values}."
+
+
 def _display_status_for_order(order: Order) -> str:
     return order_display_status(order)
 
@@ -460,7 +490,13 @@ def _apply_order_date_filter(queryset, request) -> Tuple[object, Optional[str], 
     )
 
 
-def _apply_order_list_filters(queryset, request, *, forced_status: Optional[str] = None):
+def _apply_order_list_filters(
+    queryset,
+    request,
+    *,
+    forced_status: Optional[str] = None,
+    forced_payment_methods: Optional[list] = None,
+):
     status_filter = (forced_status or request.query_params.get("status") or "").strip()
     applied_status = None
     if status_filter:
@@ -476,6 +512,32 @@ def _apply_order_list_filters(queryset, request, *, forced_status: Optional[str]
         else:
             queryset = queryset.filter(status=status_filter)
 
+    applied_payment_methods = None
+    raw_payment_method = (request.query_params.get("payment_method") or "").strip()
+    if forced_payment_methods:
+        allowed = list(dict.fromkeys(forced_payment_methods))
+        if raw_payment_method:
+            normalized_pm = _normalize_payment_method(raw_payment_method)
+            if not normalized_pm:
+                return queryset, _invalid_payment_method_message(), None, applied_status, None
+            if normalized_pm not in allowed:
+                return (
+                    queryset,
+                    f"payment_method must be one of: {', '.join(allowed)}.",
+                    None,
+                    applied_status,
+                    None,
+                )
+            allowed = [normalized_pm]
+        queryset = queryset.filter(payment_method__in=allowed)
+        applied_payment_methods = allowed
+    elif raw_payment_method:
+        normalized_pm = _normalize_payment_method(raw_payment_method)
+        if not normalized_pm:
+            return queryset, _invalid_payment_method_message(), None, applied_status, None
+        queryset = queryset.filter(payment_method=normalized_pm)
+        applied_payment_methods = [normalized_pm]
+
     search = (request.query_params.get("search") or "").strip()
     if search:
         if search.isdigit():
@@ -488,17 +550,23 @@ def _apply_order_list_filters(queryset, request, *, forced_status: Optional[str]
         queryset = queryset.filter(store_id=int(store_id))
 
     queryset, date_err, date_meta = _apply_order_date_filter(queryset, request)
-    return queryset, date_err, date_meta, applied_status
+    return queryset, date_err, date_meta, applied_status, applied_payment_methods
 
 
-def _admin_orders_list_response(request, *, forced_status: Optional[str] = None):
-    qs, date_err, date_filter, applied_status = _apply_order_list_filters(
+def _admin_orders_list_response(
+    request,
+    *,
+    forced_status: Optional[str] = None,
+    forced_payment_methods: Optional[list] = None,
+):
+    qs, err, date_filter, applied_status, applied_payment_methods = _apply_order_list_filters(
         _admin_orders_queryset().order_by("-created_at"),
         request,
         forced_status=forced_status,
+        forced_payment_methods=forced_payment_methods,
     )
-    if date_err:
-        return Response({"detail": date_err}, status=status.HTTP_400_BAD_REQUEST)
+    if err:
+        return Response({"detail": err}, status=status.HTTP_400_BAD_REQUEST)
 
     page_qs, pagination = _paginate_queryset(qs, request)
     payload = {
@@ -509,6 +577,8 @@ def _admin_orders_list_response(request, *, forced_status: Optional[str] = None)
         payload["date_filter"] = date_filter
     if applied_status:
         payload["status_filter"] = applied_status
+    if applied_payment_methods:
+        payload["payment_method_filter"] = applied_payment_methods
     return Response(payload, status=status.HTTP_200_OK)
 
 
@@ -647,6 +717,28 @@ class AdminCancelledOrderListAPIView(APIView):
 
     def get(self, request):
         return _admin_orders_list_response(request, forced_status='cancelled')
+
+
+class AdminPayOnDeliveryOrderListAPIView(APIView):
+    """
+    GET /api/admin/orders/pay-on-delivery/ — paginated cash + card on delivery orders.
+
+    Query params:
+      payment_method — optional; narrow to one method. Accepts cash_on_delivery,
+                       card_on_delivery (aliases: cod/cash, card). Omit to include both.
+      status, search, store_id, period/date_from/date_to — same as the main order list.
+    """
+
+    permission_classes = [IsAuthenticated, IsStaffUser]
+
+    def get(self, request):
+        return _admin_orders_list_response(
+            request,
+            forced_payment_methods=[
+                Order.PaymentMethod.CASH_ON_DELIVERY.value,
+                Order.PaymentMethod.CARD_ON_DELIVERY.value,
+            ],
+        )
 
 
 class AdminOrderDetailAPIView(APIView):

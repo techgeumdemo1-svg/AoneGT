@@ -333,6 +333,7 @@ def _parse_dashboard_period(raw: str) -> int:
 
 class AdminDashboardChartsAPIView(APIView):
     permission_classes = [IsAuthenticated, IsStaffUser]
+    required_permission_codes = ["dashboard.view_charts"]
 
     def get(self, request):
         days = _parse_dashboard_period(request.query_params.get("period"))
